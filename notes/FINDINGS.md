@@ -125,6 +125,27 @@ Next: wire NandController into the probe as the 0xA0A00000 handler and let a
 NAND-aware boot flow (with the DMA/ADM command path from nand.c) actually read
 pages; then decide QEMU board vs continue Unicorn for the MMU/stage hand-off.
 
+## SESSION 2c — Phase 3: stages run on a MICROKERNEL (major finding)
+tools/stage_runner.py loads APPS/AMSS ELF PT_LOAD segments directly, models
+peripherals + NAND, jumps to e_entry, measures reach:
+- APPS  (entry 0x10000000): ran 318K insns, then EXCEPTION at 0x103dcd14 =
+  `svc #0x14` (preceded by `mvn sp,#0x4b`). Touched NO MMIO before it.
+- AMSS  (entry 0x00a00000): ran 285K insns, then EXCEPTION at 0x16e9aa58 =
+  the IDENTICAL `svc #0x14` thunk. Also no MMIO.
+INTERPRETATION: both stages are microkernel TASKS, not bare-metal. The shared
+`mvn sp,#0x4b; svc #0x14` thunk is a syscall into Qualcomm's REX-on-L4/Iguana
+microkernel. Running a stage standalone hits its first kernel syscall almost
+immediately (task/thread setup). This means a pure-LLE path must EITHER emulate
+the L4 microkernel syscalls (svc handlers) OR boot the whole chain so the kernel
+is present. Neither stage touches the NAND controller in this early window
+(confirming the NAND model is for the boot/loader phase, not the running stage).
+CONSEQUENCE for ROADMAP: Phase 4 is really "L4 microkernel boundary", bigger and
+earlier than "modem RPC + Adreno". The tractable next step is an SVC hook that
+decodes svc #0x14 and the following calls to map the microkernel ABI — OR pivot
+to a QEMU board and let a full-chain boot bring the kernel up. Recommend the SVC
+ABI mapping first (cheap, in Unicorn) to learn the syscall surface before
+committing to full kernel emulation.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
