@@ -168,6 +168,29 @@ QEMU full-chain boot.
 Constants: L4 syscall thunk `mov ip,sp; mvn sp,#N; svc #imm`; first call
 svc#0x14 sel ~0x4b; APPS relocates into low RAM (~0x01d40000 region).
 
+## SESSION 2e — KERNEL IDENTIFIED: L4e (Pistachio-embedded) + REX RTOS
+Strings in AMSS/APPS pin the microkernel exactly:
+- `l4e_min_pagesize()`, `L4_Restore fell through!!!`, `base % l4e_min_pagesize()
+  == 0` -> NICTA L4-embedded (L4e / Pistachio-embedded, the OKL4 lineage).
+- `rex_self()`, `rex_is_in_irq_mode()`, `rex_get_timer()`, `&*_tcb` -> Qualcomm's
+  REX RTOS running as tasks ON TOP of L4e. This is the classic AMSS architecture.
+So the `svc #0x14` sel ~0x4b is an L4e system call (SP-magic ABI). Benign all-zero
+returns are WRONG: after the svc, the stub stores r1/r2/r3 through caller output
+pointers and computes addresses from them; returning 0 makes APPS derail into a
+7M-instruction NOP-slide through zeroed RAM (0x01d4d788 -> 0x03801688, purely
+sequential, no syscalls/MMIO) — proof that the syscall's RESULT semantics matter.
+CONCLUSION (honest): the real Phase-4 boundary is implementing L4e syscall
+semantics, not just cataloging them. The recon did its job — it identified the
+exact kernel (so we can use the public L4e/Pistachio-embedded syscall ABI as
+reference) and proved a zero-stub is insufficient. Decision point for next
+session: (a) build a minimal L4e syscall shim keyed to sel ~0x4b using the
+Pistachio-embedded ABI, or (b) pivot to a QEMU full-chain boot so the real L4e
+kernel is present and dispatches its own syscalls. Given a real kernel with TCBs/
+IPC/timers is involved, (b) is now the honest higher-probability path to a
+running system; (a) remains useful to learn which syscalls REX actually needs.
+Refs to pull next session: Pistachio-embedded / OKL4 ARM syscall ABI (SP-selector
+magic values), REX task model.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
