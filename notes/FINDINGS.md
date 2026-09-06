@@ -85,6 +85,25 @@ placed AMSS/APPS in RAM, so the jump target is empty. The bootloader cannot
 proceed past hand-off without those two pieces. This is the natural ceiling of
 the "run APPSBL alone" approach — and the exact next milestone.
 
+## SESSION 2 — root cause of the "fall off the end", corrected (2026-09-06)
+Armed with the arch_msm7k register map, re-diagnosed the standalone APPSBL end.
+Session-1's "NAND hand-off" guess was WRONG. Real sequence:
+1. Peripheral init REAL and complete: VIC(0xC0000000)+GPT(0xC0100000)+
+   DMOV/ADM(0xA9700000 — the "24 channels" are DMA channels, NOT clock-gates)+
+   GPIO1(0xA9200000)+MDDI(0xAA600000, NOT UART). 41 MMIO regs, no error halt.
+2. A calibrated software udelay at 0x8e0-0x8f0 (r0=r0*11>>5; subs;bgt) burned ALL
+   54M instructions. Forcing r0=1 at 0x8ec cut the run to 2.4M insns with the
+   IDENTICAL endpoint -> the delay masks nothing; emulator must special-case it.
+3. True transition: after last MDDI write (pc 0x8d78), boot returns and calls
+   0x730 = CP15 MMU bring-up: TTBR(c2,c0,0)=0x00028000 (page table built by
+   bl 0x142c), SCTLR(c1,c0,0)|=1 MMU ENABLE at 0x77c (SCTLR literal 0x00c50070),
+   peripheral-port remap mcr c15,c2,4.
+4. After MMU-on the boot jumps to its virtual entry, which should hold the NEXT
+   stage (NAND-loaded) we never populated -> execution slides through zeroed RAM.
+CONCLUSION: real boundary = MMU/TTBR + NAND-loaded next stage (ROADMAP Phase2/3),
+now with exact CP15 values. Standalone-APPSBL RE essentially DONE.
+Constants: TTBR=0x28000, SCTLR=0x00c50070, udelay@0x8e0, mmu@0x730, ptbuild@0x142c.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
