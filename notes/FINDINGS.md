@@ -104,6 +104,27 @@ CONCLUSION: real boundary = MMU/TTBR + NAND-loaded next stage (ROADMAP Phase2/3)
 now with exact CP15 values. Standalone-APPSBL RE essentially DONE.
 Constants: TTBR=0x28000, SCTLR=0x00c50070, udelay@0x8e0, mmu@0x730, ptbuild@0x142c.
 
+## SESSION 2b — Phase 2 NAND controller DONE + MMU boundary characterized
+MMU dead-end (do not re-chase): the standalone APPSBL does ZERO writes to the
+page table at TTBR=0x28000 — it assumes a prior PBL/boot-ROM built it AND that
+the next stage is already NAND-loaded. Unicorn doesn't model ARMv6 FCSE/PID, so
+chasing MMU-on semantics in Unicorn is a blind alley. The real unblock is the
+NAND path + loading the next stage, then re-evaluating on a QEMU board.
+
+NAND controller model DELIVERED: tools/nand_controller.py (0xA0A00000), a
+behavioral EBI2 controller transcribed from zloader nand.h, backed by the dump.
+Self-tests (run `python3 tools/nand_controller.py`) PASS:
+- geometry verified from the real images: 1.1.2.bin = 65536 pages @2048;
+  1.1.2_spare.bin = 65536 pages @2112 (2048 data + 64 spare).
+- FETCH_ID returns the real 0x5580b1ad.
+- PAGE_READ returns dump bytes verbatim (page 0 head matches).
+- APPSBL is page-aligned inside NAND at 0x16e0000 (page 11712), first word
+  18f09fe5 (ARM vector table). (Offsets 0x199c2c/0x1f9c2c are unaligned false
+  hits — ignore.)
+Next: wire NandController into the probe as the 0xA0A00000 handler and let a
+NAND-aware boot flow (with the DMA/ADM command path from nand.c) actually read
+pages; then decide QEMU board vs continue Unicorn for the MMU/stage hand-off.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
