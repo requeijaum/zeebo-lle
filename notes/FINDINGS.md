@@ -146,6 +146,28 @@ to a QEMU board and let a full-chain boot bring the kernel up. Recommend the SVC
 ABI mapping first (cheap, in Unicorn) to learn the syscall surface before
 committing to full kernel emulation.
 
+## SESSION 2d — L4 SVC ABI recon (Phase 4 recon, tool delivered)
+tools/l4_svc_recon.py installs a UC_HOOK_INTR handler that decodes each L4
+syscall (svc immediate + SP selector magic + r0-r7), returns benignly, and lets
+the task advance. Findings on APPS:
+- First syscall: `svc #0x14`, selector sp=0xffffffb4 (~0x4b), args r0-r2 are
+  OUTPUT pointers on the stack (0xffeffe0/dc/d8) — classic L4 ipc/thread call
+  returning values through caller-supplied pointers. (Unicorn advances PC past
+  the svc, so decode reads PC-4; high stack 0xffe00000 must be mapped or the
+  post-svc `strne r1,[r4]` faults.)
+- After a benign return (r0-r3=0), APPS runs 8M more instructions with NO further
+  syscall and settles into a loop at 0x01d4d788 in LOW RAM — i.e. it copied/
+  relocated code into low RAM and runs there (runtime image not backed by the
+  ELF file). Progress is real; the single early syscall was a setup/probe call.
+INTERPRETATION: the L4 syscall surface reachable early is tiny (one call), then
+the task self-relocates and runs. A minimal L4 shim may only need a handful of
+syscalls to get much further. Next recon: map the high stack properly, keep the
+run going past the relocation loop (raise insn budget / detect the loop head and
+let it settle), and catalog the FULL syscall set before deciding on a shim vs a
+QEMU full-chain boot.
+Constants: L4 syscall thunk `mov ip,sp; mvn sp,#N; svc #imm`; first call
+svc#0x14 sel ~0x4b; APPS relocates into low RAM (~0x01d40000 region).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
