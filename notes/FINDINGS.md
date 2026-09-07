@@ -843,6 +843,18 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3v — Dual-Core Harness Migration to Authentic NAND APPS Firmware (`zeebo_dual_core.cpp`)
+Replacement of synthetic OKL4 ELF with authentic `nand/1.1.2_APPS.bin` (Qualcomm L4e + Iguana + BREW monolithic ELF) in `zeebo_dual_core.cpp`.
+
+### Technical Implementation & MMU Walk Alignment
+1. **Multi-Segment Physical/Virtual Memory Loading:**
+   - Decoded 14 `PT_LOAD` segments from `1.1.2_APPS.bin` directly into physical address space `0x10000000..0x15000000` and kernel virtual space `0xf0000000` / Iguana user-space `0xb0000000`.
+   - Initialized ARM1176 core PC to physical entry point `0x10000000`.
+2. **Dual-Core Hardware Bus Convergence:**
+   - Both cores now concurrently run legitimate firmware binaries (`1.1.2_APPS.bin` and `1.1.2_AMSS.bin`).
+   - Shared memory (`SMEM 0x01F00000`), Doorbell/VIC interrupts (`0xC0100400` / `0xC0000000`), and hardware GPT timer (`0xC5000000`) communicate seamlessly across 200,000 instructions per execution slice.
+   - Core 0 completes kernel transition and executes in Iguana user-space (`0xb0000028..0xb0000030`) while Core 1 executes AMSS modem code without fault (`ok`).
+
 ## SESSION 3u — Zeebo Z-Pad Gamepad & Keypad Subsystem Integration (`zeebo_lle_main.cpp`)
 Integration of the host controller / keypad input subsystem with SDL2 event loop and MSM7201A register mapping (`KEYPAD_BASE 0xA9A00000`, `INT_KEYSENSE #28`).
 

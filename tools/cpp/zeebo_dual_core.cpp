@@ -110,6 +110,16 @@ static void core0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud)
 // Hook for Core 0 (L4e microkernel MMIO)
 static CoreState* g_core1_state = nullptr;
 
+static void core0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    u32 pc = 0;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    printf("[Core0 Unmapped] %s at 0x%08llx (size %d, val 0x%llx) at pc=0x%08x\n",
+           type == UC_MEM_WRITE_UNMAPPED ? "WRITE" : "READ",
+           (unsigned long long)addr, size, (unsigned long long)value, pc);
+    // Map dynamically to continue discovery
+    uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+}
+
 static void core0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
     // Inter-core doorbell: Core 0 writes to MSM_A2M_INT(n) at 0xC0100400 + n*4
     if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440 && type == UC_MEM_WRITE) {
@@ -157,10 +167,10 @@ int main(int argc, char** argv) {
     printf("===================================================================\n");
 
     const char* amss_path = argc > 1 ? argv[1] : "../../nand/1.1.2_AMSS.bin";
-    const char* okl4_path = argc > 2 ? argv[2] : "../../refs/okl4-arm-build/arm-kernel.elf";
+    const char* apps_path = argc > 2 ? argv[2] : "../../nand/1.1.2_APPS.bin";
 
     printf("[DualCore] AMSS image: %s\n", amss_path);
-    printf("[DualCore] L4e kernel: %s\n", okl4_path);
+    printf("[DualCore] APPS image: %s\n", apps_path);
 
     build_arm11_map();
 
@@ -190,6 +200,8 @@ int main(int argc, char** argv) {
     uc_mem_map(core1.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
     uc_mem_map(core0.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
     uc_mem_map(core1.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
+    uc_mem_map(core0.uc, 0xc0000000, 0x00010000, UC_PROT_ALL); // VIC
+    uc_mem_map(core1.uc, 0xc0000000, 0x00010000, UC_PROT_ALL); // VIC
     uc_mem_map(core0.uc, GPT_TIMER_BASE, GPT_TIMER_SIZE, UC_PROT_ALL);
     uc_mem_map(core1.uc, GPT_TIMER_BASE, GPT_TIMER_SIZE, UC_PROT_ALL);
 
@@ -202,14 +214,48 @@ int main(int argc, char** argv) {
     uc_mem_write(core0.uc, SMEM_BASE, &s_init, sizeof(s_init));
     uc_mem_write(core1.uc, SMEM_BASE, &s_init, sizeof(s_init));
 
-    // Setup memory for Core 0 (OKL4 L4e)
-    uc_mem_map(core0.uc, PLEB_RAM, 0x2000000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, 0xfd000000, 0x100000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, 0x00000000, 0x10000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, 0xe0000000, 0x01000000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, XSCALE_DEV, 0x2000000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, 0x41000000, 0x1000000, UC_PROT_ALL);
-    uc_mem_map(core0.uc, 0xe1000000, 0x0f000000, UC_PROT_ALL);
+    // Setup memory for Core 0 (Real MSM7201A APPS: L4e + Iguana + BREW)
+    // Physical RAM window (0x10000000..0x15000000 = 80MB)
+    uc_mem_map(core0.uc, 0x10000000, 0x05000000, UC_PROT_ALL);
+    // Virtual MMU mappings for L4e Kernel (0xf0000000) and Iguana User Space (0xb0000000)
+    uc_mem_map(core0.uc, 0xf0000000, 0x01000000, UC_PROT_ALL);
+    uc_mem_map(core0.uc, 0xb0000000, 0x02000000, UC_PROT_ALL);
+    uc_mem_map(core0.uc, 0x00000000, 0x00100000, UC_PROT_ALL); // Exception vectors
+
+    // Load Real APPS ELF into Core 0
+    FILE* f_apps = fopen(apps_path, "rb");
+    if (!f_apps) {
+        printf("[Fatal] Cannot open APPS ELF: %s\n", apps_path);
+        return 1;
+    }
+    fseek(f_apps, 0, SEEK_END); long sz_k = ftell(f_apps); fseek(f_apps, 0, SEEK_SET);
+    std::vector<u8> dk(sz_k); fread(dk.data(), 1, sz_k, f_apps); fclose(f_apps);
+    core0.entry = rd32(dk.data(), 24); // 0x10000000
+    u32 phoff_k = rd32(dk.data(), 28);
+    u16 phent_k = rd16(dk.data(), 42), phnum_k = rd16(dk.data(), 44);
+    printf("[DualCore] APPS ELF Entrypoint: 0x%08x, Segments: %u\n", core0.entry, phnum_k);
+
+    for (int i = 0; i < phnum_k; i++) {
+        size_t o = phoff_k + i * phent_k;
+        if (rd32(dk.data(), o) != 1) continue;
+        u32 pv = rd32(dk.data(), o+8), off = rd32(dk.data(), o+4);
+        u32 paddr = rd32(dk.data(), o+12);
+        u32 fs = rd32(dk.data(), o+16), ms = rd32(dk.data(), o+20);
+        u32 nmem = ms ? ms : fs; if (!nmem) continue;
+
+        std::vector<u8> seg(nmem, 0);
+        if (fs) { size_t cl = std::min((size_t)fs, seg.size()); memcpy(seg.data(), dk.data()+off, cl); }
+
+        // Map and write to virtual address
+        uc_mem_map(core0.uc, pv & ~0xFFFu, ((nmem+0xFFF)&~0xFFFu)+0x1000, UC_PROT_ALL);
+        uc_mem_write(core0.uc, pv, seg.data(), seg.size());
+
+        // Map and write to physical address if different
+        if (paddr && paddr != pv) {
+            uc_mem_map(core0.uc, paddr & ~0xFFFu, ((nmem+0xFFF)&~0xFFFu)+0x1000, UC_PROT_ALL);
+            uc_mem_write(core0.uc, paddr, seg.data(), seg.size());
+        }
+    }
 
     // Setup memory for Core 1 (AMSS)
     map_amss_common(core1.uc);
@@ -217,38 +263,6 @@ int main(int argc, char** argv) {
     uc_mem_map(core1.uc, 0x20000000, 0x1000000, UC_PROT_ALL);
     u32 t_init = 100000;
     uc_mem_write(core1.uc, 0xc5000108, &t_init, 4);
-
-    // Load OKL4 Kernel ELF into Core 0
-    FILE* f_okl4 = fopen(okl4_path, "rb");
-    if (!f_okl4) {
-        printf("[Fatal] Cannot open OKL4 kernel ELF: %s\n", okl4_path);
-        return 1;
-    }
-    fseek(f_okl4, 0, SEEK_END); long sz_k = ftell(f_okl4); fseek(f_okl4, 0, SEEK_SET);
-    std::vector<u8> dk(sz_k); fread(dk.data(), 1, sz_k, f_okl4); fclose(f_okl4);
-    core0.entry = rd32(dk.data(), 24);
-    u32 phoff_k = rd32(dk.data(), 28);
-    u16 phent_k = rd16(dk.data(), 42), phnum_k = rd16(dk.data(), 44);
-    for (int i = 0; i < phnum_k; i++) {
-        size_t o = phoff_k + i * phent_k;
-        if (rd32(dk.data(), o) != 1) continue;
-        u32 pv = rd32(dk.data(), o+8), off = rd32(dk.data(), o+4);
-        u32 fs = rd32(dk.data(), o+16), ms = rd32(dk.data(), o+20);
-        u32 nmem = ms ? ms : fs; if (!nmem) continue;
-        if (uc_mem_map(core0.uc, pv & ~0xFFFu, ((nmem+0xFFF)&~0xFFFu)+0x1000, UC_PROT_ALL) != UC_ERR_OK) {}
-        std::vector<u8> seg(nmem, 0);
-        if (fs) { size_t cl = std::min((size_t)fs, seg.size()); memcpy(seg.data(), dk.data()+off, cl); }
-        uc_mem_write(core0.uc, pv, seg.data(), seg.size());
-        u32 paddr = rd32(dk.data(), o+12);
-        if (paddr) uc_mem_write(core0.uc, paddr, seg.data(), seg.size());
-    }
-    u16 zero16 = 0;
-    uc_mem_write(core0.uc, 0xa010d054, &zero16, 2);
-    uc_mem_write(core0.uc, 0xf000d054, &zero16, 2);
-    for (int i = 0; i < 16; ++i) {
-        u32 desc = (0xa1000000 + i * 0x100000) | 0xc12;
-        uc_mem_write(core0.uc, 0xa0110000 + (0xe00 + i) * 4, &desc, 4);
-    }
 
     // Load AMSS ELF into Core 1
     FILE* f_amss = fopen(amss_path, "rb");
@@ -275,9 +289,10 @@ int main(int argc, char** argv) {
     }
 
     // Register hooks
-    uc_hook h_c0, h_m0, h_c1, h_m1;
+    uc_hook h_c0, h_m0, h_u0, h_c1, h_m1;
     uc_hook_add(core0.uc, &h_c0, UC_HOOK_CODE, (void*)core0_code_hook, &core0, 0, ~0ULL);
     uc_hook_add(core0.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)core0_mem_hook, &core0, 0, ~0ULL);
+    uc_hook_add(core0.uc, &h_u0, UC_HOOK_MEM_UNMAPPED, (void*)core0_unmapped_hook, &core0, 1, 0);
     uc_hook_add(core1.uc, &h_c1, UC_HOOK_CODE, (void*)core1_code_hook, &core1, 0, ~0ULL);
     uc_hook_add(core1.uc, &h_m1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)core1_mem_hook, &core1, 0, ~0ULL);
 
@@ -285,7 +300,7 @@ int main(int argc, char** argv) {
 
     // Interleaved execution slices
     const int SLICE_INSNS = 10000;
-    const int TOTAL_CYCLES = 10;
+    const int TOTAL_CYCLES = 20;
     for (int cycle = 0; cycle < TOTAL_CYCLES; cycle++) {
         // Step Core 0
         uc_err e0 = uc_emu_start(core0.uc, core0.entry, 0, 0, SLICE_INSNS);
