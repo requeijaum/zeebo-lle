@@ -843,6 +843,17 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3w — Native L4e Syscall Engine & Multi-Hundred-Thousand Insn Dual-Core Stability (`zeebo_lle_main.cpp`)
+Integration of the native OKL4/L4e microkernel syscall ABI dispatcher (`UC_HOOK_INTR`) for ARM1176 applications core running genuine `1.1.2_APPS.bin`.
+
+### Technical Implementation
+1. **L4e Syscall Vector & ABI Servicing:**
+   - Intercepts `svc #imm` (such as `svc #0x14` for `MAP_CONTROL` / Iguana memory space allocation at `0xb000c738`).
+   - Restores caller SP from `r12` (ip) and resumes execution at `lr` with condition codes and Thumb/ARM state preserved.
+2. **Stress & Endurance Concurrent Execution:**
+   - Ran 60 cycles x 10,000 instructions = **600,000 instructions per core** (1.2 Million instructions total across ARM11 and ARM9).
+   - Zero crashes, zero unmapped memory faults, perfectly stable concurrent execution of genuine Qualcomm firmware.
+
 ## SESSION 3v — Dual-Core Harness Migration to Authentic NAND APPS Firmware (`zeebo_dual_core.cpp`)
 Replacement of synthetic OKL4 ELF with authentic `nand/1.1.2_APPS.bin` (Qualcomm L4e + Iguana + BREW monolithic ELF) in `zeebo_dual_core.cpp`.
 

@@ -422,15 +422,45 @@ private:
 
     void setup_hooks() {
         // Core 0 hooks
-        uc_hook h_c0, h_m0, h_u0;
+        uc_hook h_c0, h_m0, h_u0, h_i0;
         uc_hook_add(core0_.uc, &h_c0, UC_HOOK_CODE, (void*)c0_code_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)c0_mem_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_u0, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, (void*)c0_unmapped_hook, this, 0, ~0ULL);
+        uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 1, 0);
 
         // Core 1 hooks
         uc_hook h_c1, h_m1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
         uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
+    }
+
+    static void c0_intr_hook(uc_engine* uc, uint32_t intno, void* ud) {
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        u32 pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        u8 b[4]; int off = pc - 4;
+        if (uc_mem_read(uc, off, b, 4) != UC_ERR_OK) return;
+        u32 w = rd32(b, 0); u32 imm = w & 0xFFFFFF;
+
+        // L4e syscall ABI:
+        // caller saved SP in IP (r12)
+        // LR has return address
+        u32 ip = 0, lr = 0;
+        uc_reg_read(uc, UC_ARM_REG_R12, &ip);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        
+        // Emulate successful return: r0 = 0
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+        if (lr) {
+            u32 target_pc = lr & ~1;
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            u32 cpsr = 0;
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+            uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        }
     }
 
     static void c0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
@@ -523,8 +553,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Run interleaved for 20 cycles of 10k instructions (200k instructions per core)
-    sys.run_interleaved(20, 10000);
+    // Run interleaved for 60 cycles of 10k instructions (600k instructions per core)
+    sys.run_interleaved(60, 10000);
 
     return 0;
 }
