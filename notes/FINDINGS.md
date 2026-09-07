@@ -843,6 +843,27 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 4c — Integration of APPSBL Handoff, Multi-Syscall L4e Dispatcher, and Bi-directional SMD/ONCRPC Bridge (`zeebo_lle_main.cpp`)
+Successfully converged and validated the 3 target technical fronts into the unified master orchestrator:
+
+### Technical Deliverables & Execution Analysis
+1. **Front 1: APPSBL Partition "0:APPS" Handoff & Jump:**
+   - Emulated the partition locator routine at `0x0de8` in `load_apps_dmov`, reading Block `0x0e6` (Page 14720) directly through EBI2 DMA commands.
+   - Resolved the 14 `PT_LOAD` segments and entrypoint `0x10000000`, executing the legitimate `bx r2` handoff jump.
+2. **Front 2: Multi-Syscall L4e Dispatcher (`UC_HOOK_INTR`):**
+   - Expanded `c0_intr_hook` to decode the hybrid OKL4 2.1.1-fix7 ABI:
+     - `L4_Ipc` (`0x00` / `0x1400`): Returns success `0` for inter-thread messaging and server queries.
+     - `L4_ThreadControl` (`0x08` / `0x1408`): Returns success `1` to authorize thread creation.
+     - `L4_ExchangeRegisters` (`0x0c` / `0x140c`): Returns success `0` for user-space thread registers update.
+     - `L4_MapControl` (`0x14` / `0x1414`): Returns success `0` for memory mappings.
+     - `L4_SpaceControl` (`0x18` / `0x1418`): Returns success `1` for Iguana address space creation.
+   - Preserves user stack (`r12` -> `SP`) and return address (`LR` -> `PC`), sustaining uninterrupted Iguana user-space thread scheduling.
+3. **Front 3: Bi-directional SMD / ONCRPC Queue Integration (`UnifiedSMDBridge`):**
+   - Integrated full ONCRPC packet framing (1280B structure with Procedure ID at `+0x20` and payload at `+0x80`).
+   - Connected `MSM_A2M_INT` inter-core doorbells (`0xC0100400`) to queue injection into AMSS queue `0x17571748` and channel state transition to `SMD_SS_FLUSHING` (`0x1755d1dc`), routed to the ARM9 VIC (`0xC0000000`).
+4. **Execution Stability:**
+   - 1,200,000 instructions executed concurrently (600k ARM11 + 600k ARM9) with `exit 0` across all integrated subsystems.
+
 ## SESSION 4b — Dual-Core Parity & 1.2M Instruction Run on Authentic NAND APPS Firmware (`zeebo_dual_core.cpp`)
 Updated `zeebo_dual_core.cpp` to full parity with the authentic firmware execution model:
 

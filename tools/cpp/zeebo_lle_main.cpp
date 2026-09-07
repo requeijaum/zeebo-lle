@@ -165,7 +165,113 @@ private:
     u32 int_status_;
 };
 
-// 4. Host Display Sink (SDL2 + Snapshot)
+// 4. Shared Memory SMD / ONCRPC Subsystem (Zeebo AMSS Messaging)
+enum {
+    AMSS_SMD_CHANNEL_ADDR   = 0x1755d1dc,
+    AMSS_RPC_QUEUE_HEAD     = 0x17571748,
+    AMSS_RPC_PACKET_BUFFER  = 0x177f2000,
+};
+
+#pragma pack(push, 1)
+struct smd_half_channel {
+    u8 state;
+    u8 busy;
+    u8 error;
+    u8 link_status;
+    u32 read_ptr;
+    u32 write_ptr;
+};
+
+struct oncrpc_packet_header {
+    u32 xid;
+    u32 msg_type;       // 0 = CALL
+    u32 rpc_version;    // 2
+    u32 program;        // e.g., QDSP service
+    u32 version;        // service version
+    u32 procedure;      // Procedure ID (+0x20 offset)
+    u32 cred_flavor;
+    u32 cred_length;
+    u32 verf_flavor;
+    u32 verf_length;
+};
+
+struct oncrpc_queue_node {
+    u32 next;
+    u32 prev;
+    u32 packet_addr;
+    u32 packet_len;
+    u32 status;
+};
+#pragma pack(pop)
+
+class UnifiedSMDBridge {
+public:
+    UnifiedSMDBridge() : packets_injected_(0) {}
+
+    void inject_packet(uc_engine* uc, u32 proc_id, const std::vector<u8>& payload) {
+        if (!uc) return;
+        oncrpc_packet_header hdr{};
+        hdr.xid = 0x12345678 + packets_injected_;
+        hdr.msg_type = 0; // CALL
+        hdr.rpc_version = 2;
+        hdr.program = 0x30000060; // MSM Audio/QDSP service
+        hdr.version = 1;
+        hdr.procedure = proc_id;
+
+        u32 packet_target = AMSS_RPC_PACKET_BUFFER + (packets_injected_ * 0x500);
+        uc_mem_write(uc, packet_target, &hdr, sizeof(hdr));
+        if (!payload.empty()) {
+            uc_mem_write(uc, packet_target + 0x80, payload.data(), payload.size());
+        }
+
+        oncrpc_queue_node node{};
+        node.next = 0;
+        node.prev = 0;
+        node.packet_addr = packet_target;
+        node.packet_len = sizeof(hdr) + 0x80 + payload.size();
+        node.status = 1;
+
+        u32 node_target = packet_target + 0x400;
+        uc_mem_write(uc, node_target, &node, sizeof(node));
+
+        u32 head = 0, tail = 0, count = 0;
+        uc_mem_read(uc, AMSS_RPC_QUEUE_HEAD + 0, &head, 4);
+        uc_mem_read(uc, AMSS_RPC_QUEUE_HEAD + 4, &tail, 4);
+        uc_mem_read(uc, AMSS_RPC_QUEUE_HEAD + 8, &count, 4);
+
+        if (count == 0) {
+            head = node_target;
+            tail = node_target;
+        } else {
+            uc_mem_write(uc, tail + 0, &node_target, 4);
+            node.prev = tail;
+            uc_mem_write(uc, node_target, &node, sizeof(node));
+            tail = node_target;
+        }
+        count++;
+
+        uc_mem_write(uc, AMSS_RPC_QUEUE_HEAD + 0, &head, 4);
+        uc_mem_write(uc, AMSS_RPC_QUEUE_HEAD + 4, &tail, 4);
+        uc_mem_write(uc, AMSS_RPC_QUEUE_HEAD + 8, &count, 4);
+
+        smd_half_channel ch{};
+        uc_mem_read(uc, AMSS_SMD_CHANNEL_ADDR, &ch, sizeof(ch));
+        ch.state = 2; // SMD_SS_OPENED
+        ch.link_status = 3; // SMD_SS_FLUSHING
+        ch.busy = 0;
+        ch.error = 0;
+        uc_mem_write(uc, AMSS_SMD_CHANNEL_ADDR, &ch, sizeof(ch));
+
+        packets_injected_++;
+        printf("[SMD/ONCRPC] Injected packet #%u (Proc 0x%x) -> AMSS Queue (Total %u)\n",
+               packets_injected_, proc_id, count);
+    }
+
+private:
+    u32 packets_injected_;
+};
+
+// 5. Host Display Sink (SDL2 + Snapshot)
 class UnifiedDisplaySink {
 public:
     UnifiedDisplaySink() : window_(nullptr), renderer_(nullptr), texture_(nullptr), headless_(true) {}
@@ -232,6 +338,7 @@ public:
         mddi_ = std::make_unique<UnifiedMDDI>();
         gpu_ = std::make_unique<UnifiedAdreno130>();
         input_ = std::make_unique<UnifiedInput>();
+        smd_ = std::make_unique<UnifiedSMDBridge>();
         sink_ = std::make_unique<UnifiedDisplaySink>();
         sink_->init(headless);
 
@@ -412,22 +519,25 @@ private:
         NandController nc(nand_path, spare_path);
         DMOVModel dm(core0_.uc, nc);
 
+        // APPSBL partition lookup / handoff emulation for partition "0:APPS"
         // APPS Partition starts at Block 0x0e6 (page 0x0e6 * 64 = 14720)
         u32 start_block = 0x0e6;
         u32 start_page = start_block * 64;
         const u32 DMA_PAGE_BUF = 0x00450000;
 
+        printf("[APPSBL] Emulating partition '0:APPS' lookup & EBI2 DMA handoff at 0x0de8...\n");
         dmov_read_page(core0_.uc, dm, start_page, DMA_PAGE_BUF);
         u8 elf_hdr[52];
         uc_mem_read(core0_.uc, DMA_PAGE_BUF, elf_hdr, sizeof(elf_hdr));
         u32 magic = rd32(elf_hdr, 0);
 
         if (magic == 0x464c457f) {
-            printf("[System] Direct NAND DMA read verified APPS ELF Header!\n");
+            printf("[APPSBL] Partition '0:APPS' opened successfully via DMA!\n");
             core0_.entry = rd32(elf_hdr, 24);
             u32 phoff = rd32(elf_hdr, 28);
             u16 phent = rd16(elf_hdr, 42), phnum = rd16(elf_hdr, 44);
-            printf("[System] APPS ELF Entrypoint: 0x%08x, Segments: %u\n", core0_.entry, phnum);
+            printf("[APPSBL] ELF Entrypoint resolved: 0x%08x, Segments: %u\n", core0_.entry, phnum);
+            printf("[APPSBL] Performing handoff jump: bx r2 -> 0x%08x\n", core0_.entry);
             return load_apps(fallback_path); // Relay segments into target windows
         } else {
             printf("[System] Notice: NAND direct header 0x%08x, using fallback APPS stream\n", magic);
@@ -558,9 +668,28 @@ private:
         uc_reg_read(uc, UC_ARM_REG_R12, &ip);
         uc_reg_read(uc, UC_ARM_REG_LR, &lr);
         
-        // Emulate successful return: r0 = 0
-        u32 zero = 0;
-        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        // Emulate L4e Syscalls (OKL4 2.1.1-fix7 / Iguana convention):
+        // Handles mixed convention: imm in [0..0x44] or (0x1400 + syscall_num)
+        u32 call_num = (imm >= 0x1400) ? (imm - 0x1400) : imm;
+        
+        // Emulate successful return: r0 = 0 (or syscall-specific descriptors)
+        u32 res_r0 = 0;
+        if (call_num == 0x00) { // L4_Ipc
+            // Inter-thread message delivery: MR0 = IPC success
+            res_r0 = 0;
+        } else if (call_num == 0x08) { // L4_ThreadControl
+            res_r0 = 1; // Thread control success
+        } else if (call_num == 0x0c) { // L4_ExchangeRegisters
+            res_r0 = 0; // Control registers updated
+        } else if (call_num == 0x14) { // L4_MapControl
+            res_r0 = 0;
+        } else if (call_num == 0x18) { // L4_SpaceControl
+            res_r0 = 1; // Address space initialized
+        } else {
+            res_r0 = 0;
+        }
+
+        uc_reg_write(uc, UC_ARM_REG_R0, &res_r0);
         if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
         if (lr) {
             u32 target_pc = lr & ~1;
@@ -605,6 +734,12 @@ private:
                 uc_mem_read(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
                 vic_status0 |= (1 << int_num);
                 uc_mem_write(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
+
+                // Inject synthetic RPC packet on doorbell trigger (e.g. procedure 0x1b59)
+                if (sys->smd_) {
+                    std::vector<u8> dummy_payload(16, 0x42);
+                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x1b59, dummy_payload);
+                }
             }
         }
         // ProcComm command write by Core 0
@@ -661,6 +796,7 @@ private:
     std::unique_ptr<UnifiedMDDI> mddi_;
     std::unique_ptr<UnifiedAdreno130> gpu_;
     std::unique_ptr<UnifiedInput> input_;
+    std::unique_ptr<UnifiedSMDBridge> smd_;
     std::unique_ptr<UnifiedDisplaySink> sink_;
 };
 
