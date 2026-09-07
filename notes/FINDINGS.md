@@ -843,6 +843,18 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3n — Hardware DMOV DMA NAND Relocator (`zeebo_nand_relocator.cpp`)
+Implementation and verification of the second-stage NAND relocator using full hardware simulation:
+1. Architectural Flow:
+   - APPSBL/SBL hardware interaction model: writes DMOV descriptor lists (`nand.c` command sequence) to initiate page reads.
+   - `DMOVModel` coordinates with `NandController` to read blocks directly from the working copy of the NAND dump (`nand/1.1.2.bin`).
+   - Dynamically parses the ELF header (`0x464c457f`) and Program Header table (`18` entries) directly in DMA target RAM (`0x10000000`).
+2. Verification Results:
+   - AMSS partition (block `0x12`, page `1152`) read successfully over DMA channel 3.
+   - Entrypoint identified: `0x00a00000`.
+   - All 18 `PT_LOAD` segments verified against raw dump offsets.
+   - Resolves Gap 3 (NAND OS Loader Bridge / Relocator) and completes Phase 3 milestone items.
+
 ## SESSION 3m — Inter-Core A2M Doorbell Interrupt Trapping in Dual-Core Harness (`zeebo_dual_core.cpp`)
 Integration of the Qualcomm MSM7201A Application-to-Modem (A2M) doorbell interrupt monitor:
 1. Hardware Specification:

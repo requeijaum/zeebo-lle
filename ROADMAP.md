@@ -63,9 +63,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - *Current status:* Concluído em `tools/cpp/zeebo_dual_core.cpp` (commit `df01bcd`).
    - *Verified:* Execução simultânea intercalada de ARM11 (`UC_CPU_ARM_1176`, OKL4 L4e em `0xf001c000`) e ARM9 (`UC_CPU_ARM_926`, AMSS em `0x00a00000`) compartilhando SMEM (`0x01F00000`), ProcComm, interrupções A2M/M2A (`0xC0100400`) e timer GPT (`0xC5000000`). Executou 100.000 instruções por núcleo com `err=ok`.
 
-3. **NAND OS Loader Bridge (Flash -> DRAM relocation):**
-   - *Current status:* APPSBL initializes hardware and halts without issuing NAND reads. AMSS is loaded manually at `0x16e00000` from extracted dump.
-   - *Missing:* Executing or simulating the second-stage bootloader (SBL) that reads partition tables from NAND (`0xA0A00000`), decrypts/decompresses AMSS and APPS partitions into physical DRAM, and jumps to Iguana/L4e entry.
+3. **NAND OS Loader Bridge (Flash -> DRAM relocation) [PROTOTIPADO E VALIDADO]:**
+   - *Current status:* Concluído em `tools/cpp/zeebo_nand_relocator.cpp`.
+   - *Verified:* Leitura direta da cópia da NAND (`1.1.2.bin` bloco 0x12) via descritores DMA do hardware DMOV (`DMOVModel` / `NandController`), decodificação do cabeçalho ELF (`0x464c457f`), extração do entrypoint `0x00a00000` e mapeamento das 18 seções `PT_LOAD` em tempo de execução sem arquivos ELF pré-extraídos.
 
 4. **Adreno 130 3D / 2D Display Engine (Yamato / AMD Z430):**
    - *Current status:* MDDI LCD interface is stubbed in APPSBL; 3D command rings and 2D blitter registers (`0xA0000000..0xA00FFFFF`) are unmapped.
@@ -86,8 +86,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [ ] Conectar os eventos de interrupção A2M (escrita em `0xC0100418`) ao vetor de interrupção VIC do ARM9 para acordar threads REX.
 
 ### Phase 3 — Second-Stage NAND Relocator
-- [ ] Conectar `tools/nand_controller.py` ou a engine C++ de NAND ao controlador de DMA DMOV (`0xA9700000`).
-- [ ] Bootar a cadeia completa a partir da cópia da NAND (`1.1.2_AMSS.bin` / dump completo) sem injeção estática de ELF.
+- [x] Conectar o modelo de hardware DMOV DMA (`DMOVModel`) e o controlador de NAND (`NandController`) para leitura direta de partições — validado em `zeebo_nand_relocator.cpp`.
+- [x] Parsear dinamicamente os cabeçalhos ELF e tabelas `PT_LOAD` direto da memória DMA lida da NAND (`1.1.2.bin`), eliminando dependência de arquivos ELF pré-extraídos — validado em `zeebo_nand_relocator.cpp`.
 
 ### Phase 4 — Display & Graphics (MDDI + Adreno 130)
 - [ ] Implementar framebuffer virtual no controlador MDDI (`0xAA600000`) exportando para SDL2/X11.
