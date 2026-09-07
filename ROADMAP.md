@@ -89,10 +89,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Conectar o modelo de hardware DMOV DMA (`DMOVModel`) e o controlador de NAND (`NandController`) para leitura direta de partições — validado em `zeebo_nand_relocator.cpp`.
 - [x] Parsear dinamicamente os cabeçalhos ELF e tabelas `PT_LOAD` direto da memória DMA lida da NAND (`1.1.2.bin`), eliminando dependência de arquivos ELF pré-extraídos — validado em `zeebo_nand_relocator.cpp`.
 
-### Phase 4 — Display & Graphics (MDDI + Adreno 130)
+### Phase 4 — Display & Graphics (MDDI + Adreno 130) [PROTOTIPADO E VALIDADO]
 - [x] Implementar controlador virtual MDDI (`0xAA600000`) com suporte a negociação de enlace, versionamento e link lists primárias de framebuffer — validado em `zeebo_mddi_display.cpp`.
+- [x] Mapear registradores de comando da GPU Adreno 130 (`0xA0000000..0xA00FFFFF`) com anel de comando (ring buffer), ponteiros `WPTR`/`RPTR`, status e interrupções `INT_GRAPHICS` (#20) — validado em `zeebo_adreno130_gpu.cpp`.
 - [ ] Exportar buffer de quadros RGB565 (640x480) para janela de visualização do host via SDL2/X11.
-- [ ] Mapear registradores de comando da GPU Adreno 130 (`0xA0000000..0xA00FFFFF`).
 
 ---
 

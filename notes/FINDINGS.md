@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3r — Virtual Adreno 130 (Yamato/Z430) 2D/3D GPU Command Engine (`zeebo_adreno130_gpu.cpp`)
+Implementation and validation of the Qualcomm MSM7201A Adreno 130 Graphics Processing Unit:
+1. Architecture & MMIO Window:
+   - Base Address: `0xA0000000..0xA00FFFFF` (1MB MMIO space).
+   - Chip Identifier: `0x01030000` (Yamato Core Architecture).
+   - Interrupt Line: `INT_GRAPHICS` (#20 in MSM7200 IRQs).
+2. Verified Hardware Registers & Engine Operations:
+   - `REG_CHIP_ID` (`0x0000`): Returns `0x01030000` (Yamato).
+   - `REG_REVISION` (`0x0004`): Returns `0x00000001`.
+   - `REG_GPU_STATUS` (`0x0110`): Reports engine idle (`0x01`) and busy states.
+   - `REG_RB_BASE` (`0x0100`), `REG_RB_CNTL` (`0x0104`): Ring buffer physical address and control configuration.
+   - `REG_RB_WPTR` (`0x010c`) & `REG_RB_RPTR` (`0x0108`): Intercepts CPU draw command submission, consumes command packets, advances read pointer, and fires `INT_RB_DONE` completion interrupt.
+   - `REG_GPU_INT_ACK` (`0x0128`): Confirms interrupt clearing mechanism.
+3. Significance:
+   - Fulfills the GPU command mapping milestone of Phase 4 in `ROADMAP.md`.
+
 ## SESSION 3q — Inter-Core A2M Interrupt to ARM9 VIC Routing Bridge (`zeebo_dual_core.cpp`)
 Implementation and validation of hardware doorbell interrupt delivery into the ARM9 Vectored Interrupt Controller:
 1. Architectural Flow:
