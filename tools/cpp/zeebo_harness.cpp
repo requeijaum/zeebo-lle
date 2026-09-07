@@ -136,6 +136,18 @@ static void on_mem(uc_engine*uc, uc_mem_type type, uint64_t addr, int size, int6
         }
         return;
     }
+    // UART1 console (0xa9a00000): SR@0x08 -> TX_READY|TX_EMPTY; TF@0x0C = TX char
+    if (addr>=0xa9a00000 && addr<0xa9a01000){
+        u32 off=(u32)(addr-0xa9a00000);
+        if (type==UC_MEM_WRITE){
+            if (off==0x0C){ putchar((char)value); fflush(stdout); } // TF = serial out
+            g_sticky[(u32)addr]=(u32)value;
+        } else {
+            u32 v=(off==0x08) ? (0x14) : (g_sticky.count((u32)addr)?g_sticky[(u32)addr]:0);
+            uc_mem_write(uc,(u32)addr,&v,sizeof(v));
+        }
+        return;
+    }
     if (type == UC_MEM_WRITE){
         g_sticky[(u32)addr]=(u32)value;
     } else {
@@ -161,7 +173,7 @@ static void install_hooks(){
     uc_hook_add(g_uc,&hunm,UC_HOOK_MEM_READ_UNMAPPED|UC_HOOK_MEM_WRITE_UNMAPPED|UC_HOOK_MEM_FETCH_UNMAPPED,
                 (void*)(on_unmapped),nullptr,1,0);
     uc_hook_add(g_uc,&hmm,UC_HOOK_MEM_READ|UC_HOOK_MEM_WRITE,(void*)(on_mem),nullptr,0x80000000ULL,~0ULL);
-    uc_hook_add(g_uc,&hcode,UC_HOOK_CODE,(void*)(on_code),nullptr,1,0);
+    uc_hook_add(g_uc,&hcode,UC_HOOK_CODE,(void*)(on_code),nullptr,0,0);  // begin=0 (address 0x0 is code)
 }
 
 // initialize the ARM1176 core + RAM
@@ -335,7 +347,7 @@ static void cmd_step(int n){
     g_stepBudget = g_insnCount + n;
     uc_err e=uc_emu_start(g_uc,cpu_reg(UC_ARM_REG_PC),0,0,0);
     g_stepBudget=0;
-    (void)e;
+    if(e!=UC_ERR_OK && e!=UC_ERR_HOOK) printf("  [step err %s]\n",uc_strerror(e));
     printf("  pc=0x%08x insn#%llu\n",cpu_reg(UC_ARM_REG_PC),(unsigned long long)g_insnCount);
 }
 

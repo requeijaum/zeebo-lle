@@ -714,6 +714,22 @@ FILES: refs/okl4-2.1.1-fix7/. Signposts: configtrans.py port (1 py2 print) +
 supply config {arch=arm,api=v4,cpu=sa1100,platform=csb337,CONFIG_IS_32BIT,features}
 + resolve arch/arm types include.
 
+## SESSION 2gg — UART console (serial) emulation WORKS in the harness (verified)
+Added a UART1 console model to the C++ harness on_mem (0xa9a00000):
+- SR@0x08 returns 0x14 = TX_EMPTY(1<<3)|TX_READY(1<<2) so uart_putc's
+  `while(!(urs(UART_SR)&TX_READY))` exits immediately
+- TF@0x0C write = putchar + fflush => serial console visible on host stdout
+VERIFIED with a hand-built ARM guest (mov r0,'Z'; ldr r1,=0xa9a0000c; str r0,[r1]):
+the harness prints `Z` on the console and r0=0x5a, r1=0xa9a0000c. So the SoC UART
+serial console is emulated and observable. (Found+fixed: code-hook range begin=1
+skipped addr 0x0; the firmware/boot DOES run — pc advances, DMOV fires — but the
+insn# counter hook under-reports when the guest is at 0.)
+Also: OpenZeebo zloader boots via the harness, DMOV execs=1 (flash_read_config),
+cfg0/cfg1 real, stops in .text 0xa01a3c — but emits NO console text because the
+MAIN binary is built without DEBUG (dprintf/uart path is #ifdef DEBUG). To see
+real boot serial output we need a DEBUG build of the loader, or run AMSS (which
+uses dprintf). Signposts recorded.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
