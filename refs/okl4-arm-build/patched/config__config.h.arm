@@ -1,0 +1,20 @@
+/* Hand-generated minimal OKL4 ARM (pleb2/SA1100) config — cml2 (py2) bypassed */
+#define CONFIG_ARCH_ARM 1
+#define CONFIG_IS_32BIT 1
+#undef  CONFIG_IS_64BIT
+#undef  CONFIG_BIGENDIAN
+#undef  CONFIG_SMP
+#undef  CONFIG_SMP_IDLE_POLL
+#undef  CONFIG_SMP_SYNC_REQUEST
+#undef  CONFIG_ENABLE_FASS
+#undef  CONFIG_ARM_TINY_PAGES
+#undef  CONFIG_IPC_FASTPATH
+#undef  CONFIG_DEBUG
+#undef  CONFIG_TRACEBUFFER
+#undef  CONFIG_KDB
+#undef  CONFIG_KMEM_TRACE
+#undef  CONFIG_PERFMON
+#undef  CONFIG_VERBOSE_INIT
+#undef  CONFIG_NO_CLOCK_IN_INT
+#define CONFIG_BOOTMEM_PAGES 1024
+#define CONFIG_H__ 1

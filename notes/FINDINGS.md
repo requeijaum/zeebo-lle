@@ -818,6 +818,31 @@ Next: (a) fix the pleb2/SA1100 platform headers to get a full kernel .elf, or
 the real L4e kernel that can respond to the AMSS loader->kernel handshake
 (0x20020005) — the current ceiling of the in-harness boot (session 2kk).
 
+## SESSION 2mm — OKL4 L4e ARM KERNEL COMPILED (arm-kernel, 216KB ELF) — MILESTONE
+Continuing 2ll: the glue v4-arm had a FEW cascading compile bugs (porta inacabada
+do OKL4 2.1.1 para ARM), all fixed with small edits (NOT kernel-arch issues):
+- src/glue/v4-arm/space.cc: `utcb_area.x.execute` -> `utcb_area.mem.x.execute`
+  (fpage_t field is .mem.x, .x is a member of mempage_t); typo `writable` ->
+  `writeable` (param name)
+- include/glue/v4-arm/space.h: added `#include <mdb.h>` (space.cc uses mdb_t) +
+  declared `fpage_t mapctrl(...)` (arm glue was missing it)
+- include/api/v4/space.h: + `#include <mdb.h>`
+- include/arch/arm/pgent.h: set_entry(...) 6-arg call was passing a bogus
+  `readable` 7th arg -> `rwx, 0, kernel`
+- config.h.arm: + `CONFIG_BOOTMEM_PAGES 1024` (init.cc uses it)
+- Makeconf.arm: xscale needs `-march=armv5te` (gcc14 rejects `armv5`)
+RESULT: **arm-kernel ELF (216 KB, EABI5, ARM). Entry 0xf001c000 (_start).**
+One LOAD: VA 0xf0000000 -> PA 0xa0100000, 0x1f000 bytes (this is the pleb2 map:
+PHYS_ADDR_BASE 0xa0100000, VIRT_ADDR_BASE 0xf0000000). head.S entry: `msr cpsr,
+#0xd3; mcr CP15 c15_control init; ldr sp,_kernel_init_stack; bl startup_system`.
+So a real, linkable L4e ARM kernel now exists. Build recipe in refs/okl4-arm-build/BUILD.md
++ all source patches recorded above (re-appliable). NOTE this is armv5 (xscale)
+not ARM11 (the MSM7201A is ARM1136J-S/ARMv6) — the kernel is the L4e core; a real
+MSM7201A board would tune the CPU/plat. But the L4e kernel that can answer the
+AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
+load this kernel in the C++ harness to attempt the real boot chain, or (b) make
+an MSM7201A (ARM1176) board config.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
