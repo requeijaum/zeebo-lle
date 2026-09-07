@@ -357,6 +357,19 @@ stage load to completion — but each increment is now hours, not minutes.
 Milestones banked: real MMU map, NAND controller model (self-tested), L4e syscall
 set identified (OKL4), REX API + QSC1110 reference, boot path traced to handoff.
 
+## SESSION 2n — increment (a) tested: NAND forced-path does NOT emit MMIO either
+tools/incr_force_nand.py forces r0>=8 at 0xf088 (escape the low-id fast-path) +
+hooks 0xa0a00000. Result: STILL 0 NAND MMIO touches; APPSBL again slips to 0x5fffc.
+CRUCIAL correction: 0xf63c is NOT the NAND MMIO writer. Its r5 literal = 0xe8bd8070
+(RAM), and its `str [r5,#4/#0x10/#0xc/#0x14]` write to a RAM descriptor at
+0x1f00000 (block geometry/timing table), not the controller. The REAL 0xa0a00000
+literals live in LATER functions (0x7100-0x8334, 0xc6ac, 0xe2b4, ...) that the
+boot only reaches after much more of the chain. CONCLUSION: neither the un-forced
+nor the forced-flash boot reaches the NAND controller in our emulation; the path
+is genuinely full boot-chain bring-up (the element that reads NAND + relocates the
+OS is later than APPSBL's reachable code). Increment (a) is exhausted. RESUME.md
+documents the honest state and next steps for a dedicated bring-up session.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
