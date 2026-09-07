@@ -237,6 +237,36 @@ served its purpose: it proved (1) kernel is OKL4/L4e + REX, (2) syscall set is
 small (6), (3) the early stall is MAP_CONTROL mapping, all with hard evidence.
 Next phase = QEMU board with real L4e; bring up PBL->APPSBL->stages.
 
+## SESSION 2h — REAL MMU map recovered (breakthrough for QEMU-free path)
+The tripleoxygen dump console__zeebo__mmu.txt has the REAL VA->PA maps of BOTH
+cores taken while running. For the ARM11 (BREW) — the one that matters:
+- periphery re-mapped to c0 block: c5300000->c0000000 (VIC), c5400000->c0100000
+  (GPT), c1d00000->aa600000 (MDDI), c2a00000->a9700000 (DMOV), c2f00000->a9200000
+  (GPIO1), c3200000->a8600000 (CLK). All the blocks our probe found.
+- RAM: 0x00100000..0x0080000 are section identity; 0x10xxxxxx identity;
+  f0000000->10000000, f0100000->10100000 (ELF f0000000 maps to PA 0x10000000).
+- APPS ELF vaddrs map into RAM at 0x10100000..0x11400000 (identity section) and
+  b0000000/b0100000/b0d00000/b0e00000 -> 0x100a3xxx (COARSE pages in RAM).
+- UART1 A9A0.. not shown; check next stage.
+KEY REALIZATION: the APPS derail to 0x0048xxxx is into VALID mapped RAM (ARM11
+00400000..00800000 are identity sections), NOT an unmapped fault. So the task is
+not "sliding" — it is EXECUTING a page that is mapped but EMPTY (we never loaded
+the loader's low-RAM image there). The loader (or the kernel's MAP_CONTROL)
+maps/loads the task text & data into low RAM (0x0048..., 0x00a7xxxx by the ARM9
+map side) and the ELF vaddrs are ALIASED there via the f0000000/b0/10x MMU page
+mapping. Our Unicorn loaded ELF at its vaddrs but DID NOT populate the low-RAM
+pages, so control into 0x0048 hits zeros.
+QEMU-FREE ALTERNATIVE (new): model the real MMU map as a TRANSLATION layer in the
+Unicorn hooks — intercept each load/store/fetch and translate vaddr->physical
+using this dump's tables, backing the physical side with the loader layout. Then
+the APPS sees the same aliasing the hardware does: code writable at low RAM and
+readable at its f0000000/b0 vaddrs. This is MORE tractable than a full kernel:
+we have the exact tables. Implement as: map physical low RAM 0x0040, 0x00a7, 0x10a0
+in Unicorn; on the 6 L4e syscalls do REAl mapping like the kernel (set up the
+vaddr->pa alias by copying/mirroring). At minimum, pre-populate the low-RAM
+regions the boot produces so 0x0048 has the loader's image.
+NEXT: build the translation layer from this dump and re-run APPS.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
