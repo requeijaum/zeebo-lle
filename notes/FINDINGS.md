@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2rr — Reconstructing ONCRPC Router Dispatch Table (`0x16ef0b28..0x16ef0b48`)
+Disassembly of the router branching logic at `0x16ef0b28`:
+1. `0x16ef0b28`: `bl 0x16ef0a82` queries the interface link state (`r0`).
+2. `0x16ef0b2c`: `cmp r0, #3`
+3. `0x16ef0b2e`: `bpl 0x16ef0b34` (if status >= 3, skip error handling)
+4. `0x16ef0b30`: `bl 0x16e8cb88` (error reporting / channel reset)
+5. `0x16ef0b34`: `cmp r0, #2`
+6. `0x16ef0b36`: `bpl 0x16ef0b3c` (if status >= 2, jump to packet processor)
+7. `0x16ef0b38`: `bl 0x16e8cb90` (channel restart)
+8. `0x16ef0b3c`: `bl 0x16e8cb96` (process pending packet from queue head)
+9. `0x16ef0b40`: `b 0x16ef0b02` (loop back to wait next event via `rex_wait`)
+10. `0x16ef0b42`: `push {r4-r6, lr}` (entry to queue packet iterator)
+
 ## SESSION 2qq — Disassembly & Flow Reconstruction of ONCRPC Main Loop (`0x16ef0d30..0x16ef0d90`)
 Complete disassembly of the ONCRPC registration and packet handling router:
 1. `0x16ef0b70`: Registration handler invoked with:
