@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3k — Unified Dual-Core Harness Prototype (`zeebo_dual_core.cpp`)
+Implementation and validation of the unified multi-core execution harness for the Qualcomm MSM7201A:
+1. Core Architecture:
+   - Core 0 (Applications Processor): `UC_CPU_ARM_1176` (ARM1176JZ-S) running the OKL4 L4e microkernel (`arm-kernel.elf`, entry `0xf001c000`).
+   - Core 1 (Modem / Baseband Processor): `UC_CPU_ARM_926` (ARM926EJ-S) running the Qualcomm AMSS firmware (`1.1.2_AMSS.bin`, entry `0x00a00000`).
+2. Inter-Core Fabric & Shared Hardware:
+   - Shared RAM (SMEM) at `0x01F00000` (2MB window) mapped to both cores. Hosts ProcComm mailboxes (`APP_COMMAND`, `MDM_COMMAND`), heap TOC, and SMD channels.
+   - Inter-Processor Interrupts (A2M / M2A) at `0xC0100400` (`MSM_CSR_BASE + 0x400`) mapped to both cores.
+   - Hardware GPT timer window at `0xC5000000` mapped to both cores.
+3. Verification:
+   - Built with `-std=c++23 -O2 -lunicorn` and executed in host environment.
+   - Verified simultaneous initialization of both ARM11 and ARM9 Unicorn instances, memory map coherence, and binary segment parsing.
+
 ## SESSION 3j — Disassembly of `rex_get_sigs` and Autonomous Scheduler Loop Equilibrium (`0x1730f326..0x1730f338`)
 Disassembly of `rex_get_sigs` called from `0x16ef0b0e` (`lr = 0x16ef0b15`):
 1. Register Input:
