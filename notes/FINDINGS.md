@@ -843,6 +843,18 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3t — Unified Zeebo LLE System Orchestrator & Live Iguana User-Space Boot (`zeebo_lle_main.cpp`)
+Integration of all low-level subsystems into a single master orchestrator executing real NAND firmwares:
+1. Architectural Convergence:
+   - Orchestrator: `tools/cpp/zeebo_lle_main.cpp`.
+   - Core 0 (ARM1176JZ-S): Boots real `1.1.2_APPS.bin` from physical entrypoint `0x10000000`.
+   - Core 1 (ARM926EJ-S): Boots real `1.1.2_AMSS.bin` from entrypoint `0x00a00000`.
+   - Bus & Peripherals: Unified SMEM (`0x01F00000`), Doorbell A2M (`0xC0100400`) routed to ARM9 VIC (`0xC0000000`), EBI2 Flash Controller + DMOV DMA, Virtual MDDI Display (`0xAA600000`), Adreno 130 GPU (`0xA0000000`), and SDL2 Display Sink.
+2. Breakthrough Verified Boot Sequence:
+   - Core 0 boots through hardware setup at `0x10000000..0x100161c8`, enters kernel virtual memory `0xf0000000`, initializes OKL4 L4e microkernel threads, and at instruction #110,000 transitions smoothly into Iguana user-space at `0xb0000028` (`pc=0xb0000028..0xb0000030`)!
+   - Core 1 progresses concurrently through AMSS initializations up to `pc=0x00ac3500` without desynchronization.
+   - 200,000 instructions executed per core in concurrent round-robin slices with `err=ok`.
+
 ## SESSION 3s — Host Video Display Sink & RGB565 Frame Exporter (`zeebo_fb_sink.cpp`)
 Implementation and validation of the host presentation layer for Zeebo video output:
 1. Video Specifications:
