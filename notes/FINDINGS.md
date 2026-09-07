@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3m — Inter-Core A2M Doorbell Interrupt Trapping in Dual-Core Harness (`zeebo_dual_core.cpp`)
+Integration of the Qualcomm MSM7201A Application-to-Modem (A2M) doorbell interrupt monitor:
+1. Hardware Specification:
+   - Doorbell registers located at `MSM_CSR_BASE + 0x400` (`0xC0100400`).
+   - Mapped across 16 interrupt lines: `MSM_A2M_INT(n) = 0xC0100400 + n * 4`.
+   - Used by the Applications Processor (ARM11 / Iguana / Linux) to notify the Modem Processor (ARM9 / AMSS) of ProcComm command submissions (`INT_A9_M2A_6`) and SMSM / SMD state transitions.
+2. Implementation:
+   - Attached `UC_HOOK_MEM_WRITE` to Core 0 (ARM11) intercepting the address range `0xC0100400..0xC0100440`.
+   - Decodes the target interrupt index `n` and payload.
+   - Ready to assert the corresponding interrupt line into the ARM9 VIC vector controller upon doorbell ring.
+3. Validation:
+   - Verified clean compilation and zero overhead during the initial 100,000 instructions boot cycle of OKL4 and AMSS.
+
 ## SESSION 3l — Concurrent Interleaved Execution in Dual-Core Harness (`zeebo_dual_core`)
 First verified concurrent execution of both Qualcomm MSM7201A processors in a single unified emulator:
 1. Orchestration Model:

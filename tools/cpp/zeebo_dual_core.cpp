@@ -107,6 +107,15 @@ static void core0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud)
     // Trap at 0xf001d060 is benign halt/idle loop
 }
 
+// Hook for Core 0 (L4e microkernel MMIO)
+static void core0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    // Inter-core doorbell: Core 0 writes to MSM_A2M_INT(n) at 0xC0100400 + n*4
+    if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440 && type == UC_MEM_WRITE) {
+        u32 int_num = (addr - (MSM_CSR_BASE + 0x400)) / 4;
+        printf("[Doorbell A2M] Core 0 fired interrupt #%u (val=0x%llx) to Core 1!\n", int_num, (unsigned long long)value);
+    }
+}
+
 // Hook for Core 1 (AMSS)
 static void core1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
     CoreState* cs = (CoreState*)ud;
@@ -254,8 +263,9 @@ int main(int argc, char** argv) {
     }
 
     // Register hooks
-    uc_hook h_c0, h_c1, h_m1;
+    uc_hook h_c0, h_m0, h_c1, h_m1;
     uc_hook_add(core0.uc, &h_c0, UC_HOOK_CODE, (void*)core0_code_hook, &core0, 0, ~0ULL);
+    uc_hook_add(core0.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)core0_mem_hook, &core0, 0, ~0ULL);
     uc_hook_add(core1.uc, &h_c1, UC_HOOK_CODE, (void*)core1_code_hook, &core1, 0, ~0ULL);
     uc_hook_add(core1.uc, &h_m1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)core1_mem_hook, &core1, 0, ~0ULL);
 
