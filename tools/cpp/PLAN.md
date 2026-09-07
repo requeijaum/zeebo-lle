@@ -33,5 +33,11 @@ em RAM pelos caminhos que o loader real usa, com inspeção completa.
       Atualizar skill: ABI = svc#imm com imm 0/4/8/c/10/14/18-28 = syscall.
 - [ ] **M5. Boot de chain**: juntar DMOV->NAND->partição->RAM->entry->syscalls
       num caminho contínuo inspecionável no harness.
+      STATUS (2026-09-06): AMSS roda 285K insns do entry 0xa00000 e DERAPA para
+      dados em 0x00b1a8a2 (Thumb garbage) — sem o kernel L4e real + MMU, a
+      relocação/entry não leva a syscalls observáveis; APPS do entry não executa
+      (2p). O boot de chain real exige o kernel L4e presente (o harness faz a
+      peça de harness/inspeção; o kernel é o próximo bloco). M5 é o objetivo
+      longo; M1-M4 = ferramentas+ABI provadas.
 
 ## Ordem: M1 -> M2 -> M3 (cada um verificado com dados reais), M4/M5 conforme.

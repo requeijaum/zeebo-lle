@@ -51,13 +51,16 @@ static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
 static void intr_hook(uc_engine*uc,uint32_t,int,void*ud){
     (void)ud;
     u32 pc=rreg(uc,UC_ARM_REG_PC);
-    // decode the svc instr at pc-4
     u8 b[4]; int off=pc-4;
     if(uc_mem_read(uc,off,b,4)!=UC_ERR_OK){ printf("  !! INTR @0x%08x (unreadable svc)\n",off); uc_emu_stop(uc); return; }
-    u32 w=rd32(b,0);
-    printf("  !! INTR @0x%08x: instr=%08x (op=%02x) sp=%08x lr=%08x r0=%08x r1=%08x\n",
-           off,w,(unsigned)(w>>24),rreg(uc,UC_ARM_REG_SP),rreg(uc,UC_ARM_REG_LR),
-           rreg(uc,UC_ARM_REG_R0),rreg(uc,UC_ARM_REG_R1));
+    u32 w=rd32(b,0); u32 imm=w&0xFFFFFF;
+    static const char* names[]={"ipc","thread_switch","thread_control","?3","exchange_reg","schedule",
+        "map_control","space_control","?8","?9","cache","?11","security","lipc","?14","?15"};
+    const char* nm = (imm<=0x28 && (imm%4)==0) ? names[imm/4] : "?";
+    u32 sp=rreg(uc,UC_ARM_REG_SP);
+    printf("  !! SVC @0x%08x: imm=%#x (%s) sp-mask=~0x%02x lr=%08x r0=%08x r1=%08x r2=%08x\n",
+           off,imm,nm,(unsigned)(~sp)&0xFF, rreg(uc,UC_ARM_REG_LR),
+           rreg(uc,UC_ARM_REG_R0),rreg(uc,UC_ARM_REG_R1),rreg(uc,UC_ARM_REG_R2));
     uc_emu_stop(uc);
 }
 
