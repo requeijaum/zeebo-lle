@@ -285,6 +285,29 @@ NEXT: implement coarse-page mirroring (vaddr b0xxx <-> pa 100a3xxx) in mmu_runne
 so the b0xxx runtime image is populated; then the REX wait loop should receive a
 timer/interrupt notification (implement L4 timer tick -> notify) to break idle.
 
+## SESSION 2j — CORRECTION: the "REX idle" claim was WRONG (verified derail)
+Honest reversal of session-2i. verify_idle.py + mmu_runner_v2.py show the site
+`0xb000fffc` has op=None (instruction UNREADABLE), imm=0, r0-3=0, repeating
+thousands of times — this is NOT a legitimate L4_Ipc idle. It is another derail:
+after MAP_CONTROL the task jumps to 0xb000fffc expecting the RELOCATED runtime a
+root-of-truth-LLM would not have = b000fffc is a RawBinary? No: the segment
+b0000000 (filesz=memsz=0xf207) ends at 0x0xb000f207; 0xb000fffc is BEYOND it,
+and no loader-relocation data exists there. The task derails into a region that
+only the real loader/APPSBL would have populated. Zero-filling/mirroring does not
+help: mmu_runner_v2 (fills all identity + coarse) gives the SAME derail.
+CONCLUSION (hard): a standalone stage without the boot chain CANNOT get past
+this, because the low/b0 RAM region the task jumps into is built by the loader's
+RELOCATION of the OS image — work we do not have the artifacts for. Any shim or
+MMU-mirror of the ELF alone fundamentally misses it. The legitimate, QEMU-free
+path is to BOOT THE CHAIN in Unicorn: run APPSBL fully (it already does all
+peripheral init + MMU enable) and let IT load the OS/stages through our NAND
+model — the real boot code does the relocation itself, no kernel repo needed.
+This is the honest next step that actually has a chance.
+PITFALL: do not trust insn-count / repeated-INTR as "progress" — a derail reading
+unmapped memory can spin the INTR hook thousands of times. Always verify the svc
+instruction bytes (op must decode as a real EFxxxxxx SVC) before claiming the task
+is alive.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
