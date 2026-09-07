@@ -691,6 +691,29 @@ source (large, deprecated) — a real retro-build, not a quick apt. Keep OKL4 as
 design reference (used), and note the python2+cml2 gate if we choose the native-
 kernel path later.
 
+## SESSION 2ff — OKL4 build: BREAKTHROUGH — python-2 cml2 CAN be bypassed (port viable)
+Answer to Rafael "can't you port OKL4 to python3?": YES in practice. The blocker
+was cml2 (cmlcompile/cmlconfigure = python2-only, 50-120 py2 lines). But:
+- The kernel's `-include macros.h` makes INC_ARCH/INC_API expand fine.
+- The only cml2 piece NEEDED to emit the kernel config.h is configtrans.py
+  (122 lines, only ONE python2 line = `print`); it just converts `SYM=VALUE`
+  lines to `#define`. cmlcompile/cmlconfigure (the hard python2 parts) can be
+  BYPASSED by feeding the config lines directly (we know arch=arm, api=v4,
+  cpu=sa1100, platform=csb337/pxa + feature symbols).
+- Compiling kernel/src/glue/v4-arm/thread.cc with:
+    arm-none-eabi-g++ -include macros.h -D__API__=v4 -D__ARCH__=arm
+      -D__CPU__=sa1100 -D__PLATFORM__=csb337 -DCONFIG_IS_32BIT -I include
+  gets PAST the macro/include machinery; remaining errors are just `u16_t/u64_t`
+  undefined = arch/arm/types.h + the config.h feature-set not yet injected.
+CONCLUSION: porting the OKL4 build to python3 is VIABLE (configtrans.py trivial;
+bypass cmlcompile by supplying config lines). It's still a non-trivial port (build
+out a full config.h feature-set + arch/arm types chain), but NOT a python2 wall
+anymore. This re-opens the native-L4e-kernel path with real effort, not the
+"impossible" gate logged in 2ee.
+FILES: refs/okl4-2.1.1-fix7/. Signposts: configtrans.py port (1 py2 print) +
+supply config {arch=arm,api=v4,cpu=sa1100,platform=csb337,CONFIG_IS_32BIT,features}
++ resolve arch/arm types include.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
