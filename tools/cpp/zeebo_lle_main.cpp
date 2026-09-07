@@ -138,9 +138,15 @@ enum {
 class UnifiedInput {
 public:
     UnifiedInput() : keys_pressed_(0), int_status_(0) {}
-    void press_key(u32 key_bit) {
+    void press_key(u32 key_bit, uc_engine* c0_uc = nullptr) {
         keys_pressed_ |= key_bit;
         int_status_ |= 1; // Assert INT_KEYSENSE
+        if (c0_uc) {
+            u32 vic_status0 = 0;
+            uc_mem_read(c0_uc, 0xc0000000, &vic_status0, 4);
+            vic_status0 |= (1 << 28); // INT_KEYSENSE is IRQ #28
+            uc_mem_write(c0_uc, 0xc0000000, &vic_status0, 4);
+        }
     }
     void release_key(u32 key_bit) {
         keys_pressed_ &= ~key_bit;
@@ -286,15 +292,15 @@ public:
                 if (ev.type == SDL_QUIT) return;
                 if (ev.type == SDL_KEYDOWN) {
                     switch (ev.key.keysym.sym) {
-                        case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A); break;
-                        case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B); break;
-                        case SDLK_c:                   input_->press_key(ZEEBO_KEY_C); break;
-                        case SDLK_v:                   input_->press_key(ZEEBO_KEY_D); break;
-                        case SDLK_UP:                  input_->press_key(ZEEBO_KEY_UP); break;
-                        case SDLK_DOWN:                input_->press_key(ZEEBO_KEY_DOWN); break;
-                        case SDLK_LEFT:                input_->press_key(ZEEBO_KEY_LEFT); break;
-                        case SDLK_RIGHT:               input_->press_key(ZEEBO_KEY_RIGHT); break;
-                        case SDLK_h:                   input_->press_key(ZEEBO_KEY_HOME); break;
+                        case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A, core0_.uc); break;
+                        case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B, core0_.uc); break;
+                        case SDLK_c:                   input_->press_key(ZEEBO_KEY_C, core0_.uc); break;
+                        case SDLK_v:                   input_->press_key(ZEEBO_KEY_D, core0_.uc); break;
+                        case SDLK_UP:                  input_->press_key(ZEEBO_KEY_UP, core0_.uc); break;
+                        case SDLK_DOWN:                input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); break;
+                        case SDLK_LEFT:                input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); break;
+                        case SDLK_RIGHT:               input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); break;
+                        case SDLK_h:                   input_->press_key(ZEEBO_KEY_HOME, core0_.uc); break;
                     }
                 } else if (ev.type == SDL_KEYUP) {
                     switch (ev.key.keysym.sym) {

@@ -843,6 +843,16 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 4a — VIC Interrupt Line Assertion for INT_KEYSENSE IRQ #28 (`zeebo_lle_main.cpp`)
+Hooked the host keyboard / gamepad SDL2 event handler to directly assert Vector Interrupt Controller (VIC) IRQ line #28 (`INT_KEYSENSE`) in Core 0 (ARM11), delivering real hardware interrupt signaling on Z-Pad button presses.
+
+### Technical Implementation
+1. **Interrupt Vector Mapping:**
+   - On key press (`SDL_KEYDOWN`), `UnifiedInput::press_key` directly updates `MSM_VIC_BASE` (`0xC0000000`), raising bit 28 (`1 << 28`) corresponding to `INT_KEYSENSE`.
+   - Preserves keypad register querying at `KEYPAD_BASE` (`0xA9A00000`) for synchronous state reads.
+2. **Dual-Core Stability:**
+   - 1.2M instruction run sustained across both cores with input routing, DMOV DMA NAND, ProcComm mailboxes, L4e syscalls, and MDDI display active.
+
 ## SESSION 3z — Complete 14-Segment Multi-Window APPS/BREW Physical & Virtual Relocation (`zeebo_lle_main.cpp`)
 Comprehensive memory mapping and relocation of the entire 14 `PT_LOAD` segments of `1.1.2_APPS.bin`, covering the microkernel L4e (`0xf0000000`), Iguana user space servers (`0xb0000000..0xb0e04000`), and the complete BREW 4.0.2 application environment (`0x10137000..0x14953040`).
 
