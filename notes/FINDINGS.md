@@ -191,6 +191,24 @@ running system; (a) remains useful to learn which syscalls REX actually needs.
 Refs to pull next session: Pistachio-embedded / OKL4 ARM syscall ABI (SP-selector
 magic values), REX task model.
 
+## SESSION 2f — L4e syscall thunk set DEFINED (fingerprint, byte-verified)
+Located the L4e syscall stub block in APPS ELF (little-endian word EF00mmii, so
+search bytes = ii mm 00 ef):
+  svc #0x14  x7   (sel ~0x4b)  - 3-out stub (r1,r2,r3 via r4/r5/r6)
+  svc #0x1404 x9  (sel ~0xfb)
+  svc #0x1408 x5  (sel ~0xf7)
+  svc #0x140c x5  (sel ~0xf3)  - 6-out stub
+  svc #0x1410 x5  (sel ~0xef)  - 2-out stub (r1,r2 via r7/r8)
+  svc #0x1414 x5
+Total ~36 thunks across ~6 distinct syscalls. The stub block at 0x103dcc00 is
+byte-verified: `mov ip,sp; mvn sp,#~sel; svc #imm; <store outs>; pop`.
+CONFIRMED the sel ~0x4b/svc#0x14 we first trapped is 3-output syscall — its
+result values (r1/r2/r3 through caller output pointers) are what our zero-return
+probe corrupted. This scopes the L4e shim: SIX syscalls, not an unknown storm.
+PITFALL (matter): naive "scan every word for SVC" floods with false positives
+(data decodes as svc); and endianness must be little (EF00mmii -> bytes ii mm 00
+ef). Use the byte pattern, not a capstone word pass.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
