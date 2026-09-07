@@ -552,6 +552,39 @@ correção; nenhum novo erro fatal. A maior alavanca agora é REMOTA: acompanhar
 "fork QEMU que emula iPhone completo" citado por Bennée != MSM7k. Atualizar
 ROADMAP: Phase-1 alt = rastrear QEMU-MSMTk + tentar kernel msm_nand como boot ref.
 
+## SESSION 2x — kernel msm_nand.c: official reference, CONFIRMS our addr layout
+Rafael pediu (a)+(b): rastrea QEMU MSM7k + obter driver msm_nand como ref.
+(a) QEMU: o RFC de gustavo menezes (mai/2026) ainda NAO virou serie v1/v2 em
+    patchew/lore; as contas GitHub da web sao homonimos (nao do autor). O trabalho
+    dele segue em aberto; contato gumenezes2019@gmail.com. Nao merged ainda.
+(b) Kernel MSM NAND driver ADQUIRIDO: refs/msm_nand-kernel-driver.c (7307 lines,
+    firekernel-ace/official-gb, from android-msm tree, GPL). This is the OFFICIAL
+    msm_nand.c. KEY VERIFICATION (lines ~599-603, msm_nand_read):
+      data.cmd  = MSM_NAND_CMD_PAGE_READ;
+      data.addr0 = (page_address << 16) | (onfi_addr);
+      data.addr1 = (page_address >> 16) & 0xFF;
+    EXACTLY the layout we fixed in NandController (session 2t: page=(addr0>>16)|
+    ((addr1&0xff)<<8)) — the audit confirms our correction is right. Also confirms
+    the whole flow goes through DMOV/ADM DMA (msm_dmov_exec_cmd + CRCI +
+    DMOV_CMD_PTR_LIST + NAND_FLASH_CMD/EXEC_CMD) — same architecture as zloader
+    nand.c and our DMOVModel. The driver is a RICH reference: also has
+    MSM_NAND_CMD_FETCH_ID, ECC, OOB (oob_64/128/256), flexonenand/onenand, dual-
+    nandc — everything a full boot model could need.
+FACILIDADE: msm_nand.c is a per-device-ID-driven driver with an ID table — compare
+with the 0xf508 table-lookup the corporate APPSBL uses; if the Zeebo NAND ID
+0x5580b1ad is in the kernel's table, we get the exact geometry. register this as a
+reference + update skill.
+
+## SESSION 2y — NAND ID re-verified: 0x5580b1ad is REAL Zeebo (not in kernel table)
+Auditoria final do ID: 0x5580b1ad aparece verbatim em openzeebo zloader/flash.c
+(#define NAND_ID 0x5580b1ad) E em tools/nand_util/{nandread,nandwrite}.py. NÃO é
+erro nosso (a skill baseou no código real). No driver do kernel msm_nand.c a
+tabela supported_flash[] NÃO contém 0x5580b1ad — o device genérico usa ONFI probe
+(runtime) para IDs fora da tabela; os irmãos (0x5500baec Sams 256MB, 0x5580baad
+Hynx 256MB, 0xd580b12c Micr 128MB) confirmam a geometria 2048/64pp/64oob. Conclui
+sem erro de ID. O valor é Samsung 1Gbit/128MB 2KB-page — casa com 1.1.2.bin
+(65536 pag*2048=128MB).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
