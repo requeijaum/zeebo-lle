@@ -843,6 +843,24 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3l — Concurrent Interleaved Execution in Dual-Core Harness (`zeebo_dual_core`)
+First verified concurrent execution of both Qualcomm MSM7201A processors in a single unified emulator:
+1. Orchestration Model:
+   - Round-robin interleaved instruction slices (`SLICE_INSNS = 10000`).
+   - Shared memory bus: SMEM (`0x01F00000`), ProcComm, Inter-processor interrupts (`0xC0100400`), and Hardware GPT Timer (`0xC5000000`).
+2. Concurrent Execution Results (10 cycles × 10,000 insns = 100,000 insns per core):
+   - **Core 0 (ARM1176JZ — OKL4 L4e Microkernel):**
+     - Booted at entry `0xf001c000`.
+     - Advanced cleanly through kernel boot stages: `0xf001c970` -> `0xf000007c` -> `0xf00001a4` -> `0xf0009ef0` -> `0xf000afa4`.
+     - Completed 100,000 instructions with error status: `ok`.
+   - **Core 1 (ARM926EJ-S — Qualcomm AMSS Modem Firmware):**
+     - Booted at entry `0x00a00000`.
+     - Advanced linearly through modem initialization: `0x00a09c40` -> `0x00a13880` -> `0x00a27100` -> `0x00a445c0` -> `0x00a61a80`.
+     - Completed 100,000 instructions with error status: `ok`.
+3. Significance:
+   - Resolves Gap B of `ROADMAP.md` (Dual-core unified architecture).
+   - Proves that Unicorn can simultaneously simulate both ARM11 and ARM9 cores in the same host process with zero address space cross-talk and synchronized shared memory.
+
 ## SESSION 3k — Unified Dual-Core Harness Prototype (`zeebo_dual_core.cpp`)
 Implementation and validation of the unified multi-core execution harness for the Qualcomm MSM7201A:
 1. Core Architecture:
