@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3d — Reverse Engineering of Modem Timer Tick Acknowledgment at `0x16ef0b3c` (`0x00b33108`)
+Disassembly of the router branch at `0x16ef0b3c`:
+1. Instruction trace:
+   - `0x16ef0b3c: bl 0x16f80f24` (`f090 e9f2`).
+2. Trampoline table target at `0x16f80f24`:
+   - `0x16f80f24: ldr pc, [pc, #-4]` (`e51ff004`) -> branches to `0x00b33109` (Thumb).
+3. Low RAM implementation at `0x00b33108`:
+   - `0x00b33108: ldr r1, [pc, #0x274]` (`499d`) -> loads literal from `0x00b33380` = `0xc5000100` (hardware GPT timer peripheral base).
+   - `0x00b3310a: movs r0, #1` (`2001`).
+   - `0x00b3310c: str r0, [r1, #0x0c]` (`60c8`) -> writes `1` to `0xc500010c` (timer match / clear / interrupt acknowledge register).
+   - `0x00b3310e: bx lr` (`4770`).
+4. Architectural Significance:
+   - `0x16ef0b3c` is the hardware timer tick / watchdog acknowledge callback executed on every iteration of the REX idle / router loop.
+   - This matches our previously observed MMIO write suppression: `if (ad != 0xc500010c) printf(...)`.
+   - The write to `0xc500010c` resets the hardware countdown timer and confirms the AMSS RTOS core is actively servicing events.
+
 ## SESSION 3c — Mapping QDSP5 JPEG and Audio Post-Processor (AUDPP) Task Queues (`0x16ea9dd0..0x16ea9e68`)
 Discovery of image codec and audio processing engine command queues dispatched through ONCRPC:
 1. Identified assertions and command queue structures:
