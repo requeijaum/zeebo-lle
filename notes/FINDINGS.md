@@ -843,6 +843,21 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3i — Decoding Natural SMD Channel Status Query (`0x16ef0a82`)
+Disassembly of the channel state evaluator called at `0x16ef0b28`:
+1. Instruction Sequence:
+   - `0x16ef0a82: push {r4, lr}` (`b510`)
+   - `0x16ef0a84..0x16ef0a86: bl 0x16ef0a7c` (`f7ff fffa`) — reads channel state byte from descriptor.
+   - `0x16ef0a88: cmp r0, #0` (`2800`) — is channel closed (`SMD_SS_CLOSED`)?
+   - `0x16ef0a8a: beq 0x16ef0a96` (`d004`) — if closed, return 0.
+   - `0x16ef0a8c: cmp r0, #1` (`2801`) — is channel opening (`SMD_SS_OPENING`)?
+   - `0x16ef0a8e: bne 0x16ef0a94` (`d101`) — if state > 1 (i.e. OPENED=2 or FLUSHING=3), branch to exit returning state in `r0`.
+   - `0x16ef0a90..0x16ef0a92: bl 0x16e8c888` (`f001 fefa`) — invokes channel opening handshake sequence!
+   - `0x16ef0a94: pop {r4, pc}` (`bd10`)
+2. Behavioral Discovery:
+   - When the artificial override returning `3` was commented out, natural execution ran through `0x16ef0a82`.
+   - Natural execution without the override advanced the instruction budget past the router loop, stopping at `pc=0x1730f32a` (inside `rex_get_sigs`), demonstrating that the system progressed deeper into the REX scheduler!
+
 ## SESSION 3h — Reverse Engineering of Router SMD Branch Conditions (`0x16ef0b2c..0x16ef0b3a`)
 Disassembly and behavioral analysis of the ONCRPC router branch conditions:
 1. Instruction Sequence:

@@ -188,6 +188,7 @@ static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
         uc_reg_write(uc, UC_ARM_REG_R0, &mask);
         return;
     }
+    /*
     // Return 3 from 0x16ef0a82:
     if (ad == 0x16ef0a82) {
         static int f_a82 = 0;
@@ -204,6 +205,7 @@ static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
         uc_reg_write(uc, UC_ARM_REG_R0, &three);
         return;
     }
+    */
     // Clean up flood print at 0x16ef0b2c
     // Let's remove the print at 0x16ef0b2c
     /*
