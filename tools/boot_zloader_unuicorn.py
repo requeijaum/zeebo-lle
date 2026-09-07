@@ -29,8 +29,10 @@ def main(max_insns=8_000_000):
     uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
     try: uc.ctl_set_cpu_model(UC_CPU_ARM_1176)
     except Exception: pass
-    # map RAM: code 0xa00000..+0x30000, stack/heap high
-    for base,size in ((0x00a00000, 0x00400000), (0x00000000, 0x00200000),
+    # map RAM: code 0xa00000..+0x30000, heap 0xc00000.., stack high
+    for base,size in ((0x00a00000, 0x00400000), (0x00000000, 0x00300000),
+                      (0x00c00000, 0x00400000),
+                      (0xb0000000, 0x01000000),
                       (0xff000000,0x00200000),(0xffe00000,0x00200000)):
         try: uc.mem_map(base, size)
         except UcError: pass

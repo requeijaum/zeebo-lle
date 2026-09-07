@@ -523,6 +523,35 @@ copied to firmware/openzeebo-zloader.bin. boot_zloader_unuicorn.py runs it:
   memory map (heap starts 0xc00000 but _main allocs up to BLOCK_SIZE 0x80000).
   Up-to: real DMA->flash-config proven inside a genuinely booting OpenZeebo loader.
 
+## SESSION 2w — AUDIT (local+remote): facilidades encontradas, nada de erros fatais
+Rafael pediu revisão contra corpus local E remoto por omissão/erro/facilidade.
+LOCAL (não cometemos erro fatal; 3 achados úteis):
+- zloader/notes.txt = dump REAL do boot ROM (endereços ROM:0090...), sequência de
+  setup de UART1 (0xa9a00000, 115200) e MPUs; a linha final "0xc0008848 =
+  start_kernel" confirma o caminho Linux/Android e que o boot ROM entrega o
+  kernel em 0xc0008848.
+- informacoes_linux.txt (wiki): "o kernel nas árvores do Android já tem suporte
+  ao MSM7201A" — existiu kernel Linux/Android com os drivers do SoC (TVENC,
+  PROC COMM/ONCRPC, GPIO) que hoje faríamos RE do zero.
+- zeemu firmware_inspector (já registrado em 2r): partition layout completo.
+REMOTO (2 FACILIDADES IMPORTANTES):
+- QEMU-devel RFC (mai/2026, gustavo menezes) "Add initial Qualcomm MSM7201A
+  platform emulation": alguém está desenvolvendo ativamente uma máquina QEMU
+  MSM7k (ARM1136 + UART + IRQ + timer + NAND boot + boot Linux a serial).
+  Alex Bennée (QEMU maintainer) respondeu encorajando; autor confirma estar
+  usando vendor kernel sources. NÃO virou patch merged ainda (só RFC mai/2026).
+  => Reavalia a recomendação "construir board QEMU = semanas": se este trabalho
+     progredir, a borda QEMU pode existir. Vale rastrear patchew/lore por uma
+     série v1+v2; e o autor é contatável (gumenezes2019@gmail.com).
+- Linux kernel driver `mtd: msm_nand` (lkml 2011) + linux-msm.github.io
+  mainline-status: driver MSM NAND oficial no kernel, e MSM no mainline — base
+  para kernel/boot.
+CONCLUSÃO auditoria: o mapeamento da ABI L4e corrigido em 2o permanece a maior
+correção; nenhum novo erro fatal. A maior alavanca agora é REMOTA: acompanhar
+(ou contribuir/rastrear) a emissão QEMU MSM7201A de gustavo menezes; um recurso
+"fork QEMU que emula iPhone completo" citado por Bennée != MSM7k. Atualizar
+ROADMAP: Phase-1 alt = rastrear QEMU-MSMTk + tentar kernel msm_nand como boot ref.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
