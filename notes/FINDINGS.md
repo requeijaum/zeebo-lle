@@ -843,6 +843,23 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2ss — Reconstructing Hardware Mode Stack Table at `0x1755d264`
+Detailed reverse engineering of the stack registry iterated at `0x16ef0b42`:
+1. `0x16ef0b42` iterates an array of 16-byte stack descriptors located at `0x1755d264`.
+2. Format of each entry (`sizeof = 0x10`):
+   - `+0x00`: Magic identifier (`0x19283746`).
+   - `+0x04`: Pointer to ASCII description name string.
+   - `+0x08`: Stack buffer base address.
+   - `+0x0c`: Stack size in bytes.
+3. Descriptors present in AMSS 1.1.2 firmware:
+   - Stack 0: System Stack — base `0x179fe058`, size `0x400` (1024 bytes).
+   - Stack 1: Abort Stack — base `0x179fdec8`, size `0x190` (400 bytes).
+   - Stack 2: Supervisor Stack — base `0x179fddf8`, size `0xd0` (208 bytes).
+   - Stack 3: IRQ Stack — base `0x179fdbe0`, size `0x218` (536 bytes).
+4. Validation loop:
+   - Checks `magic == 0x19283746`, verifies stack bounds against active SP and registers stacks with REX task context.
+   - Completes without errors under the L4e shim harness.
+
 ## SESSION 2rr — Reconstructing ONCRPC Router Dispatch Table (`0x16ef0b28..0x16ef0b48`)
 Disassembly of the router branching logic at `0x16ef0b28`:
 1. `0x16ef0b28`: `bl 0x16ef0a82` queries the interface link state (`r0`).
