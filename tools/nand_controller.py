@@ -117,14 +117,19 @@ class NandController:
             self._id_latched = self.nand_id
             self.status = FS_OK
         elif cmd in (CMD_PAGE_READ, CMD_PAGE_READ_ECC, CMD_PAGE_READ_ALL):
-            # page number comes from ADDR0 (row address). ADDR0 layout: low bits
-            # column, high bits page/row. On 2K-page it's typically ADDR0=page<<16
-            # or a split; nand.c uses page directly in ADDR0 for reads. Use the
-            # value the firmware programmed, masked to the page space.
+            # Page number comes from the ADDRESS registers. The Qualcomm layout
+            # (per openzeebo nand.c) puts the row high bits in ADDR0 (page<<16)
+            # and bits 16..23 of page in ADDR1: addr0=page<<16, addr1=(page>>16)&0xff.
+            # Decode: page = (addr0>>16) | ((addr1 & 0xff) << 8). Some drivers
+            # instead write the page flat into ADDR0; detect both: if addr0 is
+            # large it is the <<16 form, else use flat.
             addr0 = self.reg.get(R_ADDR0, 0)
-            # heuristic: firmware writes page number directly (nand.c _flash_read)
-            page = addr0
-            npages = self._blob and (len(self._blob) // self._stride)
+            addr1 = self.reg.get(R_ADDR1, 0)
+            if addr0 >= 0x10000:  # shifted layout (page in top 16 bits)
+                page = (addr0 >> 16) | ((addr1 & 0xFF) << 8)
+            else:
+                page = addr0
+            npages = len(self._blob) // self._stride
             if 0 <= page < npages:
                 pg = self._page_bytes(page)
                 self.buffer[:len(pg)] = pg

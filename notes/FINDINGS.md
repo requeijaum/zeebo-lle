@@ -466,6 +466,24 @@ Rafael approved build+zload the openzeebo zloader. Findings:
   + board/init/tags build; the rest needs the -DDEBUG/-DPATCHNAME fixes + dmov
   functional model before it boots usefully).
 
+## SESSION 2t — DMOV DMA model FUNCTIONAL + NAND read via DMA VERIFIED
+tools/dmov_model.py + dmov_selftest.py: built a functional ADM/DMOV DMA engine
+that executes the exact descriptor sequences nand.c emits (16-byte dmov_s
+{cmd,src,dst,len} in RAM; pointer list entry = addr>>3|CMD_PTR_LP; command LC
+=1<<31 last). It services NAND-register src/dst through NandController (incl.
+16-byte bursts programming CMD/ADDR0/ADDR1/CHIPSEL, EXEC write triggering the
+page read, FLASH_BUFFER reads returning 512B, CRCI data routes). SELF-TEST
+PASSES: running _flash_read_page's descriptor sequence for page 11712 (APPSBL)
+lands `18f09fe5 18f09fe5...` (= APPSBL vector table) in DMA target RAM, matching
+the dump byte-for-byte. This proves the ENTIRE DMA->NAND read path works end to
+end with real firmware content.
+PITFALLS fixed: pointer/command entries are PHYS_ADDR>>3 (must <<3, not ~7 mask);
+register bursts of 16 bytes write 4 consecutive regs (not one); ADDR0 is page<<16
++ ADDR1=(page>>16)&0xff (decode page=(addr0>>16)|((addr1&0xff)<<8)).
+NEXT: boot the compiled openzeebo zloader.main in Unicorn (load at 0x00a00000,
+hook DMOV_CMD_PTR write to call DMOVModel.exec_cmdptr, service NAND via
+NandController), so the real loader reads NAND and loads the OS image.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
