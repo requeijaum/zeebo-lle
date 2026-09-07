@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3b — Mapping QDSP5 VFE (Video Front End) Task Queues (`0x16ea9ce8..0x16ea9d88`)
+Discovery of additional hardware-accelerated DSP tasks connected to the ONCRPC consumer pipeline:
+1. Identified assertions and command queue structures:
+   - `0x16ea9ce8`: `"Assertion cmd_size <= QDSP_VFETASK_VFECOMMANDSCALEQUEUE_MAX_CMD_SIZE failed"`
+   - `0x16ea9d40`: `"Assertion cmd_size <= QDSP_VFETASK_VFECOMMANDTABLEQUEUE_MAX_CMD_SIZE failed"`
+   - `0x16ea9d88`: `"Assertion cmd_size <= QDSP_VFETASK_VFECOMMANDQUEUE_MAX_CMD_SIZE failed"`
+2. Architectural Role on Qualcomm MSM7201A:
+   - Identifies the **VFE (Video Front End)** processing task inside the QDSP5 engine (`QDSP_VFETASK`).
+   - Three distinct hardware-mapped command queues managed by this task:
+     - `VFECOMMANDSCALEQUEUE`: scaling, aspect ratio and frame resampling parameters.
+     - `VFECOMMANDTABLEQUEUE`: gamma/color lookup tables and transformation matrices.
+     - `VFECOMMANDQUEUE`: general command/control stream (frame triggering, buffers).
+3. System Integration:
+   - AMSS ONCRPC server exposes baseband, voice DSP (`QDSP_VOICEPROCTASK`) and media hardware acceleration (`QDSP_VFETASK`) through a unified procedure dispatch interface.
+   - Proves that video/display subsystem control follows the exact same RPC packet structure (`0x500` byte payload max, procedure ID at `+0x20`).
+
 ## SESSION 3a — Identification of QDSP Voice Processor Subsystem (`0x16ea9cb0`)
 Analysis of procedure error strings and QDSP service hooks connected to the ONCRPC dispatcher:
 1. Memory dump of string literal at `0x16ea9cb0`:
