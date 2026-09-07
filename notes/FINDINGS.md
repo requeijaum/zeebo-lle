@@ -339,6 +339,24 @@ NEXT: model the flash config table that 0xf508 scans (it encodes the NAND geomet
 per device ID) so 0xf088 completes a real READ and APPSBL loads the stage. Then
 the stage-loading path becomes fully reachable in Unicorn.
 
+## SESSION 2m — Honest ceiling: APPSBL reach confirmed, NAND handoff NOT reached
+probe_nand_emission.py (clean, 20M insn, udelay short-circuited): APPSBL reaches
+the handoff code (we see pc 0xdc0 -> bl 0xf088 in trace_mmu_on), BUT:
+- **ZERO NAND MMIO touches** (0 a0a00000) and final pc still 0x5fffc (slips off
+  the padding after the handoff routine).
+- Reason: 0xf088 with r0<8 takes the LOW-ID fast path (bls 0xf25c) that only does
+  an in-RAM geometry lookup (r4=0x1f00000) — no NAND register I/O. The MMIO
+  writer 0xf63c is only reached on a bigger-id path that never triggers here.
+HONEST ASSESSMENT: the remaining work is genuine full boot-chain bring-up
+(handoff reliability, flash geometry model, then load the L4e/AMSS/APPS stage) —
+a multi-session project, no longer a quick iterative probe. We have proven the
+bootable path EXISTS (VMU via real MMU map, NAND accessor at 0xf088/0xf63c,
+device-ID table at 0xf8c0, all 6 syscalls mappped). The next increment would be
+forcing the flash geometry so 0xf088 takes the real MMIO path, then tracing the
+stage load to completion — but each increment is now hours, not minutes.
+Milestones banked: real MMU map, NAND controller model (self-tested), L4e syscall
+set identified (OKL4), REX API + QSC1110 reference, boot path traced to handoff.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
