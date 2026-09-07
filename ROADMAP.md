@@ -116,6 +116,21 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Incorporar padrão de Save State Dual-Core (`ZeeboSaveStateManager` em `zeebo_save_state.h`) capturando CPU Unicorn context (`uc_context_save`) + regiões mapeadas de memória física/compartilhada.
 - [x] Incorporar mixer de áudio multi-stream (`UnifiedAudioSink` em `zeebo_audio_sink.h`) com controle de canais e vtable HLE/LLE limpa evitando problemas de ciclo de vida e interworking.
 
+### Fase 9: Subsistema Gráfico (Adreno 130 / IGL) — integrado ao build, aguardando MAP_CONTROL
+- [x] Evidência de firmware (GPU_TODO §13): 3D é offload MPU→QDSP5 atrás de fachada OpenGL ES 1.1 ATI-Imageon; **não há ring buffer PM4 A2xx observável do lado ARM11** → descartar `pm4_adreno.h` como produtor (mantido como referência de estudo §14).
+- [x] Esqueleto `IGpuRasterizer` (Citra-style) + 2 backends (software correto + GL host stub) + `rasterizer_factory`, verificado por framebuffer (`gpu_smoke` 3/3: clear, triângulo, pm4-walk).
+- [x] Produtor correto `IglHook` interceptando a vtable IGL/IEGL (80/28 slots, ABI ARMADILHA: R0=1º arg real) → `IGpuRasterizer`, verificado por framebuffer (`igl_smoke` 3/3; 40 slots gl* fixados contra gl_hle.cpp).
+- [x] **Integração no build do emulador** (`tools/cpp/Makefile`: targets `gpu`/`test-gpu`; `make test-gpu` 8/8 PASS) + handoff GPU→display provado por pixels em PPM 640x480 RGB565 (`gpu_display_integration`: clear azul 0x001F e vermelho 0xF800), commit `1508115`.
+- [ ] Ligar `GuestMachine` ao Unicorn no `zeebo_lle_main` (lado do core ARM) — só quando MAP_CONTROL destravar execução real de guest (bloqueio a montante, FINDINGS 5a). Sem isso, nenhuma applet submete GL à vtable.
+- [ ] Fase 2 completa: transform fixed-function (mvp+viewport), texturas/ATITC, multitexture+combine/dot3, backend GL host (ubershader).
+
+### Fase 10: Subsistema QDSP5 (multimídia) — comando mapeado, plano de integração
+- [x] Comando-plane mapeado (FINDINGS 2zz–3c): dispatcher `0x16e8cba0`, 4 task engines (VOICEPROC, VFE, JPEG, AUDPP), enfileiramento SMD/ONCRPC `0x17571748`, packet frame (+0x20 proc, +0x80 payload). Prioridade p/ jogos: **AUDPP ≫ JPEG > VFE > VOICE**.
+- [x] `UnifiedAudioSink` disponível (Fase 8) como mixer PCM — atualmente HLE/hand-fed, **não conectado aos packets QDSP5**.
+- [ ] Q0 (instrumentação): trapear o dispatcher e capturar proc-IDs reais (substituir placeholders `0x1b59`/`0x30000060`) — precisa execução de guest (bloqueio MAP_CONTROL).
+- [ ] Q1 (AUDPP→áudio): consolidar bridges SMD, parsear payload, dirigir `UnifiedAudioSink`, saída WAV/SDL, sintetizar resposta RPC+`rex_set_sigs` (senão o jogo trava em `rex_wait`). Estratégia recomendada: **Option B (RPC short-circuit)** — aguardando decisão de Rafael (documentada no QDSP5_TODO §4).
+- [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — após AUDPP.
+
 ---
 
 ## Regras de Higiene e Verificação

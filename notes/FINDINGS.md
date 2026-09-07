@@ -1690,3 +1690,12 @@ A partir do levantamento dos 5 emuladores HLE conhecidos do Zeebo (Infuse, Zeebu
    - Desacopla o mixer PCM de traps de ciclo de vida (`Release`/`Play`), pronto para integração com o subsistema QDSP5/DMA de áudio do MSM7201A.
    - Validação unitária automatizada implementada em `tools/cpp/test_audio_sink.cpp` confirmando síntese e mixagem estéreo interleaved de 16 bits.
 
+## SESSION 4f — Integração do Subsistema Gráfico (agentes concorrentes GPU/QDSP5)
+
+Revisados os artefatos gerados por outros agentes e integrados ao build canônico do emulador:
+- **GPU** (`tools/cpp/gpu/`): esqueleto `IGpuRasterizer` (Citra-style) + 2 backends + produtor correto `IglHook` (vtable IGL/IEGL 80/28, ABI R0=1º-arg). Evidência do firmware (GPU_TODO §13) provou que o 3D é **offload MPU→QDSP5** atrás de GL ES 1.1 ATI-Imageon — `pm4_adreno.h` rebaixado a estudo.
+- **Validação por framebuffer** (não "compilou"): `gpu_smoke` 3/3, `igl_smoke` 3/3, e o novo `gpu_display_integration` provando o handoff GPU→display em PPM 640x480 RGB565 (clear azul 0x001F / vermelho 0xF800).
+- **Integração**: targets `gpu`/`test-gpu` no `tools/cpp/Makefile`; `make test-gpu` = 8/8 PASS. Commit `1508115`.
+- **QDSP5**: apenas plano codificado em `QDSP5_TODO.md` — comando-plane mapeado (dispatcher `0x16e8cba0`, 4 engines), data plan ausente. `UnifiedAudioSink` existe mas não consome packets.
+- **Bloqueio a montante inalterado**: HashMap MAP_CONTROL (FINDINGS 5a) impede execução real de guest, logo `GuestMachine` não liga ao Unicorn e nada submete GL/áudio à vtable. Integração GPU/QDSP5 = build + provas de framebuffer antes de abrir a porta; abrir a porta é o MAP_CONTROL.
+
