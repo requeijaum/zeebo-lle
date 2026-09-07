@@ -15,6 +15,7 @@
 using u16=uint16_t;
 static std::map<u32,u32> gSec,gCoa;
 static int gSvcCount=0;
+static u32 g_lastSvcp=0;
 static u32 va2pa(u32 va){ auto p=gCoa.find(va>>12); if(p!=gCoa.end()) return p->second+(va&0xFFF);
     auto s=gSec.find(va>>20); if(s!=gSec.end()) return s->second+(va&0xFFFFF); return va; }
 static void build_arm11_map(){
@@ -73,10 +74,33 @@ static void intr_hook(uc_engine*uc,uint32_t,int,void*ud){
         "map_control","space_control","?8","?9","cache","?11","security","lipc","?14","?15"};
     const char* nm = (imm<=0x28 && (imm%4)==0) ? names[imm/4] : "?";
     u32 sp=rreg(uc,UC_ARM_REG_SP);
-    printf("  !! SVC @0x%08x: imm=%#x (%s) sp-mask=~0x%02x lr=%08x r0=%08x r1=%08x r2=%08x\n",
-           off,imm,nm,(unsigned)(~sp)&0xFF, rreg(uc,UC_ARM_REG_LR),
-           rreg(uc,UC_ARM_REG_R0),rreg(uc,UC_ARM_REG_R1),rreg(uc,UC_ARM_REG_R2));
-    uc_emu_stop(uc);
+    u32 ip=rreg(uc,UC_ARM_REG_R12);      // caller SP saved by: mov ip,sp
+    u32 lr=rreg(uc,UC_ARM_REG_LR);       // return address
+    u32 r0=rreg(uc,UC_ARM_REG_R0), r1=rreg(uc,UC_ARM_REG_R1), r2=rreg(uc,UC_ARM_REG_R2);
+    printf("  !! SVC #0x%02x (%s) lr=%08x ip=%08x r0=%08x r1=%08x r2=%08x [insn#%llu]\n",
+           imm,nm,lr,ip,r0,r1,r2,(unsigned long long)gSvcCount);
+    if (++gSvcCount > 10000){ printf("  ... svc budget exceeded\n"); uc_emu_stop(uc); return; }
+    // ---- minimal L4e kernel shim: emulate handler returning to caller ----
+    // L4e syscall return convention: kernel restores caller SP (IP) and returns
+    // to the SVC return address (LR). Write zero outputs to the r0/r1/r2 ptr slots
+    // if they point into mapped RAM, then resume at LR with SP=IP.
+    // emulate successful return: r0 = 0 (L4_OK-ish), outputs cleared
+    u32 ret=0; uc_reg_write(uc,UC_ARM_REG_R0,&ret);
+    // write 0 to each non-zero output pointer (results area on caller stack)
+    // (only if it looks like a stack/ram pointer)
+    for (u32 outp : {r1,r2}){
+        if (outp>=0x00800000 && outp<0x18000000){
+            u32 z=0; uc_mem_write(uc,outp,&z,4); (void)z;
+        }
+    }
+    // restore stack and return to the instruction right AFTER the svc (thunk continues)
+    uc_reg_write(uc,UC_ARM_REG_SP,&ip);
+    u32 cpsr_target = (u32)(off+4);
+    uc_reg_write(uc,UC_ARM_REG_PC,&cpsr_target);
+    g_lastSvcp = off;
+    // restore the caller mode from SPSR_svc (kernel convention: movs pc,lr)
+    u32 spsr=0; uc_reg_read(uc,UC_ARM_REG_SPSR,&spsr);
+    if (spsr) uc_reg_write(uc,UC_ARM_REG_CPSR,&spsr);
 }
 
 int main(int argc,char**argv){
@@ -126,6 +150,11 @@ int main(int argc,char**argv){
     printf("  r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x sp=%08x lr=%08x\n",
            rreg(uc,UC_ARM_REG_R0),rreg(uc,UC_ARM_REG_R1),rreg(uc,UC_ARM_REG_R2),rreg(uc,UC_ARM_REG_R3),
            rreg(uc,UC_ARM_REG_R4),rreg(uc,UC_ARM_REG_R5),rreg(uc,UC_ARM_REG_SP),rreg(uc,UC_ARM_REG_LR));
+    u32 cpsr2=0; uc_reg_read(uc,UC_ARM_REG_CPSR,&cpsr2);
+    printf("  cpsr=%08x (T=%d mode=%d)\n",cpsr2,(cpsr2>>5)&1,cpsr2&0x1F);
+    u32 r6=0,r7=0,r8=0,r9=0,r10=0,r11=0; uc_reg_read(uc,UC_ARM_REG_R6,&r6);uc_reg_read(uc,UC_ARM_REG_R7,&r7);
+    uc_reg_read(uc,UC_ARM_REG_R8,&r8);uc_reg_read(uc,UC_ARM_REG_R9,&r9);uc_reg_read(uc,UC_ARM_REG_R10,&r10);uc_reg_read(uc,UC_ARM_REG_R11,&r11);
+    printf("  r6=%08x r7=%08x r8=%08x fp=%08x r10=%08x r11=%08x\n",r6,r7,r8,r9,r10,r11);
     uc_close(uc);
     return 0;
 }

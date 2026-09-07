@@ -781,6 +781,23 @@ is EMULATING the L4e kernel dispatch for that svc so control returns to AMSS
 (REX/L4 server iguana). This is the kernel-behavior piece, ported OKL4 is the
 reference. Marked as milestone: AMSS in-harness reaches schedule syscall.
 
+## SESSION 2kk — L4e syscall shim (minimal kernel): AMSS crosses schedule svc, hits loader-kernel handshake
+Added a minimal L4e kernel-shim to zeebo_boot's SAR intr_hook: on `svc`, emulate
+the kernel returning to the caller (write zero outputs, SP=IP from mov ip,sp,
+PC=insn-after-svc). RESULT — AMSS crosses real syscalls:
+  SVC #0x14 (schedule) lr=170519e5 ip=bfefc0 ...
+  SVC #0x140c (?)  lr=17235e71 ip=bfef84 ...   (2nd syscall, fewer args)
+then runs ~285820 insns in Thumb (cpsr T=1) until UC_ERR_MAP at 0x17151c0c:
+  `ldr r2,[r1]` with r1=0x20020005 — the SAME handshake token (0x20020005) seen
+  at the APPSBL boot. I.e. the loader->kernel HANDSHAKE: the firmware writes the
+  magic token to a struct and expects the REAL kernel to respond/set-up shared
+  state. A syscall-return shim cannot satisfy that — it needs real kernel
+  behavior (create TCBs, config MMU, IPC, scheduler state). So:
+  * GAIN: harness can now cross schedule/contex-switch syscalls (M5 partial).
+  * CEILING: real boot needs the L4e kernel present/responsive to the handshake.
+  The ported OKL4 remains the reference for that block.
+Fix also: mode restoration via SPSR_svc on syscall return (kept T flag).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
