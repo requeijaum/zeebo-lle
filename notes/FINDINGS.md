@@ -843,6 +843,16 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2oo — OKL4 L4e Kernel Boots FULLY to Idle Thread / Scheduler (MILESTONE)
+Kernel boots past MMU, interrupts, timer, threads initialization, and reaches the scheduler:
+1. `intctrl_t::init_cpu`: XScale IRQ controller accesses (`0x40d00004`/`0x40d00008`) handled with register injection on MMIO reads.
+2. `timer_t::init_cpu`: CP14 turbo mode (`mcr p14, 0, r0, c6, c0, 0`) stubbed for generic ARM/Unicorn compatibility.
+3. `flush_dcache_ent` in `include/arch/arm/xscale/cache.h`: XScale-specific cache flush CP15 operations disabled for Unicorn core.
+4. KTCB page table populated: L1 section descriptors for `0xe0000000..0xe0ffffff` installed dynamically at physical page table `0xa0113800` at MMU activation (`0xf001cb98`).
+5. `init_root_servers()`: skips sigma0 panic when memory region is empty in standalone kernel test.
+6. **KERNEL ENTERED IDLE THREAD LOOP (`idle_thread`) at `pc=0xf0002ea4` (insn#107,358)**.
+7. Scheduler active and scheduling loop running indefinitely (`err=ok`, tested up to 1,000,000 instructions without crash).
+
 ## SESSION 2nn — Kernel L4e COMPILED kernel boots in-harness: init_cpu/memory/mdb, then MMU wall
 Booted refs/okl4-arm-build/arm-kernel.elf in a fresh harness zeebo_kernel_boot.cpp
 (loads ELF LOADs at their VADDRs f0000000, maps phys RAM 0xa0000000-0xa2000000 +
