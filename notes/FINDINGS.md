@@ -650,6 +650,25 @@ Build: make (or g++ -std=c++23 -O2 zeebo_harness.cpp -lunicorn -lcapstone).
 This gives a native-C++ full debug harness with the functional device models —
 the same capability as the Python mini-boot, inside the interactive C++ tool.
 
+## SESSION 2dd — Consolidated; corpus check: OKL4 2.1.1 kernel source acquired (BSD!)
+Re-consulted local+remote corpus after consolidation.
+LOCAL: no L4e/REX/AMSS kernel source beyond what we have (SDK matches are false).
+REMOTE (facilidade real):
+- rochus-keller/OKL4 = the complete L4e microkernel (Pistachio lineage) + Iguana
+  system server, **OKL4 2.1.1-fix7 (June 2008) = last open-source, BSD-style
+  license**. This is the SAME L4e kernel family the Qualcomm/Zeebo runs (README
+  confirms Qualcomm modem processors use it). Copied to refs/okl4-2.1.1-fix7/
+  (pistachio+iguana+arch). ~6.8MB, compile-able C++ reference.
+- Boards: OKL4 ships imx31/pc99/pxa/s3c2410 — NO msm7k board; adapting one
+  (boot from imx31/pxa template) is the route to a native-L4e boot.
+- msm7x30/android_kernel_qcom_msm7x30 = AOSP kernel for the msm7x30 family with
+  arch/arm/mach-msm + mtd/nand drivers — another source for SoC/Kernel boot.
+- qcom-sources15 GitLab = leaked Qualcomm sources (large; not explored deeply).
+VALUE: we now have the actual L4e kernel SOURCE (BSD) to reference/port, not just
+the refman PDF. The clean-room boundary: using OKL4 (BSD) is fine (open-source,
+different from BREW). This materially de-risks the "boot L4e kernel" phase.
+RESUME.md updated.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
