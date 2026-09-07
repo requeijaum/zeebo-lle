@@ -635,6 +635,21 @@ bring-up directly using L4e refman + kernel msm_nand + MMU map, or (ii) wait/
 collaborate on the QEMU machine. Pause-and-consolidate recommended; mini-boot is
 the session's solid milestone.
 
+## SESSION 2cc — C++23 port of NandController + DMOVModel (functional models in harness)
+Tudo portado para C++23 (Rafael pediu). zeebo_devices.h = NandController
+(dump-backed, 2048B/page data read, FETCH_ID, PAGE_READ, CFG defaults) +
+DMOVModel (walk pointer/command lists, EXEC -> drain-cursor resets, CRCI-NAND
+routing, RAM copy). zeebo_devices_test.cpp self-test: 6/6 PASS (FETCH_ID,
+PAGE_READ[0], PAGE_READ[11712]=APPSBL vector, status ready, DMA page 11712, FULL
+2048B DMA read — all byte-identical to dump). zeebo_harness.cpp now WIRES the
+models: on_mem dispatches DMOV_CMD_PTR(NAND chan 3)=write -> DMOVModel.exec, and
+0xa0a00000 -> NandController. Run OpenZeebo zloader: `dev` shows DMOV execs=1
+(flash_read_config via real DMA), cfg0=0xa25400c0 cfg1=0x4745e, 4M insns no
+UC error.
+Build: make (or g++ -std=c++23 -O2 zeebo_harness.cpp -lunicorn -lcapstone).
+This gives a native-C++ full debug harness with the functional device models —
+the same capability as the Python mini-boot, inside the interactive C++ tool.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.

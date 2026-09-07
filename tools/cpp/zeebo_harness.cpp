@@ -48,6 +48,7 @@
 #include <thread>
 #include <unicorn/unicorn.h>
 #include <capstone/capstone.h>
+#include "zeebo_devices.h"
 
 using u8=uint8_t; using u16=uint16_t; using u32=uint32_t; using u64=uint64_t;
 
@@ -58,13 +59,19 @@ static std::map<u32,u64> g_mmioCount;   // MMIO access counts by addr
 static bool g_mmioLog=false;
 static u64 g_dmovExecs=0;
 
+static uc_engine* g_uc = nullptr;
+
+// --- device models (functional) ---
+static NandController* g_nand=nullptr;
+static DMOVModel*     g_dmov=nullptr;
+static const std::string g_nandData="/home/rafaelfrequiao/projects/zeebo-lle/nand/1.1.2.bin";
+static const std::string g_nandSpare="/home/rafaelfrequiao/projects/zeebo-lle/nand/1.1.2_spare.bin";
+static void init_devices(){ if(!g_nand){ g_nand=new NandController(g_nandData,g_nandSpare); g_dmov=new DMOVModel(g_uc,*g_nand); } }
+
 // --- loaded blob ---
 static std::vector<u8> g_blob;
 static u32 g_loadBase=0;
 static bool g_blobLoaded=false;
-
-// --- Unicorn handle ---
-static uc_engine* g_uc = nullptr;
 
 // --- run control ---
 static std::vector<u32> g_bps;
@@ -93,14 +100,50 @@ static void on_mem(uc_engine*uc, uc_mem_type type, uint64_t addr, int size, int6
     if (addr < 0x80000000ULL) return; // RAM passes through (real memory)
     g_mmioCount[(u32)addr]++;
     if (g_mmioLog)
-        printf("  [MMIO] %s 0x%08x sz=%d %s\n", (type&UC_MEM_WRITE)?"W":"R",
-               (u32)addr, size, (type&UC_MEM_WRITE) ? "" : "");
+        printf("  [MMIO] %s 0x%08x sz=%d val=0x%llx\n", (type&UC_MEM_WRITE)?"W":"R",
+               (u32)addr, size, (unsigned long long)value);
+
+    // DMOV SD1 command/result/status/readback (SD1 base 0xa9400000)
+    if (addr>=DMOV_SD1_BASE && addr<DMOV_SD1_BASE+0x400){
+        u32 off=(u32)(addr-DMOV_SD1_BASE);
+        if (type==UC_MEM_WRITE){
+            // writing CMD_PTR (off+ch*4 == 0x00c for NAND chan 3) => run DMA
+            if (off==dmov_reg(DMOV_CMD_PTR,DMOV_NAND_CHAN)-DMOV_SD1_BASE){
+                if (!g_dmov) init_devices();
+                g_dmov->exec_cmdptr((u32)value);
+                g_dmovExecs=g_dmov->exec_count();
+            }
+            g_sticky[(u32)addr]=(u32)value;
+        } else {
+            u32 val=0; auto it=g_sticky.find((u32)addr); if(it!=g_sticky.end()) val=it->second;
+            // result/status bands: return DONE
+            if (off>=0x200&&off<0x210) val=3;      // RSLT_VALID|CMD_PTR_RDY
+            else if (off>=0x40&&off<0x50) val=DMOV_RSLT_DONE;
+            uc_mem_write(uc,(u32)addr,&val,sizeof(val));
+        }
+        return;
+    }
+    // NAND controller (0xa0a00000)
+    if (addr>=NAND_BASE && addr<NAND_BASE+0x400){
+        if (!g_nand) init_devices();
+        u32 off=(u32)(addr-NAND_BASE);
+        if (type==UC_MEM_WRITE){
+            g_nand->write(off,(u32)value,size);
+        } else {
+            u32 v=g_nand->read(off,size);
+            // drain-cursor reads are handled by DMOVModel; direct reads of buffer
+            uc_mem_write(uc,(u32)addr,&v,sizeof(v));
+        }
+        return;
+    }
     if (type == UC_MEM_WRITE){
         g_sticky[(u32)addr]=(u32)value;
     } else {
         u32 v=0;
         auto it=g_sticky.find((u32)addr);
         if (it!=g_sticky.end()) v=it->second;
+        // GPT free-running counter advances so delay loops exit
+        if (addr==0xc0100004){ v=64; }
         uc_mem_write(uc,(u32)addr,&v,sizeof(v));
     }
 }
@@ -312,6 +355,10 @@ static void usage(){
 static void eval(const std::string&line){
     std::istringstream ss(line); std::string cmd; ss>>cmd;
     std::transform(cmd.begin(),cmd.end(),cmd.begin(),[](unsigned char c){return (char)std::tolower(c);});
+    if(cmd=="dev"){ printf("  DMOV execs=%llu NAND last_cmd=%#x cfg0=%#x cfg1=%#x id=%#x\n",
+        (unsigned long long)(g_dmov?g_dmov->exec_count():0),
+        g_nand?g_nand->debug_last_cmd():0, g_nand?g_nand->read(R_DEV0_CFG0,4):0,
+        g_nand?g_nand->read(R_DEV0_CFG1,4):0, g_nand?g_nand->read(R_READ_ID,4):0); return; }
     if(cmd=="help"){ usage(); return; }
     if(cmd=="regs"){ cmd_regs(); return; }
     if(cmd=="cpsr"){ cmd_cpsr(); return; }
@@ -345,6 +392,7 @@ int main(int argc,char**argv){
     if(argc>=3) base=argv[2];
     init_uc();
     build_default_mmu();
+    init_devices();   // NandController + DMOVModel wired to g_uc
     if(!blob.empty()){
         if(!load_blob(blob,(u32)parse_hex(base))){ printf("failed to load %s\n",blob.c_str()); return 1; }
         printf("loaded %s @0x%08zx (%zu bytes)\n",blob.c_str(),(size_t)parse_hex(base),g_blob.size());
