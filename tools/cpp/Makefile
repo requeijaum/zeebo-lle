@@ -3,7 +3,19 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
 LIBS := -lunicorn -lcapstone
 
-all: zeebo_harness zeebo_devices_test
+all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink
+
+zeebo_lle_main: zeebo_lle_main.cpp
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_main.cpp -lunicorn $(shell pkg-config --cflags --libs sdl2)
+
+zeebo_lle_mod_probe: zeebo_lle_mod_probe.cpp
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_mod_probe.cpp -lunicorn
+
+test_save_state: test_save_state.cpp zeebo_save_state.h
+	$(CXX) $(CXXFLAGS) -o $@ test_save_state.cpp -lunicorn
+
+test_audio_sink: test_audio_sink.cpp zeebo_audio_sink.h
+	$(CXX) $(CXXFLAGS) -o $@ test_audio_sink.cpp
 
 zeebo_harness: zeebo_harness.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_harness.cpp $(LIBS)

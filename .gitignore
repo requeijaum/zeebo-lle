@@ -15,4 +15,6 @@ tools/cpp/zeebo_lle_main
 tools/cpp/zeebo_lle_mod_probe
 tools/cpp/test_save_state
 tools/cpp/test_audio_sink
+GPU_TODO.md
+QDSP5_TODO.md
 refs/tainted/
