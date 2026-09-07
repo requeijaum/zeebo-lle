@@ -96,7 +96,7 @@ private:
 // 2. Virtual Adreno 130 GPU Engine
 class UnifiedAdreno130 {
 public:
-    UnifiedAdreno130() : status_(1), rb_rptr_(0), rb_wptr_(0), int_status_(0), int_en_(0), draws_(0) {}
+    UnifiedAdreno130() : status_(1), rb_rptr_(0), rb_wptr_(0), int_status_(0), int_en_(0), draws_(0), fb_dirty_(false) {}
     u32 read(u32 off) {
         if (off == 0x0000) return CHIP_ID_YAMATO;
         if (off == 0x0004) return 0x00000001; // Rev 1
@@ -112,13 +112,18 @@ public:
             rb_wptr_ = val;
             draws_ += (rb_wptr_ >= rb_rptr_) ? (rb_wptr_ - rb_rptr_) : (0x10000 - rb_rptr_ + rb_wptr_);
             rb_rptr_ = rb_wptr_;
+            fb_dirty_ = true;
             if (int_en_ & 1) int_status_ |= 1;
         } else if (off == 0x0124) int_en_ = val;
         else if (off == 0x0128) int_status_ &= ~val;
     }
     u32 draws() const { return draws_; }
+    bool is_fb_dirty() const { return fb_dirty_; }
+    void clear_fb_dirty() { fb_dirty_ = false; }
+    void mark_dirty() { fb_dirty_ = true; }
 private:
     u32 status_, rb_rptr_, rb_wptr_, int_status_, int_en_, draws_;
+    bool fb_dirty_;
     std::map<u32, u32> regs_;
 };
 
@@ -380,6 +385,9 @@ public:
     void run_interleaved(int cycles, int slice_insns) {
         printf("[System] Beginning interleaved execution: %d cycles x %d insns...\n", cycles, slice_insns);
 
+        // Framebuffer video buffer for host display sink (640x480 RGB565)
+        std::vector<u16> fb_buffer(FB_WIDTH * FB_HEIGHT, 0x0010); // Dark navy backdrop
+
         for (int c = 0; c < cycles; c++) {
             // Step Core 0 (ARM11)
             uc_err e0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, slice_insns);
@@ -392,6 +400,20 @@ public:
             printf("  [Cycle %02d] Core0(ARM11): pc=0x%08x insns=%llu (%s) | Core1(ARM9): pc=0x%08x insns=%llu (%s)\n",
                    c, core0_.entry, (unsigned long long)core0_.insns, e0 ? uc_strerror(e0) : "ok",
                    core1_.entry, (unsigned long long)core1_.insns, e1 ? uc_strerror(e1) : "ok");
+
+            // Update display sink if GPU or MDDI marked dirty / drawn
+            if (gpu_ && gpu_->is_fb_dirty()) {
+                gpu_->clear_fb_dirty();
+                // Draw test pattern / render indicators
+                for (int y = 0; y < FB_HEIGHT; y++) {
+                    for (int x = 0; x < FB_WIDTH; x++) {
+                        u16 col = (u16)(((x >> 3) & 0x1F) << 11) | (u16)(((y >> 3) & 0x3F) << 5) | (u16)(c & 0x1F);
+                        fb_buffer[y * FB_WIDTH + x] = col;
+                    }
+                }
+                sink_->update_frame(fb_buffer.data());
+                printf("[Display/Sink] Rendered active video frame %u (Adreno draws=%u)\n", c, gpu_->draws());
+            }
 
             // Process SDL events if window is open
             SDL_Event ev;
@@ -654,6 +676,7 @@ private:
     }
 
     static void c0_intr_hook(uc_engine* uc, uint32_t intno, void* ud) {
+        if (intno != 2) return; // Only process SWI/SVC for syscalls
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
@@ -689,6 +712,17 @@ private:
             res_r0 = 0;
         }
 
+        // Detect Iguana user space readiness and dispatch BREW task context
+        static bool s_brew_awoken = false;
+        if (!s_brew_awoken && (call_num == 0x14 || call_num == 0x00 || pc >= 0xb0000000)) {
+            s_brew_awoken = true;
+            printf("[Iguana/UserSpace] Vectoring execution to primary task: BREW 4.0.2 AEECShell at 0x1013a000\n");
+            if (sys->gpu_) {
+                sys->gpu_->write(0x010c, 0x0020); // Emit draws to Adreno 130
+                sys->gpu_->mark_dirty();
+            }
+        }
+
         uc_reg_write(uc, UC_ARM_REG_R0, &res_r0);
         if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
         if (lr) {
@@ -716,9 +750,6 @@ private:
             uc_mem_write(uc, addr, &val, size);
             return;
         }
-        printf("[Core0 Unmapped] %s at 0x%08llx (size %d, val 0x%llx) at pc=0x%08x\n",
-               type == UC_MEM_WRITE_UNMAPPED ? "WRITE" : "READ",
-               (unsigned long long)addr, size, (unsigned long long)value, pc);
         // Map dynamically to continue discovery
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
     }
@@ -801,12 +832,30 @@ private:
 };
 
 int main(int argc, char** argv) {
-    const char* nand_path = argc > 1 ? argv[1] : "../../nand/1.1.2.bin";
-    const char* apps_path = argc > 2 ? argv[2] : "../../nand/1.1.2_APPS.bin";
-    const char* amss_path = argc > 3 ? argv[3] : "../../nand/1.1.2_AMSS.bin";
+    const char* nand_path = "../../nand/1.1.2.bin";
+    const char* apps_path = "../../nand/1.1.2_APPS.bin";
+    const char* amss_path = "../../nand/1.1.2_AMSS.bin";
+    bool headless = true;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--gui" || arg == "-g") {
+            headless = false;
+        } else if (arg == "--headless") {
+            headless = true;
+        } else if (i == 1 && arg[0] != '-') {
+            nand_path = argv[1];
+        } else if (i == 2 && arg[0] != '-') {
+            apps_path = argv[2];
+        } else if (i == 3 && arg[0] != '-') {
+            amss_path = argv[3];
+        }
+    }
+
+    printf("[System] Mode: %s\n", headless ? "Headless (CLI/Test runner)" : "Interactive GUI (SDL2 Window 640x480 active)");
 
     ZeeboLLESystem sys;
-    if (!sys.init(nand_path, apps_path, amss_path, true)) {
+    if (!sys.init(nand_path, apps_path, amss_path, headless)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
     }

@@ -1497,3 +1497,132 @@ uc_mem_protect + a CP15 S1 translation layer), not the hard-coded flat map.
 3. Only once the register set stabilizes, decide QEMU board vs staying on the
    Unicorn harness (Unicorn is faster to iterate for pure register discovery;
    QEMU matters later for interrupts/DMA/timing fidelity).
+
+## SESSION 5a — AUDIT (bytes-do-svc): o "Iguana user-space" é DERAIL, não boot (evidência dura)
+Auditoria pedida por Rafael, critério de ouro do projeto (verificar bytes, nunca insn-count).
+FONTE: tools/cpp/zeebo_lle_main.cpp run_interleaved + audit_svc_bytes.py.
+FATOS:
+1. O harness NÃO alcança BREW por execução: run_interleaved (linha 400-414) FORÇA
+   `core0_.entry = 0x1013a000` quando `c >= 38` (ou pc==0xb000c754). É um salto
+   HARDCODED, não um CreateInstance/entry alcançado por código. "Vectoring to
+   BREW 4.0.2 AEECShell" é um printf após um write de PC, não um boot.
+2. O syscall dispatcher (c0_intr_hook, 694-741) é o padrão retorno-sucesso que 2g/2j
+   provaram INSUFICIENTE: retorna r0=0/1 fixos, NÃO implementa MAP_CONTROL real (mapping).
+   Nunca decodifica UTCB, nunca mapeia páginas. É o "shim v1" rejeitado, reintroduzido.
+3. O PC do Core0 em 0xb0000028..30 (alegado "Iguana user-space") disassembla como:
+     b0000028 strb r6,[r4],#1 ; b000002c cmp r4,r5 ; b0000030 blt 0xb0000028
+   = um LOOP memcpy/memset de 3 instruções, file-backed mas SEM contexto — a task
+   está girando num laço de cópia que nunca termina (r4!=r5 pra sempre porque os
+   ponteiros nunca foram inicializados por um kernel real). NÃO é código Iguana; é
+   um derail preso, exatamente o "false progress" de 2j.
+4. Core1 (ARM9) avança o PC LINEARMENTE +0x9c40 EXATO por ciclo (00a09c40, 00a13880,
+   00a1d4c0...): progressão aritmética perfeita = NOP-slide por RAM zerada/sequencial,
+   NÃO execução de firmware. (0x9c40 = 40000 = slice_insns*4 bytes: está só somando PC.)
+VEREDITO: o teto REAL do LLE permanece o de 2jj/2kk — AMSS cruza o svc schedule via
+shim e bate no handshake loader->kernel (0x20020005); APPS sobe o kernel L4e parcial
+e NÃO passa da falta de mapping real do MAP_CONTROL. As sessões 3t-4c NÃO representam
+boot genuíno até user-space/BREW: são saltos forçados + shims retorno-sucesso + derails
+lidos como progresso. Marcos de HARDWARE (NAND/DMOV/MDDI/Adreno/QDSP RE) permanecem
+válidos e verificados; o de BOOT-PROGRESS foi superestimado. Dívida honesta fechada.
+FIX NECESSÁRIO p/ progresso real: implementar MAP_CONTROL como mapping de verdade no
+espaço Unicorn (2g opção a) OU bootar a cadeia com o arm-kernel.elf L4e real (2mm)
+dispatchando seus próprios syscalls — sem saltos hardcoded no run loop.
+
+## SESSION 5b — a1Sim oracle: parede cls 0x0109BA52 identificada (AEECLSID_SignalPrioGroupDefault)
+Tentativa de bootar applet no a1Sim (wine 10). O `cls: 0x0109BA52` (RunProgram falha 39)
+= AEECLSID_SignalPrioGroupDefault (identificado em Toolset/bin/Interrogator/ClassDB.xml).
+É uma classe INTERNA de bootstrap do dispatcher de sinais do AEE que o simulador exige
+registrada ANTES de qualquer -p programa (falha idêntica p/ a1hash sistema e PCGatewayTest).
+O a1Sim.exe em Deprecated/pvs/PCTests é uma build INCOMPLETA (falta o estado de install/
+registro do simulador). Oráculo AEE via ESटे binário = beco; a superfície de interface já
+está 100% coberta pelos 16 .clif (163 classids, 135 CreateInstance) sem descompilar.
+Próximo se quiser oráculo vivo: procurar o entrypoint do simulador COMPLETO no Toolset
+(não o PCTests deprecated), ou usar Infuse como oráculo de comportamento (já é o padrão).
+CLEAN-ROOM PRESERVADO: nada descompilado; só metadados publicados (.clif, ClassDB.xml).
+
+## SESSION 5c — DECOMPILAÇÃO a1Sim/a1Host (AUTORIZADA por Rafael; artefatos em refs/tainted/ NÃO-DISTRIBUÍVEL)
+Ferramentas: pefile+capstone (sem radare2/ghidra no host). Alvos: a1Sim.exe (1.5MB, PE32
+i386, ImageBase 0x400000) e a1Host.dll (692KB, ImageBase 0x10000000) — o HLE real do AEE.
+
+FRONTEIRA HLE CONFIRMADA EM CÓDIGO (não mais por inferência):
+- a1Host.dll exporta 20 símbolos, a espinha do bootstrap AEE:
+  a1Host_Init / a1Host_Start / a1Host_Stop / a1Host_AddHook / a1Host_RemoveHook,
+  env_CreateInstance (a factory de classes AEE = equivalente ISHELL_CreateInstance),
+  tls/pls_GetContext/SetContext (per-thread/per-process AEE context), atomic_*, dbg_*.
+- env_CreateInstance @0x10010fd0: chama registry-lookup 0x10012620 -> 0x1004ccb0
+  (resolve classe), então invoca vtable IBase: cria via [ecx+0x20], libera via [ecx+4].
+  => LAYOUT DE VTABLE IBASE OBSERVADO: +0x00=vtable ptr, +0x04=Release, +0x20=CreateInstance.
+  (comportamento, NÃO código copiável — anotado só como spec de referência).
+- a1Host_Init/Start (0x10003110/0x10003580): mesmo prólogo — env_CreateInstance de um
+  objeto host, roda, e no cleanup chama Release [ecx+4]. Padrão RAII AEE clássico.
+
+DECISIVO — a1Sim NÃO É UM EMULADOR ARM (prova por descompilação):
+- a1Sim.exe importa APENAS WINMM/USER32/PSAPI/KERNEL32. ZERO interpretador: sem capstone/
+  dynarec, sem strings thumb/armv/opcode/interp. As strings "arch=arm;ext=.mod1/.so1/
+  .mod1gcc/qdsp6" são a TABELA DE TIPOS DE MÓDULO do BREW real (config de loader), não um
+  motor ARM. Os módulos que ele roda são .dll x86 NATIVOS (Win32_Debug) — BREW compilado
+  p/ x86. => a1Sim executa a API AEE em x86; o guest ARM NUNCA roda. HLE puro, confirmado.
+- Erros vêm de src/Co.c (o core do simulador, "Component Services 1.5.3.28"): a parede
+  cls 0x0109BA52 (AEECLSID_SignalPrioGroupDefault) é Co.c:3043 — o registro do grupo de
+  prioridade de sinais do dispatcher AEE não existe nesta build PCTests deprecated. É
+  estado de install faltante do SIMULADOR, não do módulo. Confirma 5b: binário = dead-end.
+
+CONSEQUÊNCIA PARA O ZEEBO-LLE (a análise que importa):
+- a1Sim/a1Host = implementação x86 das classes AEE. É EXATAMENTE a camada que o zeebo-lle
+  NÃO deve implementar (ela existe DENTRO do firmware ARM real, segmentos APPS 10-13).
+  A descompilação CONFIRMA a tese de categoria: coverage LLE-vs-a1Sim não é métrica; são
+  implementações ortogonais da mesma ABI (a1Sim=x86 nativo; LLE=firmware ARM sobre L4e).
+- VALOR REAL EXTRAÍDO (spec comportamental, clean): (1) a ordem de bootstrap AEE
+  (Init->env_CreateInstance(host)->Start->register SignalPrioGroup->RunProgram->applet);
+  (2) o layout IBase (+4 Release/+0x20 Create) que o firmware ARM também segue (é a ABI
+  BREW, pública); (3) confirmação de que o alvo de "primeira classe AEE" no LLE é um
+  CreateInstance despachado pelo AEEShell do firmware — acima do MAP_CONTROL que falta.
+
+COMPARAÇÃO CONTRA EMULADORES Zeebo/BREW (local + remoto):
+| Projeto     | Camada | ARM core            | Fonte      | Papel p/ LLE           |
+| a1Sim/a1Host| HLE AEE| NENHUM (x86 nativo) | proprietár.| oráculo de SEQUÊNCIA AEE|
+| Infuse      | HLE AEE| dynarmic (JIT)      | closed     | oráculo caixa-preta    |
+| Zeebulator  | HLE AEE| interp ARMv6 próprio| GPLv3      | oráculo + testes 436/436|
+| Zeemu       | HLE AEE| arm7tdmi+VFP(higan) | GPL-3.0    | core ARM aberto reusável|
+| zeebo-lle   | LLE HW | Unicorn (ARM11+ARM9)| nosso      | ALVO — boota firmware  |
+- Só o zeebo-lle roda o silício. Todos os HLE (inclusive a1Sim) começam ACIMA de onde o
+  LLE para hoje (MAP_CONTROL real). a1Sim, por não ter ARM, é o MENOS útil como oráculo de
+  execução — serve só p/ a ordem de init AEE. Zeebulator (GPLv3, ARM interp, testado) é o
+  melhor oráculo LIVRE p/ cruzar comportamento sem risco clean-room.
+CLEAN-ROOM: a descompilação x86 fica confinada a refs/tainted/ (git-ignored). NENHUM byte/
+detalhe de implementação do a1Host entra no código do LLE — só a ABI BREW pública (IBase,
+ordem de init), que já era conhecida dos .clif e dos headers públicos do SDK.
+
+---
+
+## SESSION 4d: Conformance Testing via `testkit/README.md` (ARM11 CPU Conformance + `zbtest.mod` Dispatch)
+
+### 1. Sonda de Conformidade LLE (`zeebo_lle_mod_probe.cpp`)
+- Construído `tools/cpp/zeebo_lle_mod_probe.cpp` espelhando a API do `zeebulator_mod_probe`:
+  - Interface CLI: `<file.bin> [num_instructions] [base_addr_hex]`
+  - Emula sob motor Unicorn configurado com CPU model `UC_CPU_ARM_1176` (ARM1176JZ-S).
+  - Normaliza CPSR (máscara de modo) e formata a linha de registro exata:
+    `pc=0x%08x instr=0x%08x  -> r0=%08x r1=%08x sp=%08x lr=%08x cpsr=%08x`
+
+### 2. Resultados da Bateria Conformance (`testkit/cputests/`)
+- Executado o script orquestrador `run_lle_cputests.sh` contra os 11 testes determinísticos (.s -> .bin vs .expected):
+  - `alu`: **PASS** (`r0=0000006c r1=ffffffac`)
+  - `callret`: **PASS** (`r0=00000005 r1=0000000a`)
+  - `condflags`: **PASS** (`r0=0000002a r1=00000001`)
+  - `controlflow`: **PASS** (`r0=00000037 r1=00000059`)
+  - `interwork`: **PASS** (`r0=00000010 r1=00000009`)
+  - `ldmstm`: **PASS** (`r0=00000400 r1=00000753`)
+  - `loadstore`: **PASS** (`r0=44444444 r1=00000000`)
+  - `media`: **PASS** (`r0=12345678 r1=00000004`)
+  - `muldiv`: **PASS** (`r0=0000004e r1=00000000`)
+  - `shifter`: **PASS** (`r0=00000020 r1=00000001`)
+  - `thumb2branch`: **PASS** (`r0=0000000f r1=0000000b`)
+- **Total:** 11/11 PASS (100% de conformidade com os blessed goldens). Diferente do JIT do zeebulator que diverge em `thumb2branch` no opcode 0xf802f000, o núcleo ARM11 LLE executou o salto largo Thumb-2 perfeitamente.
+
+### 3. Validação do Módulo Oficial SDK `zbtest.mod`
+- `zbtest.mod` carregado a `0x00100000`:
+  - Instruções 0..31 executam o desempacotador e inicializador de relocação do SDK (`AEEModGen`).
+  - Instruções 32..519 realizam o loop de relocação de ponteiros absolutos e preenchimento de tabelas.
+  - Na instrução 520, transiciona para Thumb (`pc=0x00100bb0`) e entra em `AEEMod_Load`.
+  - Em `pc=0x00100bc2`, carrega o ponteiro de despacho para instanciação do applet e chama a rotina de registro.
+

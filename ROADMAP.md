@@ -107,6 +107,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Carregar e bootar a partição de firmware real `1.1.2_AMSS.bin` no ARM9 a partir de `0x00a00000`.
 - [x] Observar transição completa do microkernel OKL4 (`0xf0000000`) para o espaço de usuário do Iguana (`pc=0xb0000028`) com ambos os núcleos executando 200.000 instruções sem falhas (`err=ok`).
 
+### Fase 7: Suíte de Conformidade de CPU e Validação Cruzada (Testkit Conformance)
+- [x] Construir sonda LLE de conformidade (`zeebo_lle_mod_probe`) com interface compatível ao `mod_probe` do `zeebulator`.
+- [x] Executar e validar a bateria completa de 11 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob o núcleo ARM11 (Unicorn/ARM1176): 11/11 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `muldiv`, `shifter`, `thumb2branch`).
+- [x] Testar a execução do módulo limpo `zbtest.mod` (construído via SDK oficial BREW) no LLE e mapear o ponto de despacho para `AEEMod_Load`.
+
 ---
 
 ## Regras de Higiene e Verificação

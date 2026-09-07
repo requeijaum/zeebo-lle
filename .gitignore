@@ -12,3 +12,5 @@ tools/cpp/zeebo_partition
 tools/cpp/zeebo_elf
 tools/cpp/zeebo_devices_test
 tools/cpp/zeebo_lle_main
+tools/cpp/zeebo_lle_mod_probe
+refs/tainted/
