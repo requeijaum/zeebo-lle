@@ -346,7 +346,7 @@ private:
 
         // Core 0 L4e Virtual Windows
         uc_mem_map(core0_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel High VA
-        uc_mem_map(core0_.uc, 0xb0000000, 0x01000000, UC_PROT_ALL); // Iguana / User VA
+        uc_mem_map(core0_.uc, 0xb0000000, 0x02000000, UC_PROT_ALL); // Iguana / User VA
         uc_mem_map(core0_.uc, 0x00000000, 0x00100000, UC_PROT_ALL); // Zero page / Vectors
 
         // AMSS Physical RAM space for Core 1
@@ -486,9 +486,10 @@ private:
 
             u32 target = pa ? pa : va;
             uc_mem_write(core0_.uc, target, d.data() + off, fs);
-            if (va && va != target) {
-                // Also mirror to VA window if mapped
-                uc_mem_write(core0_.uc, va, d.data() + off, fs);
+            // If segment has different PA and VA, map both
+            if (pa && (pa & ~0xFFFu) != (va & ~0xFFFu)) {
+                uc_mem_map(core0_.uc, pa & ~0xFFFu, ((nmem+0xFFF)&~0xFFFu)+0x1000, UC_PROT_ALL);
+                uc_mem_write(core0_.uc, pa, d.data() + off, fs);
             }
         }
         return true;
