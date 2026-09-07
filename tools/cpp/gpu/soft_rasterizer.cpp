@@ -47,11 +47,10 @@ private:
         auto c=[](f32 x){ return (u32)std::lround(std::clamp(x,0.f,1.f)*255.f); };
         u32 R=c(r)>>3, G=c(g)>>2, B=c(b)>>3; return (u16)((R<<11)|(G<<5)|B);
     }
-    // Map normalized-ish clip coords to screen (assumes verts already in [-1,1] or
-    // window space upstream; FASE 2 wires the real matrix pipeline).
+    // Mapeia NDC [-1,1] para o viewport (vx,vy,vw,vh), y-flip p/ tela top-down.
     void fill_tri(const Vertex&a,const Vertex&b,const Vertex&c){
-        auto sx=[&](f32 x){ return (int)((x*0.5f+0.5f)*kFbWidth); };
-        auto sy=[&](f32 y){ return (int)((1.f-(y*0.5f+0.5f))*kFbHeight); };
+        auto sx=[&](f32 x){ return vx_ + (int)((x*0.5f+0.5f)*vw_); };
+        auto sy=[&](f32 y){ return vy_ + (int)((1.f-(y*0.5f+0.5f))*vh_); };
         int x0=sx(a.x),y0=sy(a.y),x1=sx(b.x),y1=sy(b.y),x2=sx(c.x),y2=sy(c.y);
         int minx=std::max(0,std::min({x0,x1,x2})), maxx=std::min(kFbWidth-1,std::max({x0,x1,x2}));
         int miny=std::max(0,std::min({y0,y1,y2})), maxy=std::min(kFbHeight-1,std::max({y0,y1,y2}));

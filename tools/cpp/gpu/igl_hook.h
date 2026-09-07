@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <cmath>
 
 namespace zeebo::gpu {
 
@@ -66,6 +67,50 @@ struct GuestArray {
     int  stride=0;      // 0 = tightly packed
 };
 
+namespace glenum2 { // GL fixed-function matrix enums (públicos, AEEGL.h)
+constexpr u32 MODELVIEW=0x1700, PROJECTION=0x1701;
+}
+
+// Minimal column-major (convenção GL) 4x4 math — necesario p/ o transform
+// fixed-function (GPU_TODO §15 ERRO-3). Identidade = {1,0,0,0,...} como m[16].
+inline void mat_identity(Mat4& o){ float z[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    for(int i=0;i<16;i++) o.m[i]=z[i]; }
+inline void mat_mul(Mat4& o, const Mat4& a, const Mat4& b){
+    // o = a*b (col-major): o[i*4+j] = sum_k a[k*4+j] * b[i*4+k]
+    float t[16];
+    for(int c=0;c<4;c++) for(int r=0;r<4;r++){
+        float s=0; for(int k=0;k<4;k++) s += a.m[k*4+r]*b.m[c*4+k];
+        t[c*4+r]=s; }
+    for(int i=0;i<16;i++) o.m[i]=t[i];
+}
+inline void mat_frustum(Mat4& o, float l,float r,float b,float t,float n,float f){
+    // GL column-major perspective + ortho (clip space). Zeno no [-n,-f]->NDC[-1,1].
+    o.m[0]=2*n/(r-l); o.m[1]=0;        o.m[2]=0;                       o.m[3]=0;
+    o.m[4]=0;         o.m[5]=2*n/(t-b);o.m[6]=0;                       o.m[7]=0;
+    o.m[8]=(r+l)/(r-l); o.m[9]=(t+b)/(t-b); o.m[10]=-(f+n)/(f-n);      o.m[11]=-1;
+    o.m[12]=0; o.m[13]=0; o.m[14]=-(2*f*n)/(f-n);                      o.m[15]=0;
+}
+inline void mat_ortho(Mat4& o, float l,float r,float b,float t,float n,float f){
+    o.m[0]=2/(r-l); o.m[1]=0; o.m[2]=0; o.m[3]=0;
+    o.m[4]=0; o.m[5]=2/(t-b); o.m[6]=0; o.m[7]=0;
+    o.m[8]=0; o.m[9]=0; o.m[10]=-2/(f-n); o.m[11]=0;
+    o.m[12]=-(r+l)/(r-l); o.m[13]=-(t+b)/(t-b); o.m[14]=-(f+n)/(f-n); o.m[15]=1;
+}
+inline void mat_rotate(Mat4& o, float deg, float ax,float ay,float az){
+    const float PI=3.14159265358979f, rad=deg*PI/180.f, s=sinf(rad), c=cosf(rad);
+    float x=ax, y=ay, z=az, len=sqrtf(x*x+y*y+z*z);
+    if(len>1e-6f){ x/=len; y/=len; z/=len; }
+    float xx=x*x, yy=y*y, zz=z*z, xy=x*y, xz=x*z, yz=y*z, xs=x*s, ys=y*s, zs=z*s;
+    o.m[0]=xx*(1-c)+c;      o.m[1]=xy*(1-c)+zs; o.m[2]=xz*(1-c)-ys; o.m[3]=0;
+    o.m[4]=xy*(1-c)-zs;      o.m[5]=yy*(1-c)+c; o.m[6]=yz*(1-c)+xs; o.m[7]=0;
+    o.m[8]=xz*(1-c)+ys;      o.m[9]=yz*(1-c)-xs;o.m[10]=zz*(1-c)+c; o.m[11]=0;
+    o.m[12]=0; o.m[13]=0; o.m[14]=0; o.m[15]=1;
+}
+inline void mat_scale(Mat4& o, float x,float y,float z){
+    mat_identity(o); o.m[0]=x; o.m[5]=y; o.m[10]=z; }
+inline void mat_translate(Mat4& o, float x,float y,float z){
+    mat_identity(o); o.m[12]=x; o.m[13]=y; o.m[14]=z; }
+
 // O produtor. Recebe (slot, GuestMachine) a cada chamada interceptada na vtable
 // IGL/IEGL e traduz para IGpuRasterizer. Espelha zeebulator::GlHle mas escreve no
 // NOSSO IGpuRasterizer (não num GlBackend próprio).
@@ -84,7 +129,20 @@ private:
     GuestArray vtx_, col_, tex_, nrm_;
     RenderState state_{};
     Mat4 mvp_{{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
-    u32 bound_tex_[2]{0,0};
+    // Stacks fixed-function (GPU_TODO §15): modelview && projection, com
+    // matriz corrente por glMatrixMode. Composite mvp = projection * modelview,
+    // aplicado por vértice em assemble() (obj -> clip -> NDC via w-divide).
+    Mat4 modelview_{{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
+    Mat4 projection_{{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
+    Mat4 stack_[4];              // pilha de matrizes corrente (depth<=2 tipico)
+    int  stack_depth_=0;
+    u32  matrix_mode_=glenum2::MODELVIEW;
+    u32  bound_tex_[2]{0,0};
+
+    Mat4& cur_matrix(){ return matrix_mode_==glenum2::PROJECTION ? projection_ : modelview_; }
+
+    // Aplica mvp=projection*modelview a um vértice obj -> NDC (clip/w).
+    static void transform_vertex(const Mat4& mvp, Vertex& v);
 
     // Monta os vértices host lendo os arrays guest no range [first, first+count).
     std::vector<Vertex> assemble(GuestMachine& gm, int first, int count);

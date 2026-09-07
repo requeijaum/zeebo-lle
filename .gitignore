@@ -21,4 +21,5 @@ tools/cpp/gpu/gpu_smoke
 tools/cpp/gpu/gpu_smoke_gl
 tools/cpp/gpu/igl_smoke
 tools/cpp/gpu/gpu_display_integration
+tools/cpp/gpu/igl_transform_smoke
 refs/tainted/

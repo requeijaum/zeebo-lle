@@ -27,3 +27,7 @@ igl_smoke: igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp
 # (mesmo formato do fb_sink). Satisfaz GPU_TODO §7 FASE 1.
 gpu_display_integration: gpu_display_integration.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
 	$(CXX) $(CXXFLAGS) gpu_display_integration.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gpu_display_integration
+
+# Transform fixed-function (mvp+viewport) — GPU_TODO §15 ERRO-3 — prova por PIXEL.
+igl_transform_smoke: igl_transform_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
+	$(CXX) $(CXXFLAGS) igl_transform_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o igl_transform_smoke
