@@ -843,6 +843,28 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2zz — Reconstructing RPC Packet Dispatch Callback Pipeline (`0x16e8cba0..0x16e8cbe0`)
+Detailed decode of the inner dispatch engine in the ONCRPC dequeue consumer:
+1. Instruction sequence:
+   - `0x16e8cba0: str r0, [r3, #0x20]` (`6218`) — stores transaction token into service descriptor.
+   - `0x16e8cba2: str r1, [r4, #0x20]` (`6259`) — writes status flags into channel block.
+   - `0x16e8cba4: ldr r2, [r3, #0x1c]` (`69da`) — retrieves service dispatch callback function pointer.
+   - `0x16e8cba6: lsls r0, r4, #0` (`0020`) — passes client handle as 1st argument (`r0`).
+   - `0x16e8cba8: str r2, [sp, #0]` (`9200`) — caches target handler on stack.
+   - `0x16e8cbaa: ldr r2, [r4, #0x20]` (`6a1a`) — loads procedure ID.
+   - `0x16e8cbac: ldr r7, [r4, #0x24]` (`6a5f`) — loads packet payload length.
+   - `0x16e8cbae: adds r3, #0x80` (`3380`) — advances buffer pointer to payload body.
+   - `0x16e8cbb0: ldr r1, [r2, #0x08]` (`68d9`) — extracts procedure handler descriptor.
+   - `0x16e8cbb2: lsls r3, r7, #0` (`003b`) — passes payload size in `r3`.
+   - `0x16e8cbb4..cbb6: blx / call` (`f011 e882` -> `bl 0x16ea9cb8`) — invokes procedure deserializer / callback dispatcher.
+2. Pool literals referenced at `0x16e8cbcc..0x16e8cbde`:
+   - `0x00000580`: buffer alignment mask.
+   - `0x00000500`: max RPC payload frame size (1280 bytes).
+   - `0x1792fb08`: system RPC statistics counter block.
+   - `0x00001b59`: RPC success status code.
+3. Significance:
+   - Unlocks complete architectural map of how Zeebo's BREW apps send commands to the baseband modem: packet structure requires 1280-byte frame budget, procedure ID at offset `+0x20`, length at `+0x24`, payload starting at `+0x80`.
+
 ## SESSION 2yy — Disassembly of RPC Enqueue Engine (`0x16ef0b70..0x16ef0bae`)
 Analysis of the internal packet enqueuing logic registered by the ONCRPC main loop:
 1. Entry point: `0x16ef0b70` (Thumb).
