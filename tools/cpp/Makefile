@@ -18,3 +18,5 @@ clean:
 	rm -f zeebo_harness zeebo_devices_test
 
 .PHONY: all test clean
+zeebo_partition: zeebo_partition.cpp zeebo_devices.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
