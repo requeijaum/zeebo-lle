@@ -669,6 +669,28 @@ the refman PDF. The clean-room boundary: using OKL4 (BSD) is fine (open-source,
 different from BREW). This materially de-risks the "boot L4e kernel" phase.
 RESUME.md updated.
 
+## SESSION 2ee — Test OKL4 build: needs legacy toolchain (Python2/cml2), not trivial
+Copied OKL4 kernel source (2dd) and attempted to compile the ARM kernel:
+- thread.cc uses INC_ARCH/INC_API macros defined by the cml2 configurator, not -I.
+- The kernel config uses contrib/cml2 (Eric Raymond cml2), which is PYTHON 2
+  ("print" statement) -> fails on python3. Building OKL4 2.1.1 kernel fully needs
+  the legacy toolchain (python2 + cmlcompile + the magpie/legion build), a real
+  retro-build effort, not a -I smoke test.
+- msm7x30 AOSP kernel (Android 4.4) has NO arch/arm/mach-msm (drivers moved) —
+  better as general ref; our msm_nand-kernel-driver.c (from the older android-msm
+  tree) is the authoritative SoC nand driver and already validates the layout.
+HONEST: OKL4 = ABI reference (already used) + the L4e kernel design; compiling a
+bootable msm7k board port requires: python2+cml2 build of the kernel, then a
+custom board (imx31/pxa template) targeting MSM7201A MMIO. That is the real next
+phase (medium-effort retro-build + board port), not a quick win. We have the
+source; the signposts are documented. msm7x30 kernel left in /tmp (853MB, low
+value now); OKL4 source copied to refs/. Register and move on.
+TOOLCHAIN GAP (concrete): python2 is NOT apt-installable here (removed from modern
+deb); cml2 needs python2. So building OKL4 kernel requires installing python2 from
+source (large, deprecated) — a real retro-build, not a quick apt. Keep OKL4 as ABI/
+design reference (used), and note the python2+cml2 gate if we choose the native-
+kernel path later.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
