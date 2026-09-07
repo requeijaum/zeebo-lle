@@ -308,6 +308,37 @@ unmapped memory can spin the INTR hook thousands of times. Always verify the svc
 instruction bytes (op must decode as a real EFxxxxxx SVC) before claiming the task
 is alive.
 
+## SESSION 2k — Boot APPSBL with NAND wired: does NOT advance (honest result)
+tools/boot_chain_unuicorn.py runs APPSBL fully with the NAND controller model
+hooked at 0xa0a00000 (writes->nand.write, reads->nand.read). Result:
+- insns 2.4M (udelay short-circuited), final pc 0x5fffc, last real MMIO the MDDI
+  final write at pc 0x8d78 — EXACTLY where standalone APPSBL always stopped.
+- **ZERO NAND controller touches** (0 a0a00000 accesses). APPSBL does hardware
+  bring-up ONLY (VIC/GPT/DMOV/GPIO/MDDI + MMU-enable) and never reads NAND.
+CONCLUSION (corrected): the NEXT boot component — the one that reads NAND and
+relocates the OS image for AMSS/APPS — is NOT the APPSBL. It is a later element
+in the chain (the L4e/microkernel bootstrapper or a following loader). APPSBL
+handsoff to it; it is the missing link that performs the relocation the standalone
+APPS expected (derail to 0xb000fffc). To boot the chain in Unicorn we must find
+and run THAT component, which requires knowing how APPSBL handsoff (where it
+jumps/branches beyond pc 0x8d78 and what address it targets). Next: trace APPSBL
+past pc 0x8d78 to capture its handoff target and the load map it passes on.
+
+## SESSION 2l — APPSBL NAND path traced: real flash accesses identified
+tools/trace_mmu_on.py traces APPSBL control flow past MMU-enable. Findings:
+- 0xd38 -> bl 0xf088 (flash/NAND read). 0xf088 -> 0xf25c (if r0<8), 0xf508 (ID
+  lookup), 0xf63c (actual NAND reg writes). 0xd58 chain calls 0xf63c.
+- 0xf63c is the REAL NAND accessor: `str r0,[r5,#4]` (NAND_ADDR1) and
+  `str r0,[r5,#0x10]` (NAND_EXEC_CMD) where r5=0xa0a00000 base. Our NandController
+  is wired for these.
+- BUT the flash accessor first calls 0xf508: a TABLE LOOKUP (scans a config table
+  in ROM comparing bytes, sums an offset) BEFORE touching NAND regs. The boot
+  stalls in that lookup when the table doesn't match, never reaching the MMIO.
+- 0xbe2c is a NOP gate (bx lr), probably a weak/empty hook.
+NEXT: model the flash config table that 0xf508 scans (it encodes the NAND geometry
+per device ID) so 0xf088 completes a real READ and APPSBL loads the stage. Then
+the stage-loading path becomes fully reachable in Unicorn.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
