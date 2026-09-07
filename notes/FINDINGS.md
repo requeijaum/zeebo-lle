@@ -607,6 +607,16 @@ TWO FIXES the audit caught (valuable — would have bitten us later):
 VERIFIED against the kernel driver refs/msm_nand-kernel-driver.c. This closes the
 FS<-NAND<-DMA path completely with real content.
 
+## SESSION 2aa — audit: only AMSS+APPS are real ELFs; no separate L4e kernel part
+Scanned the full 1.1.2.bin for \x7fELF: hits at blocks 0x12 (AMSS) and 0xe6
+(APPS) only are real (valid headers). Blocks 0x9e and 0x106 show \x7fELF but the
+headers are garbage (type=37041/machine=0x1725/entry=0x16ea3079 — invalid):
+coincidence bytes in data, false positives. CONCLUSION: there is NO separate
+kernel/L4e ELF partition; the L4e microkernel must be a runtime element the
+APPSBL/loader prepares (or embedded inside the APPS/AMSS image), not a discrete
+NAND partition. This refines ROADMAP Phase 2: boot the L4e kernel via the chain,
+not by loading a kernel-only blob.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
