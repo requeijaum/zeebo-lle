@@ -209,6 +209,34 @@ PITFALL (matter): naive "scan every word for SVC" floods with false positives
 (data decodes as svc); and endianness must be little (EF00mmii -> bytes ii mm 00
 ef). Use the byte pattern, not a capstone word pass.
 
+## SESSION 2g — shim v1 result: MAP_CONTROL boundary (evidence, not guesswork)
+tools/l4e_shim_runner.py intercepts the 6 L4e syscalls, returns success, and
+serves a UTCB (pointer at 0xff000ff0 -> 0xff0f0000, MRs at +64). Result:
+- The FIRST syscall is svc#0x14 = MAP_CONTROL (sel ~0x4b), 3-output, args
+  r0-r2 = output pointers (0xffeffe0/dc/d8) on the (mapped) high stack.
+- After returning success, APPS runs ~6M insns, NO further syscalls, then
+  derails: classify_post_shim.py proves it is a 1999/1999-sequential NOP-slide
+  through zeroed RAM (andeq r0,r0,r0 = 0x00000000 words), final pc 0x481d08.
+- root cause: we did NOT relocate the task or map low RAM. MAP_CONTROL's real
+  semantic is SPACE/MAPPING (maptns pages); the task expects it to make the
+  low-RAM region it jumps to contain VALID code. Zero return = derail into the
+  zero-memory trap (lessons/other-emulators.md lesson #5), now proven again.
+CONCLUSION (honest): a value-level shim is NOT enough because MAP_CONTROL +
+the kernel's OWN page setup is what maps the task's low-RAM image. Options:
+  (a) implement MAP_CONTROL as REAL mapping in Unicorn's address space: the task
+      tells the kernel which physical pages map to which vaddrs; emulate that so
+      low RAM (0x0048...) holds the relocated image. This needs decoding the
+      MAP_CONTROL args -> non-trivial, and is essentially re-implementing the
+      kernel MMU.
+  (b) pivot to QEMU full-chain (PBL->APPSBL->L4e->AMSS/APPS) where the REAL
+      OKL4 kernel does its own mapping. This is now clearly the higher-probability
+      path: the shim has proven the APP is a real REX/L4e task, but "reimplement
+      enough kernel MMU to make MAP_CONTROL work" is most of a kernel anyway.
+Recommendation: STOP shim-only. Commit to the QEMU full-chain boot. The shim
+served its purpose: it proved (1) kernel is OKL4/L4e + REX, (2) syscall set is
+small (6), (3) the early stall is MAP_CONTROL mapping, all with hard evidence.
+Next phase = QEMU board with real L4e; bring up PBL->APPSBL->stages.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
