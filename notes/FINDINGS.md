@@ -763,6 +763,24 @@ derail. KEY OUTPUT OF THE SESSION: SoC UART serial console IS emulated+observabl
 a BREW-patcher dead-end (key decision 5) — the console is what the real boot/AMSS
 chain will print to next.
 
+## SESSION 2jj — AMSS BOOTS to L4e syscall schedule#0x14 (M3/M4 gap closed) — MILESTONE
+zeebo_boot M3 derailed at 0xb1a8a2 `str r0,[r1,#4]` with r1=0x175794a8 (a high VA
+LOAD not covered by map_all) => UC_ERR_MAP, not a CPU bug. Fixes:
+- map the AMSS high vaddrs (0x16e00000..0x17a60000) as ONE contiguous DRAM region
+  (eliminates page gaps) + tolerate overlapping LOADs in the loader loop.
+RESULT — AMSS now runs past the derail and REACHES a REAL L4e syscall thunk:
+  [debug from boot init implied] ... SVC @0x16e9aa58: imm=0x14 (schedule)
+  sp-mask=~0x4b lr=170519e5 r0=bfefd8 r1=bfefd4 r2=bfefd0; stopped (INT hook by design)
+Disasm confirms the EXACT documented ABI (M4, reconciled):
+  16e9aa58 mov ip, sp
+  16e9aa5c mvn sp, #0x4b        <- SP-magic selector
+  16e9aa60 svc #0x14            <- imm = schedule syscall
+So the AMSS (kernels: REX-on-L4e) boots under the harness, runs real code, and
+hits the kernel entry point. The INT hook stops there (by design) — the open gap
+is EMULATING the L4e kernel dispatch for that svc so control returns to AMSS
+(REX/L4 server iguana). This is the kernel-behavior piece, ported OKL4 is the
+reference. Marked as milestone: AMSS in-harness reaches schedule syscall.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.

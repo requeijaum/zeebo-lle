@@ -48,6 +48,20 @@ static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
     st->last=(u32)ad;
     if(st->n>=st->budget) uc_emu_stop(uc);
 }
+static void mmio_hook(uc_engine*uc,uc_mem_type type,uint64_t ad,int sz,int64_t val,void*ud){
+    (void)uc;(void)type;(void)sz;(void)ud;
+    // log writes to high (unmapped periph) addresses to catch the derail target
+    if(type==UC_MEM_WRITE && (ad>=0x80000000|| (ad&0xFF000000)==0xA0000000||(ad&0xFF000000)==0xB0000000||(ad&0xFF000000)==0xC0000000)){
+        printf("  MMIO-W 0x%08x = 0x%llx (pc 0x%08x)\n",(u32)ad,(unsigned long long)val,rreg(uc,UC_ARM_REG_PC));
+        if((u32)ad>=0xB0000000) uc_emu_stop(uc);
+    } else if(type==UC_MEM_READ && (ad>=0x80000000)){
+        printf("  MMIO-R 0x%08x (pc 0x%08x)\n",(u32)ad,rreg(uc,UC_ARM_REG_PC));
+    }
+}
+static void unmap_hook(uc_engine*u,uc_mem_type t,uint64_t ad,int sz,int64_t val,void*){
+    printf("  [UNMAPPED] %s 0x%08llx sz=%d val=0x%llx (pc 0x%08x)\n",(t&UC_MEM_WRITE)?"W":(t&UC_MEM_READ)?"R":"FETCH",
+           ad,sz,(unsigned long long)val,rreg(u,UC_ARM_REG_PC)); uc_emu_stop(u);
+}
 static void intr_hook(uc_engine*uc,uint32_t,int,void*ud){
     (void)ud;
     u32 pc=rreg(uc,UC_ARM_REG_PC);
@@ -73,15 +87,21 @@ int main(int argc,char**argv){
     uc_engine* uc; uc_open(UC_ARCH_ARM,UC_MODE_ARM,&uc);
     uc_ctl_set_cpu_model(uc,UC_CPU_ARM_1176);
     map_all(uc);
+    // AMSS high vaddrs form one contiguous DRAM window; map as a single region
+    uc_mem_map(uc,0x16e00000,0x17a60000-0x16e00000,UC_PROT_ALL);
     for(int i=0;i<phnum;i++){
         size_t o=phoff+i*phent; if(rd32(d.data(),o)!=1) continue;
         u32 pv=rd32(d.data(),o+8), off=rd32(d.data(),o+4);
         u32 fs=rd32(d.data(),o+16), ms=rd32(d.data(),o+20);
         size_t nmem=ms?ms:fs; if(!nmem) continue;
-        u32 pa=va2pa(pv);
+        u32 va=va2pa(pv);
+        // map target VA page; tolerate overlap (contiguous LOADs share RAM)
+        if (uc_mem_map(uc,va&~0xFFFu,((nmem+0xFFF)&~0xFFFu)+0x1000,UC_PROT_ALL)!=UC_ERR_OK){
+            // already mapped (overlapping LOAD); just write
+        }
         std::vector<u8> seg(nmem,0);
         if(fs){ size_t cl=std::min((size_t)fs,seg.size()); memcpy(seg.data(),d.data()+off,cl); }
-        uc_mem_write(uc,pa,seg.data(),seg.size());
+        uc_mem_write(uc,va,seg.data(),seg.size());
     }
     u32 sp=0x00bff000; uc_reg_write(uc,UC_ARM_REG_SP,&sp);
     u64 budget = argc>2? strtoull(argv[2],0,0):500000;
@@ -90,8 +110,21 @@ int main(int argc,char**argv){
     uc_hook hc=0,hI=0;
     uc_hook_add(uc,&hc,UC_HOOK_CODE,(void*)(code_hook),&st,1,0);
     uc_hook_add(uc,&hI,UC_HOOK_INTR,(void*)(intr_hook),nullptr,1,0);
-    uc_emu_start(uc,entry,0,0,0);
-    printf("stopped pc=0x%08x insn#%llu\n",rreg(uc,UC_ARM_REG_PC),(unsigned long long)st.n);
+    uc_hook hM=0;
+    uc_hook_add(uc,&hM,UC_HOOK_MEM_READ|UC_HOOK_MEM_WRITE|UC_HOOK_MEM_READ_UNMAPPED|UC_HOOK_MEM_WRITE_UNMAPPED,
+                (void*)(mmio_hook),nullptr,0,~0ULL);
+    auto unmap=[](uc_engine*u,uc_mem_type t,uint64_t ad,int sz,int64_t val,void*){
+            printf("  [UNMAPPED] %s 0x%08llx sz=%d val=0x%llx (pc 0x%08x)\n",(t&UC_MEM_WRITE)?"W":(t&UC_MEM_READ)?"R":"FETCH",
+                   ad,sz,(unsigned long long)val,rreg(u,UC_ARM_REG_PC)); uc_emu_stop(u);
+        };
+    uc_hook hU=0;
+    uc_hook_add(uc,&hU,UC_HOOK_MEM_READ_UNMAPPED|UC_HOOK_MEM_WRITE_UNMAPPED|UC_HOOK_MEM_FETCH_UNMAPPED,(void*)(unmap_hook),nullptr,0,~0ULL);
+    uc_err er=uc_emu_start(uc,entry,0,0,0);
+    printf("stopped pc=0x%08x insn#%llu (err=%s)\n",rreg(uc,UC_ARM_REG_PC),(unsigned long long)st.n,
+           er?uc_strerror(er):"ok");
+    printf("  r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x sp=%08x lr=%08x\n",
+           rreg(uc,UC_ARM_REG_R0),rreg(uc,UC_ARM_REG_R1),rreg(uc,UC_ARM_REG_R2),rreg(uc,UC_ARM_REG_R3),
+           rreg(uc,UC_ARM_REG_R4),rreg(uc,UC_ARM_REG_R5),rreg(uc,UC_ARM_REG_SP),rreg(uc,UC_ARM_REG_LR));
     uc_close(uc);
     return 0;
 }
