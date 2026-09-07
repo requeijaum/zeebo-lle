@@ -267,6 +267,24 @@ vaddr->pa alias by copying/mirroring). At minimum, pre-populate the low-RAM
 regions the boot produces so 0x0048 has the loader's image.
 NEXT: build the translation layer from this dump and re-run APPS.
 
+## SESSION 2i — MMU translation layer BUILT; APPS advances to REX idle (big progress)
+tools/build_mmu.py + arm11_mmu.py: parse the real ARM11 VA->PA map (150 entries:
+sections + 4K coarse pages). tools/mmu_runner.py translates vaddr->pa in the
+fetch/data hooks and loads the APPS ELF at PA. Result (vs shim-only run):
+- INSNS 131K, SVCs 2000 (was 1), NO derail to 0x0048 (translation picked it up).
+- The APPS climbs the REX bootstrap: MAP_CONTROL succeeded (we pre-mapped +
+  returned success), task created its context, entered a wait loop.
+- It idles in L4_Ipc/L4_WaitNotify with to=0 from=0 tag=0 (L4 nil-thread wait),
+  repeatedly — the REX scheduler idle spin awaiting notifications/timers.
+CAVEAT / next refinement (honest): the `b000fffc` site decodes as zeros (andeq
+r0,r0,r0) = the ELF segment at vaddr 0xb0000000 is loaded at identity PA, but in
+the real map `b0100000 -> 100a3800` (coarse PAGE in high RAM). So the b0xxx
+segment must be MIRRORED to its coarse PA (0x100a3xxx) for the alias to carry the
+relocated code; right now the task jumps to empty b0xxx and we get a false svc.
+NEXT: implement coarse-page mirroring (vaddr b0xxx <-> pa 100a3xxx) in mmu_runner
+so the b0xxx runtime image is populated; then the REX wait loop should receive a
+timer/interrupt notification (implement L4 timer tick -> notify) to break idle.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
