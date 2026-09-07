@@ -484,6 +484,26 @@ NEXT: boot the compiled openzeebo zloader.main in Unicorn (load at 0x00a00000,
 hook DMOV_CMD_PTR write to call DMOVModel.exec_cmdptr, service NAND via
 NandController), so the real loader reads NAND and loads the OS image.
 
+## SESSION 2u — zloader full link: build effort growing, DMA-NAND already proven
+Full all-clang build+link of zloader (build_zloader_allclang.sh): C compiles but
+the link fights a battle — leftover linker-section overlaps (debug_* / exidx /
+rodata providers), undefined uart_init/uart_putc (uart.c currently fails to
+compile on the `nopdelay` decl gap), and __aeabi_uidiv (no ARM libgcc/compiler-rt
+present for clang armv6k). Each fix surfaces another; the Makefile's intended
+toolchain (arm-none-eabi-gcc) is absent. DECISION POINT for Rafael: the
+DMA->NAND read path was ALREADY proven working end-to-end (dmov_selftest MATCH).
+Booting the OPEN-OPEN loader (zloader.main) additionally needs a working ARM
+libgcc/equivalent + a cleaned link, and its `_main` is a BREW-signature-patch
+tool (blink/LED/power-button waits) — not a boot-to-OS path. Options:
+  (a) install arm-none-eabi-gcc (apt) and rebuild the way the Makefile intends
+      — most likely to quickly yield a loadable zloader.elf;
+  (b) accept DMA-NAND as proven and move the effort to booting AMSS/APPS ELF
+      entries through the (already working) MMU-translate runner + DMOV model;
+  (c) write a minimal bespoke boot (uses prebuilt arch_msm7k/nand.o driver,
+      just calls flash_read_page for the APPS partition) — smallest surface.
+Recommendation: (a) is cheap and unblocks both the loader AND later kernel boot
+with real toolchain alignment; (b) is the strategic LLE goal. Offerable now.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
