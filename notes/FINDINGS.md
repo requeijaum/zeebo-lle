@@ -843,6 +843,29 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2yy — Disassembly of RPC Enqueue Engine (`0x16ef0b70..0x16ef0bae`)
+Analysis of the internal packet enqueuing logic registered by the ONCRPC main loop:
+1. Entry point: `0x16ef0b70` (Thumb).
+   - Prologue: `0x16ef0b70: push {r0, r1, r4-r7, lr}` (`b5f3`), `sub sp, #0x1c` (`b087`).
+   - Constant inits: `r4 = 0`, `r7 = 0`, `r6 = 3`.
+   - Arguments received:
+     - `r0`: pointer to caller filename string (`"oncrpc_main.c"`, `0x173dcfa8`).
+     - `r1`: caller line number (`0x493` = 1171).
+     - `r2`: sub-service identifier / transaction ID (`0x00000000`).
+     - `r3`: destination queue head address (`0x17571748`).
+2. Queue Head Layout (`0x17571748`):
+   - `+0x00`: head packet pointer (initially `0x00000000`).
+   - `+0x04`: tail packet pointer (initially `0x00000000`).
+   - `+0x08`: queue length / packet count (`0`).
+   - `+0x0c`: mutex / lock word (`0`).
+   - `+0x10`: wait mask flags (`0`).
+   - `+0x14`: signal task tcb pointer (`0`).
+   - `+0x18`: reserved / max depth limit (`0`).
+   - `+0x1c`: state flag / initialization indicator (`0x00000001` = active & initialized).
+3. Verification:
+   - Queue head state at `0x17571748` shows `+0x1c = 1`, proving that the ONCRPC queue was successfully initialized by AMSS before entering the idle loop.
+   - Any synthetic RPC injection must chain packets via `[+0x00]` (head) and `[+0x04]` (tail) and update the count at `[+0x08]`.
+
 ## SESSION 2xx — Decoding Synchronous IPC Trampoline Vector (`0x17478927`)
 Disassembly and analysis of the `L4_Ipc` synchronous handler target resolved from trampoline table `0x00d06da4`:
 1. Vector address: `0x17478927` (Thumb-mode entry, aligned base `0x17478926`).
