@@ -78,6 +78,8 @@ static std::vector<u32> g_bps;
 static u64 g_insnCount=0;
 static u64 g_stepBudget=0;   // 0 = run until bp/forever (bounded)
 static bool g_keepGoing=true;
+static u32 g_lastPc=0;
+static int g_pastText=0;
 
 static u32 cpu_reg(int r){ u32 v=0; uc_reg_read(g_uc,r,&v); return v; }
 static void cpu_reg_w(int r,u32 v){ uc_reg_write(g_uc,r,&v); }
@@ -161,6 +163,12 @@ static void on_mem(uc_engine*uc, uc_mem_type type, uint64_t addr, int size, int6
 }
 static void on_code(uc_engine*uc,uint64_t addr,uint32_t size,void*ud){
     g_insnCount++;
+    // log the FIRST time execution leaves the loader text range (any addr, shows slide origin)
+    if (!g_pastText && addr >= 0xa03700){   // code ends ~0xa03700 (BSS/END 0xa039a8)
+        g_pastText=1;
+        printf("  [LEAVE-TEXT] 0x%08x insn=%llu (prev 0x%08x)\n", (u32)addr,(unsigned long long)g_insnCount, g_lastPc);
+    }
+    g_lastPc = (u32)addr;
     if (std::find(g_bps.begin(),g_bps.end(),(u32)addr)!=g_bps.end()){
         printf("  [breakpoint] 0x%08x (insn #%llu)\n",(u32)addr,(unsigned long long)g_insnCount);
         uc_emu_stop(uc); return;
@@ -171,9 +179,9 @@ static void on_code(uc_engine*uc,uint64_t addr,uint32_t size,void*ud){
 static void install_hooks(){
     uc_hook hmm=0,hcode=0,hunm=0;
     uc_hook_add(g_uc,&hunm,UC_HOOK_MEM_READ_UNMAPPED|UC_HOOK_MEM_WRITE_UNMAPPED|UC_HOOK_MEM_FETCH_UNMAPPED,
-                (void*)(on_unmapped),nullptr,1,0);
+                (void*)(on_unmapped),nullptr,0,~0ULL);
     uc_hook_add(g_uc,&hmm,UC_HOOK_MEM_READ|UC_HOOK_MEM_WRITE,(void*)(on_mem),nullptr,0x80000000ULL,~0ULL);
-    uc_hook_add(g_uc,&hcode,UC_HOOK_CODE,(void*)(on_code),nullptr,0,0);  // begin=0 (address 0x0 is code)
+    uc_hook_add(g_uc,&hcode,UC_HOOK_CODE,(void*)(on_code),nullptr,0,~0ULL);  // all addresses (begin=0,end=max) or matched addr 0 only
 }
 
 // initialize the ARM1176 core + RAM
@@ -189,7 +197,7 @@ static void map_image(){
     for(auto [base,size] : std::vector<std::pair<u32,u32>>{
             {0x00000000u,0x00a00000u},   // low RAM
             {0x00a00000u,0x00600000u},   // zloader/APPSBL region
-            {0x02000000u,0x00600000u},   // RAM high (heap/malloc spills here)
+            {0x02000000u,0x01000000u},   // RAM high (enlarge to cover any slide/derail range)
             {0x01000000u,0x01000000u},   // APPS ELF region + flash geometry table (0x1f00000+) flat region: 0x1000000-0x2000000
             {0x00c00000u,0x00400000u},   // heap (distinct)
         }){

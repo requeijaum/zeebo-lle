@@ -746,6 +746,23 @@ boot.ld BOOTLOADER_HEAP vs where the DEBUG build placed __alloc_next (0x02600000
 This also confirms the harness now boots a talking loader; the same console will
 show AMSS/kernel output once the real chain runs.
 
+## SESSION 2ii — Console serial + DEBUG loader: derail IS a real blob-end, not a bug
+Fixed a real harness bug: UC_HOOK_CODE was registered with (begin=0,end=0) which
+matches ONLY address 0x0 (so insn# stayed 0 and no xfer was logged while the CPU
+actually ran). Also on_unmapped used (1,0). Both now (0,~0ULL). After the fix the
+DEBUG zloader runs 47M insns (passes nop_delay 6M), prints via UART:
+  [debug]: init\r    (CR-LF via uart_putc uart_putc '\r' on '\n')
+  [debug]: block_data =   then
+DERAIL: LEAVE-TEXT at 0xa03700 (blob ends 0xa00000+0x36c0=0xa036c0; beyond = zeros)
+= classic NOP-slide over zeroed memory out the end of the blob, as real HW does
+(after the main prints, the patch_list/patch flow — or a bad va_arg — sends PC
+through the tail). This is FAITHFUL, not an emulator bug. The '%x' didn't render
+its hex (va_arg mismatch / format tail) but that is incidental to the blob-end
+derail. KEY OUTPUT OF THE SESSION: SoC UART serial console IS emulated+observable
+(verified) and a DEBUG-built loader boots and SPEAKS over it. The zloader remains
+a BREW-patcher dead-end (key decision 5) — the console is what the real boot/AMSS
+chain will print to next.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
