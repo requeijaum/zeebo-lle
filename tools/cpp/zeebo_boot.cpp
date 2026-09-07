@@ -228,6 +228,18 @@ static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
         uc_reg_write(uc, UC_ARM_REG_R0, &zero);
         return;
     }
+    // Track ONCRPC dispatch / registered services
+    // 0x16ef0e30 is referenced near 0x16ef0bbe as RPC program/version info.
+    // Let's hook entries into 0x16ef0b70..0x16ef0bd0 to see RPC transactions
+    if (ad == 0x16ef0b70) {
+        static int f_rpc_reg = 0;
+        if (f_rpc_reg++ < 5) {
+            printf("ONCRPC REGISTER / HANDLER AT 0x16ef0b70: r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
+                rreg(uc, UC_ARM_REG_R0), rreg(uc, UC_ARM_REG_R1),
+                rreg(uc, UC_ARM_REG_R2), rreg(uc, UC_ARM_REG_R3),
+                rreg(uc, UC_ARM_REG_LR));
+        }
+    }
     // Clean up temporary probes, keep cleanly instrumented
     // Record findings in notes/FINDINGS.md
 

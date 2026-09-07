@@ -843,6 +843,24 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2qq — Disassembly & Flow Reconstruction of ONCRPC Main Loop (`0x16ef0d30..0x16ef0d90`)
+Complete disassembly of the ONCRPC registration and packet handling router:
+1. `0x16ef0b70`: Registration handler invoked with:
+   - `r0 = 0x173dcfa8` (pointer to string `"oncrpc_main.c"`).
+   - `r1 = 0x00000493` (line 1171).
+   - `r2 = 0x00000000`.
+   - `r3 = 0x17571748` (pointer to ONCRPC message queue head).
+   - `lr = 0x16ef0d43`.
+2. `0x16ef0d3e`: `bl 0x16ef0b70` (calls the queue verification and registration thunk).
+3. `0x16ef0d42..0x16ef0d4e`:
+   - Checks return value and validates status descriptor:
+     `0x16ef0d42: ldr r0, [sp, #0x20]`; `cmp r0, #0`; `bne 0x16ef0d4a`.
+   - `0x16ef0d4c: ldrb r1, [r0, #4]`; `cmp r0, #0`.
+4. `0x16ef0d50..0x16ef0d68`:
+   - Evaluates packet header integrity (`0x16ef0d58: bl 0x16e8cb74`).
+   - `0x16ef0d6e: bl 0x16ef0b30` performs the final dispatcher dispatch loop into task callbacks.
+5. All routines operate cleanly under the L4e shim and Unicorn ARMv6 core without unhandled traps.
+
 ## SESSION 2pp — Clean-room Reverse Engineering of AMSS ONCRPC / REX Subsystem (`0x16ef0a40..0x16ef0b70`)
 Exhaustive assembly-level trace and disassembly of the modem AMSS ONCRPC state machine:
 1. `0x1730f442` = `rex_wait(mask)`: Called with mask `0x00180000` (RPC and timer/event ready signals).
