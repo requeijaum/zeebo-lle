@@ -14,6 +14,7 @@
 
 using u16=uint16_t;
 static std::map<u32,u32> gSec,gCoa;
+static int gSvcCount=0;
 static u32 va2pa(u32 va){ auto p=gCoa.find(va>>12); if(p!=gCoa.end()) return p->second+(va&0xFFF);
     auto s=gSec.find(va>>20); if(s!=gSec.end()) return s->second+(va&0xFFFFF); return va; }
 static void build_arm11_map(){
