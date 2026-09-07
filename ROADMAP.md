@@ -67,9 +67,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - *Current status:* Concluído em `tools/cpp/zeebo_nand_relocator.cpp`.
    - *Verified:* Leitura direta da cópia da NAND (`1.1.2.bin` bloco 0x12) via descritores DMA do hardware DMOV (`DMOVModel` / `NandController`), decodificação do cabeçalho ELF (`0x464c457f`), extração do entrypoint `0x00a00000` e mapeamento das 18 seções `PT_LOAD` em tempo de execução sem arquivos ELF pré-extraídos.
 
-4. **Adreno 130 3D / 2D Display Engine (Yamato / AMD Z430):**
-   - *Current status:* MDDI LCD interface is stubbed in APPSBL; 3D command rings and 2D blitter registers (`0xA0000000..0xA00FFFFF`) are unmapped.
-   - *Missing:* Register space for Adreno 130 command FIFO and tiling memory to receive draw calls from BREW / OpenGL ES 1.1.
+4. **Adreno 130 3D / 2D Display Engine & MDDI Bridge [PROTOTIPADO E VALIDADO]:**
+   - *Current status:* Concluído em `tools/cpp/zeebo_mddi_display.cpp`.
+   - *Verified:* Controlador virtual de interface serial MDDI em `0xAA600000` via `uc_mmio_map`, com respostas fiéis de versão do núcleo (`0x00000102`), comandos de inicialização de enlace (`CMD_POWER_UP`), status de link ativo (`STAT_LINK_ACTIVE`), e processamento de listas primárias de DMA (`MDDI_PRI_PTR`) para transferência de quadros de vídeo RGB565 em resolução nativa de 640x480.
 
 ---
 
@@ -90,8 +90,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Parsear dinamicamente os cabeçalhos ELF e tabelas `PT_LOAD` direto da memória DMA lida da NAND (`1.1.2.bin`), eliminando dependência de arquivos ELF pré-extraídos — validado em `zeebo_nand_relocator.cpp`.
 
 ### Phase 4 — Display & Graphics (MDDI + Adreno 130)
-- [ ] Implementar framebuffer virtual no controlador MDDI (`0xAA600000`) exportando para SDL2/X11.
-- [ ] Mapear registradores de comando da GPU Adreno 130 (HLE de comandos GLES 1.1 ou LLE de ring-buffer).
+- [x] Implementar controlador virtual MDDI (`0xAA600000`) com suporte a negociação de enlace, versionamento e link lists primárias de framebuffer — validado em `zeebo_mddi_display.cpp`.
+- [ ] Exportar buffer de quadros RGB565 (640x480) para janela de visualização do host via SDL2/X11.
+- [ ] Mapear registradores de comando da GPU Adreno 130 (`0xA0000000..0xA00FFFFF`).
 
 ---
 

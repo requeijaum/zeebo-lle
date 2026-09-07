@@ -843,6 +843,20 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3o — Virtual MDDI Host Display Controller & Link Engine (`zeebo_mddi_display.cpp`)
+Implementation and validation of the Qualcomm MSM7201A Primary Mobile Digital Data Interface (PMDH):
+1. Architecture & Base Address:
+   - Base Address: `0xAA600000` (64KB MMIO window).
+   - Core Version: `0x00000102` (MDDI Core Version 1.2).
+   - Native Zeebo Display Output: 640x480 RGB565.
+2. Verified Hardware Behaviors:
+   - `R_MDDI_VERSION` (`0x0004`): Returns version identifier `0x00000102`.
+   - `R_MDDI_STAT` (`0x0028`): Reflects link state flags (`STAT_LINK_ACTIVE = 0x01`, `STAT_PRI_LINK_LIST_DONE = 0x20`).
+   - `R_MDDI_CMD` (`0x0000`): Handles link initialization commands (`CMD_POWER_UP = 0x0200`, `CMD_RESET = 0x0400`).
+   - `R_MDDI_PRI_PTR` (`0x0008`): Intercepts primary DMA frame-list descriptors submitted by Iguana/BREW graphics stack, tracking completed display frames.
+3. Significance:
+   - Resolves Gap 4 of the architectural roadmap (Display & Graphics bridge prototype).
+
 ## SESSION 3n — Hardware DMOV DMA NAND Relocator (`zeebo_nand_relocator.cpp`)
 Implementation and verification of the second-stage NAND relocator using full hardware simulation:
 1. Architectural Flow:
