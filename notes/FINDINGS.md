@@ -843,6 +843,21 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3h — Reverse Engineering of Router SMD Branch Conditions (`0x16ef0b2c..0x16ef0b3a`)
+Disassembly and behavioral analysis of the ONCRPC router branch conditions:
+1. Instruction Sequence:
+   - `0x16ef0b2c: cmp r0, #3` (`0328`) — checks if SMD channel status is `3` (`SMD_SS_FLUSHING`).
+   - `0x16ef0b2e: bne 0x16ef0b34` (`d501`) — if status != 3, branch to next check at `0x16ef0b34`.
+   - `0x16ef0b30..0x16ef0b32: bl 0x16e8cb88` (`f001 feaa`) — invoke flush / packet consumer callback!
+   - `0x16ef0b34: cmp r0, #2` (`02e8`) — checks if SMD channel status is `2` (`SMD_SS_OPENED`).
+   - `0x16ef0b36: bne 0x16ef0b3c` (`d501`) — if status != 2, branch to hardware timer acknowledge at `0x16ef0b3c`.
+   - `0x16ef0b38..0x16ef0b3a: bl 0x16e8cb96` (`f090 e9dc`) — invoke active packet queue consumer!
+2. Architectural Discovery:
+   - Status 2 (`SMD_SS_OPENED`) is the active operating state! When `r0 == 2`, the branch at `0x16ef0b36` is NOT taken, leading directly to `0x16ef0b38: bl 0x16e8cb96`.
+   - In our override probe where `r0 = 3` was forced, `cmp r0, #3` at `0x16ef0b2c` matched, but in Thumb `d501` is actually `bne` (condition code 5 = NE, offset 1 word = jump over 32-bit BL).
+   - Therefore, `0x16ef0b30` executes when `r0 == 3`, and `0x16ef0b38` executes when `r0 == 2`.
+   - The reason the emulator was stopping at `0x16ef0b2e` is that natural execution without overrides returned status 2 from `0x16ef0a82`, meaning the router fell through into the secondary check for state 2.
+
 ## SESSION 3g — Disassembly of `rex_set_sigs` Task Signaling Engine (`0x1730f2aa..0x1730f2c8`)
 Disassembly of the core REX signaling primitive resolved from vector `0x16f80f0c`:
 1. Function Prototype & Registers:
