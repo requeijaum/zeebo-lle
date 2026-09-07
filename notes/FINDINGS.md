@@ -843,6 +843,26 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2nn — Kernel L4e COMPILED kernel boots in-harness: init_cpu/memory/mdb, then MMU wall
+Booted refs/okl4-arm-build/arm-kernel.elf in a fresh harness zeebo_kernel_boot.cpp
+(loads ELF LOADs at their VADDRs f0000000, maps phys RAM 0xa0000000-0xa2000000 +
+IO area + devices, runs from _start=0xf001c000 with code+mem hooks).
+RESULT: the REAL L4e kernel runs correctly:
+  _start -> startup_system -> init_cpu -> init_memory -> (writes 0xa011efxx
+  stack/bootmem, 0xa01100xx = kernel page tables) and reaches a `b .` spin at
+  pc=0xf001cc98 inside _end_init_memory after `mov pc,r5` (0xcc90) where r5 =
+  computed code address. 10M insns, err=ok, sp=0xa011efb0, lr=0xf001c8cc.
+MEANING: the kernel's init gets past CPU+mdb mgmt and needs its OWN set MMU
+page tables (it wrote them at 0xa0110000 and set up add_mapping/CP15) — after
+that the cpu relies on those tables; unicorn maps flat so the `mov pc,r5`
+(which the kernel computed from its page table as the next-stage VA) lands in
+empty space -> `b .`. SAME wall as AMSS (kernel needs real MMU to continue).
+This is FAITHFUL, not an emulator bug. Gain: a real compiled L4e kernel boots
+through the early init — the same kernel that can answer the AMSS handshake
+once the harness supplies the MMU it configures. HARNESS: the mappings must
+follow the kernel's CP15 page tables (read the TTB base it set / honor
+uc_mem_protect + a CP15 S1 translation layer), not the hard-coded flat map.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
