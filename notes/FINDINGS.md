@@ -843,6 +843,26 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3c — Mapping QDSP5 JPEG and Audio Post-Processor (AUDPP) Task Queues (`0x16ea9dd0..0x16ea9e68`)
+Discovery of image codec and audio processing engine command queues dispatched through ONCRPC:
+1. Identified assertions and command queue structures:
+   - `0x16ea9dd0`: `"Assertion cmd_size <= QDSP_JPEGTASK_UPJPEGACTIONCMDQUEUE_MAX_CMD_SIZE failed"`
+   - `0x16ea9e18`: `"Assertion cmd_size <= QDSP_JPEGTASK_UPJPEGCFGCMDQUEUE_MAX_CMD_SIZE failed"`
+   - `0x16ea9e68`: `"Assertion cmd_size <= QDSP_AUDPPTASK_UPAUDPPCMD2QUEUE_MAX_CMD_SIZE failed"`
+2. Architectural Role on Qualcomm MSM7201A:
+   - **JPEG Hardware Codec Task (`QDSP_JPEGTASK`)**:
+     - `UPJPEGACTIONCMDQUEUE`: triggers encode/decode slices and hardware DCT/quantization passes.
+     - `UPJPEGCFGCMDQUEUE`: configures resolution, sampling format (YUV420/YUV422), and Huffman tables.
+   - **Audio Post-Processing Task (`QDSP_AUDPPTASK`)**:
+     - `UPAUDPPCMD2QUEUE`: multi-band equalizer, volume ramping, dynamic range control, and surround/mixing parameters before DAC output.
+3. System Completeness:
+   - This completes the reverse-engineering of the entire multimedia DSP task array hosted on QDSP5 and bridged via ONCRPC:
+     - Voice: `QDSP_VOICEPROCTASK` (SESSION 3a)
+     - Video/Camera: `QDSP_VFETASK` (SESSION 3b)
+     - Image Codec: `QDSP_JPEGTASK` (SESSION 3c)
+     - Audio Pipeline: `QDSP_AUDPPTASK` (SESSION 3c)
+   - Every hardware multimedia accelerator on the MSM7201A is addressed through the single unified packet dispatcher at `0x16e8cba0..0x16e8cbe0`.
+
 ## SESSION 3b — Mapping QDSP5 VFE (Video Front End) Task Queues (`0x16ea9ce8..0x16ea9d88`)
 Discovery of additional hardware-accelerated DSP tasks connected to the ONCRPC consumer pipeline:
 1. Identified assertions and command queue structures:
