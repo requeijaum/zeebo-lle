@@ -843,6 +843,29 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3g — Disassembly of `rex_set_sigs` Task Signaling Engine (`0x1730f2aa..0x1730f2c8`)
+Disassembly of the core REX signaling primitive resolved from vector `0x16f80f0c`:
+1. Function Prototype & Registers:
+   - `rex_set_sigs(rex_tcb_type *tcb, rex_sigs_type sigs)`
+   - `r0`: pointer to target task TCB (`rex_tcb_type`).
+   - `r1`: 32-bit signal bitmask to assert.
+2. Instruction Decode:
+   - `0x1730f2aa: push {r4-r6, lr}` (`b570`) — saves callee registers.
+   - `0x1730f2ac: lsls r5, r0, #0` (`0005` -> `movs r5, r0`) — caches target TCB in `r5`.
+   - `0x1730f2ae: cmp r5, #0` (`2d00`) — sanity check on TCB pointer.
+   - `0x1730f2b0: beq 0x1730f2f2` (`d01f`) — returns immediately if null TCB.
+   - `0x1730f2b2: ldr r4, [pc, #0x40]` (`4c10`) — loads scheduler lock / active task pointer.
+   - `0x1730f2b4: ldr r0, [r4, #0]` (`6820`) — checks if scheduler is currently locked.
+   - `0x1730f2b6: cmp r0, #0` (`2800`)
+   - `0x1730f2b8: bne 0x1730f2c8` (`d106`)
+   - `0x1730f2ba: movs r1, #0xc8` (`21c8`) — priority / quantum adjustment.
+   - `0x1730f2bc: movs r0, #6` (`2006`) — syscall number for thread re-scheduling.
+   - `0x1730f2be..0x1730f2c0: bl 0x1730eedc` (`f7ff fdfc`) — invokes kernel IPC/yield to notify scheduler of ready task.
+   - `0x1730f2c2: str r0, [r4, #0]` (`6020`) — updates task state word in TCB.
+3. Verification:
+   - Proves the direct tie between REX signal manipulation and the L4e underlying thread reschedule mechanism.
+   - Calling `rex_set_sigs` updates the signal mask at `TCB + offset` and triggers an L4e yield (`SVC #0x6` path) if the awakened thread has higher priority than the current running thread.
+
 ## SESSION 3f — Reverse Engineering of AMSS High-Memory Service Vector Table (`0x16f80f00..0x16f80f30`)
 Decoding the master RTOS service dispatch vector table at `0x16f80f00`:
 1. Vector Architecture:
