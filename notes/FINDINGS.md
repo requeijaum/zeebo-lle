@@ -843,6 +843,25 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3j — Disassembly of `rex_get_sigs` and Autonomous Scheduler Loop Equilibrium (`0x1730f326..0x1730f338`)
+Disassembly of `rex_get_sigs` called from `0x16ef0b0e` (`lr = 0x16ef0b15`):
+1. Register Input:
+   - `r0`: pointer to TCB (`0x00000000` passed = query current task TCB).
+2. Instruction Decode:
+   - `0x1730f326: ldr r1, [pc, #0x280]` (`49a0`) — loads pointer to active task descriptor table / current TCB reference at `0x17571720`.
+   - `0x1730f328: cmp r0, #1` (`2801`)
+   - `0x1730f32a: bne 0x1730f330` (`d101`) — when `r0 == 0`, branches to `0x1730f330`.
+   - `0x1730f32c: ldr r0, [r1, #4]` (`6848`)
+   - `0x1730f32e: bx lr` (`4770`)
+   - `0x1730f330: ldr r1, [r1, #8]` (`6889`) — dereferences the active running task's TCB.
+   - `0x1730f332: lsls r0, r0, #3` (`00c0`)
+   - `0x1730f334: adds r0, r0, r1` (`1840`)
+   - `0x1730f336: ldr r0, [r0, #0]` (`6840`) — returns active pending event signal bitmask in `r0`.
+   - `0x1730f338: bx lr` (`4770`) — returns to caller.
+3. Natural Execution Equilibrium:
+   - Without artificial overrides, AMSS executes cleanly into `rex_get_sigs` to query signals, checks active masks, invokes `rex_wait` periodically (`mask=0x00180000`), increments tick counter `r4` (`0x0014f21c` = ~1.37 million elapsed ticks), and pulses the watchdog timer register `0xc500010c`.
+   - The modem firmware is operating in full stable multitasking idle equilibrium under clean LLE.
+
 ## SESSION 3i — Decoding Natural SMD Channel Status Query (`0x16ef0a82`)
 Disassembly of the channel state evaluator called at `0x16ef0b28`:
 1. Instruction Sequence:
