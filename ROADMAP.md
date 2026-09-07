@@ -1,94 +1,84 @@
-# Zeebo LLE Emulator — ROADMAP
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-06, after session 2o audit)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core), no HLE of BREW. Decided by Rafael
-2026-09-06 despite the emulation ROADMAP marking HLE-LLE "OUT" — accepting the
-closed-hardware RE cost, now sharply reduced by the discovery below.
+2026-09-06 despite the emulation ROADMAP marking HLE-LLE "OUT". This revision is
+grounded in what sessions 2a-2p actually PROVED, including the audited correction
+of the L4e syscall ABI.
 
-## GAME-CHANGER: we have the real bring-up source
-`~/projects/zeebo/research/openzeebo-repo/tools/zloader/arch_msm7k/` is the
-OpenZeebo/Google little-kernel port for THIS SoC — real, compilable C with the
-authoritative MSM7201A register map (headers under `.../zloader/include/msm7k/`).
-This converts most peripheral RE from guesswork into transcription. Peripheral
-bases (verified from the headers, and cross-checked against our probe):
+## What is now KNOWN (evidence, not guesses)
+- **Kernel = L4e (NICTA Pistachio-embedded / OKL4 lineage) + REX RTOS on top.**
+  AMSS/APPS are REX tasks. Strings `l4e_min_pagesize`, `L4_Restore fell through`,
+  `rex_self`, `rex_*_tcb` prove it.
+- **AUDITED: ARM L4e syscalls are `bl` to KIP link addresses**, not `svc #imm`+
+  SP-magic (NICTA RefMan N1 rev2, ARM C.2; example `bl 0xFE0000B4`=KernelInterface;
+  MR0-5=r3-r8; UTCB read from 0xFF000FF0; sp/lr preserved). The earlier
+  "svc#0x14=MAP_CONTROL..." 6-syscall map was WRONG (misread of OKL4 user-side
+  ipc.spp as the ABI); the firmware's `mvn sp,#0x4b; svc #0x14` matches neither
+  SYSNUM/SWINUM. Real syscalls must be derived from the KIP link fields.
+- **Real MSM7201A register map** is in openzeebo `zloader/arch_msm7k`+
+  `include/msm7k/*.h` (VIC 0xC0000000, GPT 0xC0100000, DMOV/ADM 0xA9700000, MDDI
+  0xAA600000, CLK 0xA8600000, UART1 0xA9A00000, NAND 0xA0A00000).
+- **Real VA->PA MMU map (both cores)** in tripleoxygen `console__zeebo__mmu.txt`
+  (ARM11: periph->c0 block, f0000000->10000000, coarse b0xxx->100a3xxx).
+- **APPSBL does ONLY peripheral bring-up** (VIC/GPT/DMOV/GPIO/MDDI + MMU-enable),
+  then slips off the end. It does NOT read NAND (0 accesses to 0xa0a00000 in a
+  full 20M-insn boot, even with r0 forced on the flash path). The element that
+  reads NAND + relocates the OS image is LATER in the boot chain.
+- **APPS isolated cannot boot**: entry 0x10000000 is not a valid ARM11 MMU section
+  (loader re-maps it), and it derails into 0xb000fffc (loader-built RAM).
+- NAND ID 0x5580b1ad confirmed (openzeebo nandread.py/nandwrite.py/flash.c).
 
-| Base         | Block | Header | Probe hit |
-|--------------|-------|--------|-----------|
-| 0xC0000000   | VIC (interrupt controller)      | vic.h   | yes (init) |
-| 0xC0100000   | GPT/DGT (general-purpose timer)  | gpt.h   | yes (was mislabeled "clock/PLL") |
-| 0xA9700000   | ADM/DMOV (DMA controller)        | dmov.h  | yes (24 "channels" = DMA chans, was mislabeled "clock-gate") |
-| 0xA9000000/0xA9200000 | GPIO1                   | gpio.h  | yes (pinmux) |
-| 0xAA600000   | MDDI (display serial link)       | mddi.h  | yes (was mislabeled "UART") |
-| 0xA8600000   | CLK_CTL (clock control)          | clock.c | not yet reached |
-| 0xA9A00000   | UART1 (debug console)            | uart.h  | not yet reached |
-| 0xA0A00000   | NAND controller (EBI2)           | nand.h  | not yet reached |
-| 0xAA200000   | MDP (display processor)          | mdp.h   | not yet reached |
-| 0xA0800000   | HSUSB                            | hsusb.h | not yet reached |
+## Honest position
+The goal post ("boot real firmware end-to-end, no BREW HLE") requires a **full
+boot-chain bring-up**: APPSBL -> [the flash-reading loader element] -> load L4e
+kernel -> L4e loads AMSS/APPS as REX tasks. That is a multi-session project with
+the L4e-on-ARM ABI as the deepest uncertainty (now corrected/known). We are NOT
+close to a booted system; we have the register map, MMU map, flash model, and the
+kernel identity — the "what" — but not the "how" of the loader handoff.
 
-CORRECTION to session-1 notes: the standalone APPSBL did NOT derail at a NAND
-hand-off. It ran its peripheral init (VIC/GPT/DMOV/GPIO/MDDI) then fell through
-into a zeroed/0xFF data region around 0xf000-0x5fef4 — i.e. it ran off the end of
-the routine it was in because a called sub-init returned into uninitialized RAM,
-NOT because it jumped to a NAND-loaded stage. Re-diagnose with the real map.
+## Staged plan (re-grounded)
 
-## SoC facts (datasheet + DevGuide, [CONF])
-- Apps: ARM1136J-S (ARMv6) @528MHz + ARM9 @256MHz baseband (never runs games).
-- QDSP4000+QDSP5000; Adreno 130 (Q3Dimension, GLES1.1, tile/binning, ring-buffer
-  command stream in EBI/SMI; 1.6M tri/s Zeebo-specific).
-- RAM: 32MB SMI @0x00000000 + 128MB EBI1 @0x10000000. NAND 128MB (system) page
-  2048B/64pp/spare64B/ID 0x5580b1ad + 1GB eNAND (games).
-- Peripheral-port remap: `MCR p15,0,r0,c15,c2,4` = 0x80000016 (ARM1136 TRM).
-- MPU enables: NAND MPU 0xa0b00000+0x0, periph MPU 0xa0e00000+0x400,
-  0xa8240000/0xa8250000+0x800.
+### Phase 0 — DONE. MSM7201A peripheral map recovered + APPSBL bring-up traced
+41 regs modeled empirically then corrected against arch_msm7k. Inject:
+- VIC 0xC0000000, GPT 0xC0100000 (free-running COUNT_VAL@+0x04), DMOV 0xA9700000
+  (STATUS=RSLT_VALID|CMD_PTR_RDY, RSLT=DONE), MDDI 0xAA600000, GPIO, CLK.
+- The 0x8e0 software udelay must be short-circuited (force r0=1) or it eats the
+  whole instruction budget.
 
-## Strategy: staged, each stage a runnable milestone
-Keep the Unicorn harness as the fast iteration core (QEMU board later, only if we
-need real IRQ/DMA timing). Model peripherals from arch_msm7k, not from guesses.
+### Phase 1 — NAND controller + full-chain loader element  [NEXT, the real work]
+- `tools/nand_controller.py` exists and passes self-tests (FETCH_ID=0x5580b1ad,
+  PAGE_READ byte-exact). 
+- The MISSING LINK: find and run the boot element that reads NAND + relocates the
+  OS image. It is LATER than APPSBL's reachable code (real 0xa0a00000 literals in
+  APPSBL funcs 0x7100-0x8334, 0xc6ac, 0xe2b4...). Trace how APPSBL hands off and
+  what it targets, then load/run that element with the NAND model backed.
 
-### Phase 0 — DONE (session 1)
-APPSBL peripheral-init runs with no error halt; 41 registers modeled empirically;
-harness + register discovery loop proven.
+### Phase 2 — L4e kernel boot
+- Load the OKL4 L4e kernel (ELF wanted; kernel has arm1176jz dir in the OKL4 tree
+  we pulled). Bring up its own MMU/KIP per the real map.
+- **Derive the ACTUAL syscall set from the KIP link fields** (find KIP, read the
+  `bl` targets the guest branches to), now that svc-immediates are ruled out.
 
-### Phase 1 — Correct device models from arch_msm7k  [NEXT]
-Rewrite the probe's MMIO handler as a small dispatch of real device models:
-- VIC: mask/clear registers per vic.h (init-only, no behavior needed yet).
-- GPT/DGT: a free-running COUNT_VAL that increments; delay loops that poll it must
-  see it advance (return an incrementing counter, not sticky). This is likely why
-  session-1 delay loops burned 54M instructions — a real counter lets them exit.
-- DMOV: model command-pointer execution enough that flash_read/dmov_exec_cmdptr
-  see RSLT_VALID/DONE. This is the gateway to NAND (NAND goes through ADM DMA).
-- GPIO/MDDI/CLK_CTL: sticky config, sane status bits.
-Goal: APPSBL reaches its main flow (load next stage) deliberately, not by
-falling off the end. Success metric = it issues NAND controller reads at
-0xA0A00000.
+### Phase 3 — AMSS/APPS as REX tasks
+- L4e loads AMSS/APPS; REX scheduler runs them. REX API is documented
+  (rex_self/rex_wait/rex_set_sigs/timers; QSC1110 rex.c is behavioral reference;
+  QSC1110 is a DISCRETE chip, not the MSM7201A ARM9). A REX shim services a small
+  IPC/thread surface located via KIP links — no full kernel needed IF we stay at
+  the REX boundary.
 
-### Phase 2 — NAND controller + flash-backed reads
-Model 0xA0A00000 per nand.h (FLASH_CMD/ADDR/EXEC/STATUS/BUFFER + READ_ID) and the
-ADM DMA path nand.c uses. Back it with 1.1.2.bin (+ spare for ECC). READ_ID must
-return maker/device matching 0x5580b1ad. Let APPSBL actually READ pages.
+### Phase 4 — The two big undocumented blocks (unchanged concerns)
+- ARM9 modem (AMSS): ONCRPC / PROC_COMM RPC between cores; stub responses
+  (HLE-of-modem inside an otherwise-LLE apps core) vs full ARM9 — decide with data.
+- Adreno 130: tile renderer + ring-buffer; likely weigh pure-LLE vs redirecting GS
+  to host GLES.
 
-### Phase 3 — Stage hand-off
-Let APPSBL load and jump to the next stage (AMSS/APPS). We already have the ELF
-phdrs (APPS entry 0x10000000, AMSS entry 0x00a00000). Watch the next register
-wave the loaded stage touches.
-
-### Phase 4 — The two big undocumented blocks
-- ARM9 modem (AMSS): ONCRPC / PROC_COMM shared-memory RPC between cores. BREW
-  expects the modem alive. Option: stub PROC_COMM responses (HLE-of-modem inside
-  an otherwise-LLE apps core) rather than emulate the ARM9 — decide at Phase 3.
-- Adreno 130: tile-based renderer + ring-buffer command stream. Biggest GPU RE.
-  Likely the point where a pure-LLE payoff must be weighed against redirecting GS
-  command stream to host GLES (a hybrid).
-
-## Honest risk statement
-Phases 1-3 are now tractable because arch_msm7k hands us the register map and the
-NAND/DMA sequences. Phase 4 (modem RPC + Adreno) remains the true unknown and may
-take the project from "boots firmware" to "runs a game" only via hybrid HLE at the
-modem and GPU boundaries. The staged plan surfaces that decision at Phase 3 with
-data, instead of committing to full-LLE-or-bust up front.
+## Verification rule (hard-won, obey always)
+Repeated UC_HOOK_INTR + growing insn count is NOT proof of life — a derail into
+empty memory spins the INTR hook thousands of times. ALWAYS read the svc bytes and
+require `op>>24==0xEF` (real SVC) before declaring a syscall/idle/pass.
 
 ## Clean-room note
-arch_msm7k is BSD/Apache (Google little-kernel derivative) — usable as a
-reference and even portable into an emulator with attribution. It is NOT the
-game/BREW code, so it does not touch the BREW clean-room boundary. a1Sim stays
-black-box-only and is irrelevant to LLE (x86/HLE).
+arch_msm7k is BSD/Apache (Google little-kernel / zloader derivative) — usable as
+reference and portable with attribution; it is boot code, not game/BREW code, so
+it does not touch the BREW clean-room. a1Sim stays black-box-only.
