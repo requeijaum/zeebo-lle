@@ -120,9 +120,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Evidência de firmware (GPU_TODO §13): 3D é offload MPU→QDSP5 atrás de fachada OpenGL ES 1.1 ATI-Imageon; **não há ring buffer PM4 A2xx observável do lado ARM11** → descartar `pm4_adreno.h` como produtor (mantido como referência de estudo §14).
 - [x] Esqueleto `IGpuRasterizer` (Citra-style) + 2 backends (software correto + GL host stub) + `rasterizer_factory`, verificado por framebuffer (`gpu_smoke` 3/3: clear, triângulo, pm4-walk).
 - [x] Produtor correto `IglHook` interceptando a vtable IGL/IEGL (80/28 slots, ABI ARMADILHA: R0=1º arg real) → `IGpuRasterizer`, verificado por framebuffer (`igl_smoke` 3/3; 40 slots gl* fixados contra gl_hle.cpp).
-- [x] **Integração no build do emulador** (`tools/cpp/Makefile`: targets `gpu`/`test-gpu`; `make test-gpu` 8/8 PASS) + handoff GPU→display provado por pixels em PPM 640x480 RGB565 (`gpu_display_integration`: clear azul 0x001F e vermelho 0xF800), commit `1508115`.
+- [x] **Integração no build do emulador** (`tools/cpp/Makefile`: targets `gpu`/`test-gpu`) + handoff GPU→display provado por pixels em PPM 640x480 RGB565 (`gpu_display_integration`: clear azul 0x001F e vermelho 0xF800), commit `1508115`.
+- [x] **Transform fixed-function (mvp+viewport)** implementado no `IglHook` (stacks modelview/projection, slots de matriz reais, aplicação obj→clip→NDC por vértice) + rasterizer respeitando viewport; verificado por PIXEL (`igl_transform_smoke` 2/2: triângulo desenha e `glTranslatex(+0.5)` o desloca 160px — antigo centro fica vazio, novo centro preenchido), commit `fbb094d`. `make test-gpu` = 10/10 PASS.
 - [ ] Ligar `GuestMachine` ao Unicorn no `zeebo_lle_main` (lado do core ARM) — só quando MAP_CONTROL destravar execução real de guest (bloqueio a montante, FINDINGS 5a). Sem isso, nenhuma applet submete GL à vtable.
-- [ ] Fase 2 completa: transform fixed-function (mvp+viewport), texturas/ATITC, multitexture+combine/dot3, backend GL host (ubershader).
+- [ ] Fase 2 restante: texturas/ATITC (`glTexImage2D`→upload, `glCompressedTexImage2D`→decode), multitexture+combine/dot3, backend GL host (ubershader).
 
 ### Fase 10: Subsistema QDSP5 (multimídia) — comando mapeado, plano de integração
 - [x] Comando-plane mapeado (FINDINGS 2zz–3c): dispatcher `0x16e8cba0`, 4 task engines (VOICEPROC, VFE, JPEG, AUDPP), enfileiramento SMD/ONCRPC `0x17571748`, packet frame (+0x20 proc, +0x80 payload). Prioridade p/ jogos: **AUDPP ≫ JPEG > VFE > VOICE**.
