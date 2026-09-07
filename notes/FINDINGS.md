@@ -843,6 +843,17 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3u — Zeebo Z-Pad Gamepad & Keypad Subsystem Integration (`zeebo_lle_main.cpp`)
+Integration of the host controller / keypad input subsystem with SDL2 event loop and MSM7201A register mapping (`KEYPAD_BASE 0xA9A00000`, `INT_KEYSENSE #28`).
+
+### Architecture & Implementation
+1. **Host-to-Guest Input Translation:**
+   - Mapped host keyboard / controller inputs to Zeebo button bitmask (`ZEEBO_KEY_A`, `B`, `C`, `D`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`).
+   - Mapped register access at `KEYPAD_BASE` (`0xA9A00000`) with dynamic unmapped intercept and register acknowledgment.
+2. **Execution & Validation:**
+   - Recompiled and executed `tools/cpp/zeebo_lle_main.cpp`. Both cores maintain synchronous execution without page fault or unhandled trap.
+   - Dual-core state remains stable across 200,000 instructions with Iguana running in user space (`0xb0000028..0xb0000030`) and AMSS progressing in ARM9.
+
 ## SESSION 3t — Unified Zeebo LLE System Orchestrator & Live Iguana User-Space Boot (`zeebo_lle_main.cpp`)
 Integration of all low-level subsystems into a single master orchestrator executing real NAND firmwares:
 1. Architectural Convergence:

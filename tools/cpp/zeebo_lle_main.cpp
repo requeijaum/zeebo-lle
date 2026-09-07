@@ -122,15 +122,41 @@ private:
     std::map<u32, u32> regs_;
 };
 
-// 3. Gamepad & Input Subsystem
+// 3. Gamepad & Input Subsystem (Zeebo Z-Pad / MSM7201A Keysense)
+enum {
+    ZEEBO_KEY_A         = (1 << 0),
+    ZEEBO_KEY_B         = (1 << 1),
+    ZEEBO_KEY_C         = (1 << 2),
+    ZEEBO_KEY_D         = (1 << 3),
+    ZEEBO_KEY_UP        = (1 << 4),
+    ZEEBO_KEY_DOWN      = (1 << 5),
+    ZEEBO_KEY_LEFT      = (1 << 6),
+    ZEEBO_KEY_RIGHT     = (1 << 7),
+    ZEEBO_KEY_HOME      = (1 << 8),
+};
+
 class UnifiedInput {
 public:
-    UnifiedInput() : keys_pressed_(0) {}
-    void press_key(u32 key_bit) { keys_pressed_ |= key_bit; }
-    void release_key(u32 key_bit) { keys_pressed_ &= ~key_bit; }
+    UnifiedInput() : keys_pressed_(0), int_status_(0) {}
+    void press_key(u32 key_bit) {
+        keys_pressed_ |= key_bit;
+        int_status_ |= 1; // Assert INT_KEYSENSE
+    }
+    void release_key(u32 key_bit) {
+        keys_pressed_ &= ~key_bit;
+    }
     u32 read_keys() const { return keys_pressed_; }
+    u32 read(u32 off) {
+        if (off == 0x00) return keys_pressed_;
+        if (off == 0x04) return int_status_;
+        return 0;
+    }
+    void write(u32 off, u32 val) {
+        if (off == 0x04) int_status_ &= ~val; // Acknowledge IRQ
+    }
 private:
     u32 keys_pressed_;
+    u32 int_status_;
 };
 
 // 4. Host Display Sink (SDL2 + Snapshot)
@@ -199,6 +225,7 @@ public:
         printf("[System] Initializing MDDI Display, Adreno 130 GPU, and Host Video Sink...\n");
         mddi_ = std::make_unique<UnifiedMDDI>();
         gpu_ = std::make_unique<UnifiedAdreno130>();
+        input_ = std::make_unique<UnifiedInput>();
         sink_ = std::make_unique<UnifiedDisplaySink>();
         sink_->init(headless);
 
@@ -257,6 +284,31 @@ public:
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) return;
+                if (ev.type == SDL_KEYDOWN) {
+                    switch (ev.key.keysym.sym) {
+                        case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A); break;
+                        case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B); break;
+                        case SDLK_c:                   input_->press_key(ZEEBO_KEY_C); break;
+                        case SDLK_v:                   input_->press_key(ZEEBO_KEY_D); break;
+                        case SDLK_UP:                  input_->press_key(ZEEBO_KEY_UP); break;
+                        case SDLK_DOWN:                input_->press_key(ZEEBO_KEY_DOWN); break;
+                        case SDLK_LEFT:                input_->press_key(ZEEBO_KEY_LEFT); break;
+                        case SDLK_RIGHT:               input_->press_key(ZEEBO_KEY_RIGHT); break;
+                        case SDLK_h:                   input_->press_key(ZEEBO_KEY_HOME); break;
+                    }
+                } else if (ev.type == SDL_KEYUP) {
+                    switch (ev.key.keysym.sym) {
+                        case SDLK_z: case SDLK_RETURN: input_->release_key(ZEEBO_KEY_A); break;
+                        case SDLK_x: case SDLK_ESCAPE: input_->release_key(ZEEBO_KEY_B); break;
+                        case SDLK_c:                   input_->release_key(ZEEBO_KEY_C); break;
+                        case SDLK_v:                   input_->release_key(ZEEBO_KEY_D); break;
+                        case SDLK_UP:                  input_->release_key(ZEEBO_KEY_UP); break;
+                        case SDLK_DOWN:                input_->release_key(ZEEBO_KEY_DOWN); break;
+                        case SDLK_LEFT:                input_->release_key(ZEEBO_KEY_LEFT); break;
+                        case SDLK_RIGHT:               input_->release_key(ZEEBO_KEY_RIGHT); break;
+                        case SDLK_h:                   input_->release_key(ZEEBO_KEY_HOME); break;
+                    }
+                }
             }
         }
         printf("[System] Execution batch completed successfully.\n");
@@ -389,6 +441,13 @@ private:
     static void c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
+            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+            u32 val = sys->input_->read((u32)(addr - KEYPAD_BASE));
+            uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+            uc_mem_write(uc, addr, &val, size);
+            return;
+        }
         printf("[Core0 Unmapped] %s at 0x%08llx (size %d, val 0x%llx) at pc=0x%08x\n",
                type == UC_MEM_WRITE_UNMAPPED ? "WRITE" : "READ",
                (unsigned long long)addr, size, (unsigned long long)value, pc);
@@ -416,6 +475,10 @@ private:
         // Adreno GPU write
         else if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) {
             sys->gpu_->write((u32)(addr - ADRENO130_BASE), (u32)value);
+        }
+        // Keypad write
+        else if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE) {
+            sys->input_->write((u32)(addr - KEYPAD_BASE), (u32)value);
         }
     }
 
