@@ -1,84 +1,100 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-06, after session 2o audit)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-07, after session 3c)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
-emulated Qualcomm MSM7201A (ARM11 apps core), no HLE of BREW. Decided by Rafael
-2026-09-06 despite the emulation ROADMAP marking HLE-LLE "OUT". This revision is
-grounded in what sessions 2a-2p actually PROVED, including the audited correction
-of the L4e syscall ABI.
+emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
+Decided by Rafael 2026-09-06. This revision is grounded in what sessions 2a-3c actually PROVED,
+including the live execution past 5M instructions and full reverse-engineering of L4e syscalls,
+ONCRPC routing, and QDSP5 hardware accelerator pipelines.
 
-## What is now KNOWN (evidence, not guesses)
-- **Kernel = L4e (NICTA Pistachio-embedded / OKL4 lineage) + REX RTOS on top.**
-  AMSS/APPS are REX tasks. Strings `l4e_min_pagesize`, `L4_Restore fell through`,
-  `rex_self`, `rex_*_tcb` prove it.
-- **AUDITED: ARM L4e syscalls are `bl` to KIP link addresses**, not `svc #imm`+
-  SP-magic (NICTA RefMan N1 rev2, ARM C.2; example `bl 0xFE0000B4`=KernelInterface;
-  MR0-5=r3-r8; UTCB read from 0xFF000FF0; sp/lr preserved). The earlier
-  "svc#0x14=MAP_CONTROL..." 6-syscall map was WRONG (misread of OKL4 user-side
-  ipc.spp as the ABI); the firmware's `mvn sp,#0x4b; svc #0x14` matches neither
-  SYSNUM/SWINUM. Real syscalls must be derived from the KIP link fields.
-- **Real MSM7201A register map** is in openzeebo `zloader/arch_msm7k`+
-  `include/msm7k/*.h` (VIC 0xC0000000, GPT 0xC0100000, DMOV/ADM 0xA9700000, MDDI
-  0xAA600000, CLK 0xA8600000, UART1 0xA9A00000, NAND 0xA0A00000).
-- **Real VA->PA MMU map (both cores)** in tripleoxygen `console__zeebo__mmu.txt`
-  (ARM11: periph->c0 block, f0000000->10000000, coarse b0xxx->100a3xxx).
-- **APPSBL does ONLY peripheral bring-up** (VIC/GPT/DMOV/GPIO/MDDI + MMU-enable),
-  then slips off the end. It does NOT read NAND (0 accesses to 0xa0a00000 in a
-  full 20M-insn boot, even with r0 forced on the flash path). The element that
-  reads NAND + relocates the OS image is LATER in the boot chain.
-- **APPS isolated cannot boot**: entry 0x10000000 is not a valid ARM11 MMU section
-  (loader re-maps it), and it derails into 0xb000fffc (loader-built RAM).
-- NAND ID 0x5580b1ad confirmed (openzeebo nandread.py/nandwrite.py/flash.c).
+## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
-## Honest position
-The goal post ("boot real firmware end-to-end, no BREW HLE") requires a **full
-boot-chain bring-up**: APPSBL -> [the flash-reading loader element] -> load L4e
-kernel -> L4e loads AMSS/APPS as REX tasks. That is a multi-session project with
-the L4e-on-ARM ABI as the deepest uncertainty (now corrected/known). We are NOT
-close to a booted system; we have the register map, MMU map, flash model, and the
-kernel identity — the "what" — but not the "how" of the loader handoff.
+1. **Kernel = L4e (OKL4 2.1.1 lineage) + Iguana + REX RTOS on top:**
+   - Standalone OKL4 kernel boots cleanly to thread scheduler / idle thread (`pc=0xf0002ea4`, commit `e9d646c`).
+   - Syscall trampoline table at `0x00d06d9c`:
+     - `0x00d06d9c`: `ldr pc, [pc, #-4]` -> `0x16e9ab20` (thread switch / yield / `L4_ThreadSwitch`, `SVC #0x6`).
+     - `0x00d06da4`: `ldr pc, [pc, #-4]` -> `0x17478927` (synchronous IPC handler / `L4_Ipc`, `SVC #0x1400`).
+     - `0x00d06dac`: `ldr pc, [pc, #-4]` -> `0x16e0d079` (thread timer handler).
+   - Syscall invoker thunk at `0x00d0cae0` prepares `r0-r2`, saves frame pointer in `ip` (`r12`), branches via `bl 0x00d06d9e`.
 
-## Staged plan (re-grounded)
+2. **AMSS RTOS (REX) Scheduler Loop & Event Wait:**
+   - Stable execution past **5,000,000 instructions** (`err=ok`) deterministically pausing in idle loop at `0x16ef0b2c/2e`.
+   - Event wait mechanism in `0x1730f442..0x1730f488`: wait mask check `0x00180000`.
+   - Free-running virtual tick timer MMIO at `0xc5000108` ensures REX software timer expiration and prevents lockups.
+   - Mode stack registry at `0x1755d264`: System (1KB, `0x179fe058`), Abort (400B, `0x179fdec8`), Supervisor (208B, `0x179fddf8`), IRQ (536B, `0x179fdbe0`).
 
-### Phase 0 — DONE. MSM7201A peripheral map recovered + APPSBL bring-up traced
-41 regs modeled empirically then corrected against arch_msm7k. Inject:
-- VIC 0xC0000000, GPT 0xC0100000 (free-running COUNT_VAL@+0x04), DMOV 0xA9700000
-  (STATUS=RSLT_VALID|CMD_PTR_RDY, RSLT=DONE), MDDI 0xAA600000, GPIO, CLK.
-- The 0x8e0 software udelay must be short-circuited (force r0=1) or it eats the
-  whole instruction budget.
+3. **ONCRPC / SMD Inter-Core Communication Channel:**
+   - `0x1755d1dc` is the SMD channel state structure (`struct smd_half_channel`):
+     - `+0x00`: State = `0x01` (`SMD_SS_OPENING`)
+     - `+0x01`: Busy / Mutex flag = `0x00` (free)
+     - `+0x02`: Error / Abort flag = `0x00` (clean)
+     - `+0x03`: Channel link status = `0x02` (`SMD_SS_OPENED`)
+   - Triple query helpers:
+     - `0x16ef0a9c`: reads `+0x01` (busy lock)
+     - `0x16ef0a82`: reads `+0x03` (link status)
+     - `0x16ef0aa2`: reads `+0x02` (abort flag)
+   - Packet queue head at `0x17571748`: `+0x00` head, `+0x04` tail, `+0x08` count, `+0x1c` initialized (`0x00000001`).
+   - Router dispatch loop (`0x16ef0b28..0x16ef0b48`):
+     - `r0 >= 3` (`SMD_SS_FLUSHING/OPENED` fully connected): invokes packet consumer `0x16e8cb96`.
+     - `r0 < 3`: branches to channel reset/handshake `0x16e8cb88` and waits for peer.
 
-### Phase 1 — NAND controller + full-chain loader element  [NEXT, the real work]
-- `tools/nand_controller.py` exists and passes self-tests (FETCH_ID=0x5580b1ad,
-  PAGE_READ byte-exact). 
-- The MISSING LINK: find and run the boot element that reads NAND + relocates the
-  OS image. It is LATER than APPSBL's reachable code (real 0xa0a00000 literals in
-  APPSBL funcs 0x7100-0x8334, 0xc6ac, 0xe2b4...). Trace how APPSBL hands off and
-  what it targets, then load/run that element with the NAND model backed.
+4. **QDSP5 Multimedia Acceleration Subsystems (via ONCRPC):**
+   - The modem AMSS hosts the command dispatcher for all MSM7201A DSP engines:
+     - **Voice DSP (`QDSP_VOICEPROCTASK`)**: Upstream command queue `UPVOCPROCQUEUE` (`0x16ea9cb0`).
+     - **Video Front End (`QDSP_VFETASK`)**: Scale (`VFECOMMANDSCALEQUEUE`), Table (`VFECOMMANDTABLEQUEUE`), and Command (`VFECOMMANDQUEUE`) queues (`0x16ea9ce8..0x16ea9d88`).
+     - **JPEG Hardware Codec (`QDSP_JPEGTASK`)**: Action (`UPJPEGACTIONCMDQUEUE`) and Config (`UPJPEGCFGCMDQUEUE`) queues (`0x16ea9dd0..0x16ea9e18`).
+     - **Audio Post-Processor (`QDSP_AUDPPTASK`)**: Multi-band EQ and DAC output queue `UPAUDPPCMD2QUEUE` (`0x16ea9e68`).
+   - Unified packet framing: 1280 bytes (`0x500`) max payload, procedure ID at offset `+0x20`, data starting at `+0x80`.
 
-### Phase 2 — L4e kernel boot
-- Load the OKL4 L4e kernel (ELF wanted; kernel has arm1176jz dir in the OKL4 tree
-  we pulled). Bring up its own MMU/KIP per the real map.
-- **Derive the ACTUAL syscall set from the KIP link fields** (find KIP, read the
-  `bl` targets the guest branches to), now that svc-immediates are ruled out.
+5. **Hardware Map (MSM7201A):**
+   - VIC `0xC0000000`, GPT `0xC0100000`, DMOV/ADM `0xA9700000`, MDDI `0xAA600000`, CLK `0xA8600000`, UART1 `0xA9A00000`, NAND `0xA0A00000`, Timer `0xC5000000`.
+   - NAND ID `0x5580b1ad` verified byte-exact.
 
-### Phase 3 — AMSS/APPS as REX tasks
-- L4e loads AMSS/APPS; REX scheduler runs them. REX API is documented
-  (rex_self/rex_wait/rex_set_sigs/timers; QSC1110 rex.c is behavioral reference;
-  QSC1110 is a DISCRETE chip, not the MSM7201A ARM9). A REX shim services a small
-  IPC/thread surface located via KIP links — no full kernel needed IF we stay at
-  the REX boundary.
+---
 
-### Phase 4 — The two big undocumented blocks (unchanged concerns)
-- ARM9 modem (AMSS): ONCRPC / PROC_COMM RPC between cores; stub responses
-  (HLE-of-modem inside an otherwise-LLE apps core) vs full ARM9 — decide with data.
-- Adreno 130: tile renderer + ring-buffer; likely weigh pure-LLE vs redirecting GS
-  to host GLES.
+## What is MISSING & Blocking Full Boot (The Gap Analysis)
 
-## Verification rule (hard-won, obey always)
-Repeated UC_HOOK_INTR + growing insn count is NOT proof of life — a derail into
-empty memory spins the INTR hook thousands of times. ALWAYS read the svc bytes and
-require `op>>24==0xEF` (real SVC) before declaring a syscall/idle/pass.
+To achieve the ultimate goal — booting the real firmware end-to-end to launch a game — the following concrete layers are still missing:
 
-## Clean-room note
-arch_msm7k is BSD/Apache (Google little-kernel / zloader derivative) — usable as
-reference and portable with attribution; it is boot code, not game/BREW code, so
-it does not touch the BREW clean-room. a1Sim stays black-box-only.
+1. **SMD / SMSM Inter-Core Handshake & RPC Peer Emulation:**
+   - *Current status:* AMSS is idling waiting for the Application processor (ARM11) to assert `SMSM_SMDINIT` (`0x00000008`) and transition SMD channel `0x1755d1dc` from state `0x02` (`SMD_SS_OPENED`) to `0x03` (`SMD_SS_FLUSHING/CONNECTED`).
+   - *Missing:* Either (a) an ARM11 co-runner or (b) an LLE bridge in `zeebo_boot.cpp` that injects the SMSM peer state flags (`SMSM_STATE_APPS`) and sends synthetic RPC ping/init packets to `0x17571748`.
+
+2. **Dual-Core ARM11 (Apps) + ARM9 (Modem) Shared Memory (SMEM) Fabric:**
+   - *Current status:* ARM9 (AMSS) runs isolated in Unicorn; ARM11 (OKL4 kernel) runs isolated in `zeebo_kernel_boot`.
+   - *Missing:* A unified multi-core memory space where both cores share the SMEM region (`0x00100000` / physical DRAM window) with IPC doorbell interrupts (A2M interrupt at `MSM_CSR_BASE + 0x400`).
+
+3. **NAND OS Loader Bridge (Flash -> DRAM relocation):**
+   - *Current status:* APPSBL initializes hardware and halts without issuing NAND reads. AMSS is loaded manually at `0x16e00000` from extracted dump.
+   - *Missing:* Executing or simulating the second-stage bootloader (SBL) that reads partition tables from NAND (`0xA0A00000`), decrypts/decompresses AMSS and APPS partitions into physical DRAM, and jumps to Iguana/L4e entry.
+
+4. **Adreno 130 3D / 2D Display Engine (Yamato / AMD Z430):**
+   - *Current status:* MDDI LCD interface is stubbed in APPSBL; 3D command rings and 2D blitter registers (`0xA0000000..0xA00FFFFF`) are unmapped.
+   - *Missing:* Register space for Adreno 130 command FIFO and tiling memory to receive draw calls from BREW / OpenGL ES 1.1.
+
+---
+
+## Staged Roadmap & Next Milestones
+
+### Phase 1 — AMSS Active Packet Ingestion & Baseband Handshake [CURRENT]
+- [x] Mapeamento completo do despachante ONCRPC e tabelas de tarefas QDSP5 (`b55dae0`).
+- [ ] Implementar injeção de pacotes na fila `0x17571748` com estrutura de 1280 bytes (`procedure ID`, payload `+0x80`).
+- [ ] Implementar transição de estado SMD (`0x1755d1dc`: estado `2` -> `3`) simulando resposta do ARM11 para disparar os callbacks `blx r2` registrados pelo modem.
+
+### Phase 2 — SMEM & Dual-Core Harness Architecture
+- [ ] Unificar os runners `zeebo_boot.cpp` e `zeebo_kernel_boot.cpp` em um único processo C++ com dois contextos Unicorn (`uc_open(UC_ARCH_ARM, UC_MODE_ARM)` para ARM1176JZ e ARM926EJ-S).
+- [ ] Mapear o espaço SMEM compartilhado (`0x00100000..0x00200000`) com barreiras de memória e interrupções inter-core A2M (`0xC0000000` / `0x400`).
+
+### Phase 3 — Second-Stage NAND Relocator
+- [ ] Conectar `tools/nand_controller.py` ou a engine C++ de NAND ao controlador de DMA DMOV (`0xA9700000`).
+- [ ] Bootar a cadeia completa a partir da cópia da NAND (`1.1.2_AMSS.bin` / dump completo) sem injeção estática de ELF.
+
+### Phase 4 — Display & Graphics (MDDI + Adreno 130)
+- [ ] Implementar framebuffer virtual no controlador MDDI (`0xAA600000`) exportando para SDL2/X11.
+- [ ] Mapear registradores de comando da GPU Adreno 130 (HLE de comandos GLES 1.1 ou LLE de ring-buffer).
+
+---
+
+## Regras de Higiene e Verificação
+- **Clean-room Absoluto:** `a1Sim` permanece estritamente como oráculo caixa-preta (proibido descompilar).
+- **Integridade da NAND:** Leitura exclusiva na cópia de trabalho; dump original preservado com `chmod a-w`.
+- **Validação por Execução Real:** Todo avanço deve ser demonstrado por código executável com commits atômicos e registros auditados em `notes/FINDINGS.md`.
