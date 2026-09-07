@@ -424,6 +424,27 @@ NAND driver, then let APPSBL configure + read NAND via our model.
 Earlier claim "(0xf63c is a RAM descriptor writer)" still stands; the REAL device
 config is 0x7120 + the 0x6c80-0x7140 sequence.
 
+## SESSION 2r — Existing compatible implementations FOUND locally (2 levels)
+Rafael asked "is there an implementation somewhere in ~/projects/zeebo*". Two real
+ones exist, both useful for Phase 1:
+1. **zeemu firmware_inspector** (C++ compiled, functional): FirmwareInspector.cpp
+   normalizes the NAND dump w/ spare (2048 data + 16 spare/chunk, checks non-FF),
+   finds MIBIB partition tables by magic 0x55ee73aa/0xe35ebddb, parses
+   (name/start/length/attr); SplitFirmwareInspector.cpp has the KNOWN real Zeebo
+   partition layout in blocks: MIBIB 0.00/0x00a, QCSBL 0x00a, OEMSBL1 0x00c,
+   OEMSBL2 0x00f, AMSS 0x012/0x0a5, APPSBL 0x0b7, FOTA 0x0ba, EFS2 0x0bc,
+   APPS 0x0e6/0x0a9, FTL 0x18f, EFS2APPS 0x191 — MATCHES zloader (APPS 0xe6,
+   len 0xa9). Validates our NAND geometry (2048/64/64pp, APPSBL block 0xb7).
+2. **openzeebo zloader** (C, drivers compiled as .a): full open-source Zeebo
+   bootloader. main.c (416ln, boot flow + flash_read_block), arch_msm7k/nand.c
+   (real NAND/DMA driver), libboot/{flash.c,init.c,boot.h} + prebuilt
+   libboot.a + libboot_arch_armv6.a. Same geometry (PAGE 2048, SPARE 64,
+   BLOCK 2048*64). No prebuilt ELF/bin of main, but compiles.
+STRATEGY VALUE for Phase 1: instead of forcing the proprietary APPSBL binary
+down its variant-NAND branch, EXECUTE the open-source zloader in Unicorn with our
+peripheral/MMU/NAND models — it is the same boot job, readable and BSD/Apache.
+That is a much higher-probability Phase-1 route than fighting the corporate SBL.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
