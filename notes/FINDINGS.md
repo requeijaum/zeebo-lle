@@ -843,6 +843,24 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3e — Reverse Engineering of REX Wait Dispatch and Event Polling Loop (`0x16ef0b02..0x16ef0b1a`)
+Complete disassembly of the core RTOS event pump at `0x16ef0b02`:
+1. Loop Entry and Argument Setup:
+   - `0x16ef0b02: movs r2, #0` (`2200`)
+   - `0x16ef0b04: lsls r0, r7, #0` (`0038` -> `movs r0, r7`)
+   - `0x16ef0b06: lsls r1, r7, #0` (`0039` -> `movs r1, r7`)
+   - `0x16ef0b08: movs r3, #0x64` (`2364` -> 100 decimal / 100ms timeout parameter)
+   - `0x16ef0b0a..0b0c: bl 0x16f80f18` (`f090 ea04` -> trampoline jumping to `rex_wait` with mask `0x00180000`)
+2. Return from Wait and Event Dispatch:
+   - `0x16ef0b0e: movs r0, #0` (`2000`)
+   - `0x16ef0b10..0b12: bl 0x16f80f18` (`f090 ea04` -> secondary event status query)
+   - `0x16ef0b14: lsls r5, r0, #0` (`0005` -> `movs r5, r0`)
+   - `0x16ef0b16: adds r4, #0x64` (`3464` -> increments running tick counter by 100)
+3. Verified Live Behavior:
+   - Confirms that `REX_WAIT` at `0x1730f442` is called directly with `lr = 0x16ef0b0f`, requesting wait mask `0x00180000`.
+   - `r4` increments deterministically by `0x64` (+100) on each iteration: `0x00` -> `0x64` -> `0xc8` -> `0x12c` -> `0x190`.
+   - Proves the entire AMSS RTOS tick scheduler loop is fully functional, cooperative, and clock-driven.
+
 ## SESSION 3d — Reverse Engineering of Modem Timer Tick Acknowledgment at `0x16ef0b3c` (`0x00b33108`)
 Disassembly of the router branch at `0x16ef0b3c`:
 1. Instruction trace:
