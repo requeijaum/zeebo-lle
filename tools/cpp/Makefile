@@ -20,3 +20,6 @@ clean:
 .PHONY: all test clean
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
+
+zeebo_elf: zeebo_elf.cpp zeebo_devices.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_elf.cpp -lunicorn -lcapstone

@@ -14,9 +14,9 @@ em RAM pelos caminhos que o loader real usa, com inspeção completa.
 - [x] **M1. Mini-boot C++**: `zeebo_partition.cpp` lê partição inteira via DMOVModel
       e compara byte-a-byte ao dump — AMSS (10560 pag) e APPS (10816 pag) ambos
       byte-identical, DMOV execs = n. (Paridade com o Python provada 2026-09-06.)
-- [ ] **M2. Loader de ELF**: parsear o ELF da partição lida (AMSS entry 0xa00000,
-      APPS entry 0x10000000), mapear os PT_LOAD nos endereços físicos corretos
-      (mapa MMU ARM11: f0000000->10000000, b0xxx->100a3xxx, 10xxxx identity).
+- [x] **M2. Loader de ELF**: `zeebo_elf.cpp` parseia ELF, mapeia os PT_LOAD nos PA
+      via mapa MMU ARM11 (f0000000->10000000, b0d00000->100a3400, identity 10xxxx),
+      entry traduzido. AMSS (18 LOAD, big 0xb1a000) e APPS (14 LOAD, 19.7MB+55MB) OK.
 - [ ] **M3. Boot do AMSS/APPS em RAM**: carregar a imagem nos PAs, rodar do entry
       com tradução VA->PA, observar a PRIMEIRA syscall (bl->KIP) e o que ela
       espera — refinando o conhecimento do boundary L4e/REX.
