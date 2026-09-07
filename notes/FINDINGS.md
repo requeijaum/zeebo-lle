@@ -843,6 +843,20 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3p — Shared Memory SMD/SMSM Bridge & Synthetic ONCRPC Ingestion (`zeebo_smd_bridge.cpp`)
+Implementation and validation of inter-processor communication and packet ingestion:
+1. Architecture & Protocols:
+   - Shared Memory Base: `0x01F00000` (2MB).
+   - Apps SMSM State Flags: `SMSM_INIT | SMSM_OSENTERED | SMSM_SMDINIT | SMSM_RPCINIT` (`0x0000002b`).
+   - ProcComm Mailbox: `APP_COMMAND/STATUS` (`0x00..0x0c`), `MDM_COMMAND/STATUS` (`0x10..0x1c`).
+2. Verified Ingestion Pipeline:
+   - Encapsulated ONCRPC CALL packet with 1280-byte framing (`0x500` stride) in `0x177f2000`.
+   - Populated `procedure` identifier (`0x1b59`) at offset `+0x20` and payload at offset `+0x80`.
+   - Dynamically linked queue nodes into AMSS RPC queue head at `0x17571748` (`head`, `tail`, `count = 1`).
+   - Shifted AMSS SMD half-channel structure `0x1755d1dc` link status to `3` (`SMD_SS_FLUSHING`), satisfying router dispatch branch `0x16ef0b30` (`bl 0x16e8cb88`) and `0x16ef0b38` (`bl 0x16e8cb96`).
+3. Significance:
+   - Resolves Gap 1 of the architectural roadmap (SMD/SMSM Handshake & RPC Ingestion prototype).
+
 ## SESSION 3o — Virtual MDDI Host Display Controller & Link Engine (`zeebo_mddi_display.cpp`)
 Implementation and validation of the Qualcomm MSM7201A Primary Mobile Digital Data Interface (PMDH):
 1. Architecture & Base Address:
