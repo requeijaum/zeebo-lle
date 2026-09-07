@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2uu — Reverse Engineering of Packet Dequeue Consumer (`0x16e8cb96..0x16e8cbba`)
+Disassembly of the ONCRPC queue processing engine invoked from router `0x16ef0b3c`:
+1. `0x16e8cb96`: `ldr r0, [sp, #0xb8]` (reads queue context pointer).
+2. `0x16e8cb98`: `addw r2, pc, #0xde0` (resolves dispatch table base).
+3. `0x16e8cb9c`: `add r3, sp, #0x3fc`.
+4. `0x16e8cb9e`: `adds r3, #0x84`.
+5. `0x16e8cba0`: `str r0, [r3, #0x20]`.
+6. `0x16e8cba2`: `str r1, [r3, #0x24]`.
+7. `0x16e8cba4`: `ldr r2, [r3, #0x1c]` (reads packet callback handler).
+8. `0x16e8cbaa`: `ldr r2, [r4, #0x20]` (reads packet payload length).
+9. `0x16e8cbb4`: `blx r2` (dispatches to target service RPC function).
+10. This confirms the packet dequeue layout: packets placed in `0x17571748` are directly dispatched via the table resolved in `0x16e8cb98` to registered subsystems.
+
 ## SESSION 2tt — Reconstructing ONCRPC Port Triple Query Helpers (`0x16ef0a82`, `0x16ef0a9c`, `0x16ef0aa2`)
 Reverse engineering of the three status query functions called before packet handling:
 1. `0x16ef0ae8`: `bl 0x16ef0a9c`
