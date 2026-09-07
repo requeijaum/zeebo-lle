@@ -59,9 +59,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - *Current status:* AMSS is idling waiting for the Application processor (ARM11) to assert `SMSM_SMDINIT` (`0x00000008`) and transition SMD channel `0x1755d1dc` from state `0x02` (`SMD_SS_OPENED`) to `0x03` (`SMD_SS_FLUSHING/CONNECTED`).
    - *Missing:* Either (a) an ARM11 co-runner or (b) an LLE bridge in `zeebo_boot.cpp` that injects the SMSM peer state flags (`SMSM_STATE_APPS`) and sends synthetic RPC ping/init packets to `0x17571748`.
 
-2. **Dual-Core ARM11 (Apps) + ARM9 (Modem) Shared Memory (SMEM) Fabric:**
-   - *Current status:* ARM9 (AMSS) runs isolated in Unicorn; ARM11 (OKL4 kernel) runs isolated in `zeebo_kernel_boot`.
-   - *Missing:* A unified multi-core memory space where both cores share the SMEM region (`0x00100000` / physical DRAM window) with IPC doorbell interrupts (A2M interrupt at `MSM_CSR_BASE + 0x400`).
+2. **Dual-Core ARM11 (Apps) + ARM9 (Modem) Shared Memory (SMEM) Fabric [PROTOTIPADO E VALIDADO]:**
+   - *Current status:* Concluído em `tools/cpp/zeebo_dual_core.cpp` (commit `df01bcd`).
+   - *Verified:* Execução simultânea intercalada de ARM11 (`UC_CPU_ARM_1176`, OKL4 L4e em `0xf001c000`) e ARM9 (`UC_CPU_ARM_926`, AMSS em `0x00a00000`) compartilhando SMEM (`0x01F00000`), ProcComm, interrupções A2M/M2A (`0xC0100400`) e timer GPT (`0xC5000000`). Executou 100.000 instruções por núcleo com `err=ok`.
 
 3. **NAND OS Loader Bridge (Flash -> DRAM relocation):**
    - *Current status:* APPSBL initializes hardware and halts without issuing NAND reads. AMSS is loaded manually at `0x16e00000` from extracted dump.
@@ -81,8 +81,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [ ] Implementar transição de estado SMD (`0x1755d1dc`: estado `2` -> `3`) simulando resposta do ARM11 para disparar os callbacks `blx r2` registrados pelo modem.
 
 ### Phase 2 — SMEM & Dual-Core Harness Architecture
-- [ ] Unificar os runners `zeebo_boot.cpp` e `zeebo_kernel_boot.cpp` em um único processo C++ com dois contextos Unicorn (`uc_open(UC_ARCH_ARM, UC_MODE_ARM)` para ARM1176JZ e ARM926EJ-S).
-- [ ] Mapear o espaço SMEM compartilhado (`0x00100000..0x00200000`) com barreiras de memória e interrupções inter-core A2M (`0xC0000000` / `0x400`).
+- [x] Unificar os runners `zeebo_boot.cpp` e `zeebo_kernel_boot.cpp` em um único processo C++ com dois contextos Unicorn (`uc_open(UC_ARCH_ARM, UC_MODE_ARM)` para ARM1176JZ e ARM926EJ-S) — validado em `zeebo_dual_core.cpp` (`df01bcd`).
+- [x] Mapear o espaço SMEM compartilhado (`0x01F00000`, 2MB) com estruturas ProcComm, controle de versão e interrupções inter-core A2M (`0xC0100400`) — validado em `zeebo_dual_core.cpp` (`df01bcd`).
+- [ ] Conectar os eventos de interrupção A2M (escrita em `0xC0100418`) ao vetor de interrupção VIC do ARM9 para acordar threads REX.
 
 ### Phase 3 — Second-Stage NAND Relocator
 - [ ] Conectar `tools/nand_controller.py` ou a engine C++ de NAND ao controlador de DMA DMOV (`0xA9700000`).
