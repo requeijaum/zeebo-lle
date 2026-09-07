@@ -17,9 +17,11 @@ em RAM pelos caminhos que o loader real usa, com inspeção completa.
 - [x] **M2. Loader de ELF**: `zeebo_elf.cpp` parseia ELF, mapeia os PT_LOAD nos PA
       via mapa MMU ARM11 (f0000000->10000000, b0d00000->100a3400, identity 10xxxx),
       entry traduzido. AMSS (18 LOAD, big 0xb1a000) e APPS (14 LOAD, 19.7MB+55MB) OK.
-- [ ] **M3. Boot do AMSS/APPS em RAM**: carregar a imagem nos PAs, rodar do entry
-      com tradução VA->PA, observar a PRIMEIRA syscall (bl->KIP) e o que ela
-      espera — refinando o conhecimento do boundary L4e/REX.
+- [x] **M3. Boot do AMSS/APPS em RAM**: zeebo_boot.cpp carrega nos PAs e roda do entry:
+      - AMSS: 285K insns, alcança 0x00b1a8a2 (código real no seg 0xb1a000) — roda do
+        entry 0xa00000 com transfers legítimos (0xb17004->0xb1a89e->Thumb loops).
+      - APPS: insn#0 pc=0x10000000 — entry NÃO coberto por PT_LOAD (re-confirma 2p):
+        o loader real reloca APPS; isolado não executa. Boundary L4e/REX confirmado.
 - [ ] **M4. syscall L4e via KIP**: localizar os links da KIP no firmware e
       relacionar os bl-targets (corrigindo a ABI, que é bl->KIP, não svc#imm).
 - [ ] **M5. Boot de chain**: juntar todo o provado — DMOV->NAND->partição->RAM

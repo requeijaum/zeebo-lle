@@ -23,3 +23,6 @@ zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 
 zeebo_elf: zeebo_elf.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_elf.cpp -lunicorn -lcapstone
+
+zeebo_boot: zeebo_boot.cpp zeebo_devices.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_boot.cpp -lunicorn
