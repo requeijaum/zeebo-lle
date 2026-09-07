@@ -1626,3 +1626,67 @@ ordem de init), que já era conhecida dos .clif e dos headers públicos do SDK.
   - Na instrução 520, transiciona para Thumb (`pc=0x00100bb0`) e entra em `AEEMod_Load`.
   - Em `pc=0x00100bc2`, carrega o ponteiro de despacho para instanciação do applet e chama a rotina de registro.
 
+
+## SESSION 5d — ANÁLISE REMOTA (a1Sim descompilado × emuladores Zeebo/BREW online)
+Estado remoto capturado via GitHub API/raw (2026-09-07):
+| Repo                      | pushed     | lic      | core ARM              | atividade |
+| marcelotanisho/zeebulator | 2026-08-13 | GPL-3.0  | interp ARMv6 próprio  | ATIVO/quente |
+| mrpostiga/zeemu           | 2026-06-13 | GPL-3.0  | arm7tdmi+VFP (higan)  | ativo |
+| Tuxality/Infuse           | 2024-03-31 | custom   | dynarmic JIT (closed) | congelado, 58★ |
+| requeijaum/zeebo-emulator | (nosso)    | -        | pesquisa HLE          | referência |
+
+CRUZAMENTO a1Host(descompilado) × Zeebulator(fonte remota) — CONVERGÊNCIA VERIFICADA:
+- a1Host.dll env_CreateInstance (0x10010fd0, descompilado 5c): factory que faz registry-
+  lookup e despacha vtable IBase — cria via [ecx+0x20], Release via [ecx+4].
+- Zeebulator core/brew/ishell.h (remoto): "Vtable slot order verified directly against
+  Qualcomm's own AEEIShell.h ... AddRef and Release (from IBase) followed by CreateInstance".
+  ISHELL_CreateInstance real, backed by RegisterInstance/RegisterFactory (registry de
+  singletons/factories por clsid); clsid não registrado retorna EFAILED(1) "matching real
+  BREW behavior". => O layout IBase que EU extraí da descompilação x86 é IDÊNTICO ao que o
+  Zeebulator derivou do header PÚBLICO. Confirma: a ABI é pública; a descompilação NÃO
+  revelou nada que o header aberto já não desse. Zero valor proprietário incremental.
+- Zeebulator ARCHITECTURE.md, princípio 2/3: "HLE, not LLE ... No BREW OS binary is ever
+  loaded"; "Clean-room ... never from decompiled/copied Qualcomm code". Ou seja: o projeto
+  livre mais avançado deliberadamente NÃO faz o que a1Sim faz (rodar a AEE), e proíbe o que
+  acabamos de fazer (descompilar) — reforço externo de que refs/tainted/ deve ficar isolado.
+
+MAPA DE MÓDULOS ATUAL DO ZEEBULATOR (remoto, p/ referência de oráculo livre):
+- core/brew: ishell, idisplay, media_hle, hle_runtime, mod_runtime, file_hle, hid_hle,
+  gl_hle, interface_object, scaffold_object, virtual_filesystem, font5x7.
+- core/cpu: arm_interpreter (+ thumb_test => Thumb implementado agora, era gap do 2026-08).
+- core/loader: mod, mif, bar, ggz, pakz, pkg, obm1, atitc, png, wav, midi.
+- core/audio: mixer + soundfont_synth. frontends: standalone SDL2 + libretro.
+- tests: ~45 suites (brew_lifecycle, gl_lifecycle, media_hle, mod_runtime, save_state...).
+- CI ativo (.github/workflows/ci.yml). => Zeebulator é o oráculo LIVRE de escolha:
+  comportamento observável, testável, GPL, sem risco clean-room.
+
+CONCLUSÃO FINAL (frase de Rafael "a1Sim contra emuladores local+remoto" cumprida):
+1. a1Sim/a1Host = HLE AEE em x86 puro, SEM ARM (descompilado, 5c). Menos útil como oráculo
+   de execução; serve só p/ ordem de bootstrap AEE.
+2. Todos os emuladores Zeebo (a1Sim, Infuse, Zeebulator, Zeemu) são HLE da MESMA ABI BREW,
+   ortogonais ao zeebo-lle (único LLE, boota firmware ARM real). "Coverage LLE vs a1Sim" não
+   é métrica — foi a pergunta errada; a métrica certa é boot-progress até a 1ª classe AEE.
+3. A descompilação NÃO trouxe nada além do header público (provado pela convergência com o
+   Zeebulator clean-room) — a permissão de evadir clean-room rendeu confirmação, não avanço.
+4. Próximo passo real do LLE permanece: implementar MAP_CONTROL (L4e space_map) como mapping
+   verdadeiro no Unicorn (uc_mem_map_ptr VA->PA por página), substituindo o shim retorno-
+   sucesso, p/ que o AEEShell do firmware alcance seu 1º CreateInstance por execução real.
+
+---
+
+## SESSION 4e — Absorção de Padrões HLE de Alta Relevância (Save State Dual-Core & Multi-Stream Audio Sink)
+
+A partir do levantamento dos 5 emuladores HLE conhecidos do Zeebo (Infuse, Zeebulator, Zeemu, Zeeno e G-Mode arcade), foram selecionadas e implementadas no LLE as arquiteturas de maior valor:
+
+1. **Dual-Core Save State Engine (`ZeeboSaveStateManager` em `tools/cpp/zeebo_save_state.h`)**:
+   - Inspirado no mecanismo de save states do Zeebulator, mas projetado especificamente para LLE dual-core.
+   - Serializa contexto de CPU de ambos os núcleos ARM11 e ARM9 via Unicorn (`uc_context_save`), contadores de instrução e endereços de entrypoint.
+   - Itera dinamicamente por todas as regiões de memória mapeadas no Unicorn (`uc_mem_regions`) e grava páginas físicas/compartilhadas em formato binário versionado (`magic 'ZBST'`, v1).
+   - Validação unitária automatizada implementada em `tools/cpp/test_save_state.cpp` confirmando ciclo completo de save, mutação de estado e restore de registradores e RAM com 100% de integridade.
+
+2. **Unified Audio Sink Multi-Stream (`UnifiedAudioSink` em `tools/cpp/zeebo_audio_sink.h`)**:
+   - Inspirado na gestão multi-stream do Infuse e no modelo de controle de ciclo de vida do Zeemu.
+   - Fornece alocação de vozes independentes com controle de taxa de amostragem, volume e canais (mono/stereo), com resampling linear para a taxa host (44.1 kHz).
+   - Desacopla o mixer PCM de traps de ciclo de vida (`Release`/`Play`), pronto para integração com o subsistema QDSP5/DMA de áudio do MSM7201A.
+   - Validação unitária automatizada implementada em `tools/cpp/test_audio_sink.cpp` confirmando síntese e mixagem estéreo interleaved de 16 bits.
+

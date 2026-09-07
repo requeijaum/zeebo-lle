@@ -112,6 +112,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Executar e validar a bateria completa de 11 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob o núcleo ARM11 (Unicorn/ARM1176): 11/11 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `muldiv`, `shifter`, `thumb2branch`).
 - [x] Testar a execução do módulo limpo `zbtest.mod` (construído via SDK oficial BREW) no LLE e mapear o ponto de despacho para `AEEMod_Load`.
 
+### Fase 8: Absorção de Padrões HLE de Alta Relevância (Audio & SaveState Engine)
+- [x] Incorporar padrão de Save State Dual-Core (`ZeeboSaveStateManager` em `zeebo_save_state.h`) capturando CPU Unicorn context (`uc_context_save`) + regiões mapeadas de memória física/compartilhada.
+- [x] Incorporar mixer de áudio multi-stream (`UnifiedAudioSink` em `zeebo_audio_sink.h`) com controle de canais e vtable HLE/LLE limpa evitando problemas de ciclo de vida e interworking.
+
 ---
 
 ## Regras de Higiene e Verificação
