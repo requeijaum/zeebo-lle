@@ -406,6 +406,24 @@ link-time entry points at a VA the running system does not map — further proof
 that the loader re-maps the APS image (we cannot boot APPS at its ELF entry in
 isolation; the loader's KIP/link setup is required).
 
+## SESSION 2q — NAND DRIVER LOCALIZED inside APPSBL (the "missing link" is HERE)
+tools/find_nand_driver.py + disas_nand_7120.py: the NAND controller code is IN
+APPSBL, not a later blob. `0x7120` = NAND device-config function: writes
+NAND_DEV0_CFG0/1 etc at `[r3+0x100/0x104/0x108/0x10c/0x17c/0x180/0x184]` where
+r3=r4+0x1000 (r4 = a device/MMIO struct). Called from 11 sites: 0x3958,0x3f68,
+0x4414,0x4598,0x463c,0x471c,0x48a8,0x53c0,0x5c20,0x6348,0xacf8. The real
+0xa0a00000 register literals are consumed by pc-relative ldr in code at 0x395c..
+0x702c (base 0xa0a00000+/0c/e0/f0/10/100/300/304/30a). 
+WHY the boot never emits NAND MMIO: the flow we emulate (0x8xx->0x16xx->0x8d78->
+0x730 MMU -> derail) does NOT take the NAND branch. The NAND path is a VARIANT
+branch (modem-vs-apps / load-secondary) gated on values returned by version/variant
+readers (bl 0x708, 0x3570, 0xc040 at 0xd34-dc0) that our emulation returns wrong.
+So: boot the OTHER variant branch to reach the flash driver. This is the concrete
+Phase-1 attack: instrument those variant readers, force the branch toward the
+NAND driver, then let APPSBL configure + read NAND via our model.
+Earlier claim "(0xf63c is a RAM descriptor writer)" still stands; the REAL device
+config is 0x7120 + the 0x6c80-0x7140 sequence.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
