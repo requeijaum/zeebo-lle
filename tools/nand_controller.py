@@ -80,6 +80,13 @@ class NandController:
         self.status = FS_OK
         self.last_cmd = 0
         self._id_latched = 0
+        # real MSM7201A NAND controller CFG defaults (openzeebo KB + zloader):
+        # DEV0_CFG0 = 0xa25400c0, DEV0_CFG1 = 0x0004745e. flash_read_config reads
+        # these; must be non-zero or flash_read_config returns -1 and boot stalls.
+        if R_DEV0_CFG0 not in self.reg:
+            self.reg[R_DEV0_CFG0] = 0xa25400c0
+        if R_DEV0_CFG1 not in self.reg:
+            self.reg[R_DEV0_CFG1] = 0x0004745e
 
     def _page_bytes(self, page):
         off = page * self._stride

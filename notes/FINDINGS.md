@@ -504,6 +504,25 @@ tool (blink/LED/power-button waits) — not a boot-to-OS path. Options:
 Recommendation: (a) is cheap and unblocks both the loader AND later kernel boot
 with real toolchain alignment; (b) is the strategic LLE goal. Offerable now.
 
+## SESSION 2v — OpenZeebo zloader BOOTS in Unicorn: real DMA flash-configure verified
+Rafael authorized sudo; installed arm-none-eabi-gcc 14.2. Rebuilt zloader the way
+the Makefile intends (fixed -march=armv5->armv5te in 4 Makefiles, added boot.h
+protos for nopdelay/snprintf, smem.c include boot.h, -nostdlib -lgcc link).
+Result: zloader_sig_r.bin (9.4KB, ELF entry 0x00a00028, flash_read_page@0xa01200),
+copied to firmware/openzeebo-zloader.bin. boot_zloader_unuicorn.py runs it:
+- entry is 0xa00028 (the GLOBAL `start:`; the 0xa00000 preamble is boot HEADER
+  data, not code). BSS-zero loop passes. boot reaches main.
+- DMOV executes: first DMA = nand.c `flash_read_config` (reads DEV0_CFG0@0xa0a00020
+  and CFG1@0xa0a00024 into RAM) — the REAL first NAND access. Logged.
+- KEY FIX: NandController must return real CFG defaults (DEV0_CFG0=0xa25400c0,
+  DEV0_CFG1=0x0004745e) or flash_read_config returns -1 and main ·
+  blinks UNSUPPORTED forever. Now set; self-test still passes.
+- After config, boot continues ~1M+ insns then lands on PC ~0xba9874 (in the
+  heap/alloc region) with only 1 DMOV exec — i.e. main's `alloc(BLOCK_SIZE)` /
+  `board_init` path derails into the heap. Next hurdle = heap/malloc sizing +
+  memory map (heap starts 0xc00000 but _main allocs up to BLOCK_SIZE 0x80000).
+  Up-to: real DMA->flash-config proven inside a genuinely booting OpenZeebo loader.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
