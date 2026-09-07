@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2ww — Reverse Engineering of L4e Microkernel Syscall Trampolines (`0x00d0cae0..0x00d0caf8`, `0x00d06d9c`)
+Detailed disassembly of the Iguana / L4e user-space syscall dispatcher:
+1. Syscall invoker thunk at `0x00d0cae0`:
+   - Prepares arguments: `r0`, `r1`, `r2`, and saves frame stack pointer in `ip` (`r12`).
+   - `0x00d0caea`: `bl 0x00d06d9e` (jumps to the ARM-mode syscall trampoline table).
+   - On return: `0x00d0caee: pop {r3-r5, pc}`.
+2. Trampoline Table at `0x00d06d9c`:
+   - Vector table using PC-relative loads to jump into kernel thunks:
+     - `0x00d06d9c`: `ldr pc, [pc, #-4]` -> jumps to `0x16e9ab20`
+     - `0x00d06da4`: `ldr pc, [pc, #-4]` -> jumps to `0x17478927`
+     - `0x00d06dac`: `ldr pc, [pc, #-4]` -> jumps to `0x16e0d079`
+3. Function of Syscalls observed during boot:
+   - `SVC #0x6`: `L4_ThreadSwitch` / yield, used by REX tasks for cooperative thread scheduling.
+   - `SVC #0x1400`: `L4_Ipc` with transfer descriptor masks in `r2` (`0x0000c002`, `0x0001c006`, `0x0004c004`), directing inter-thread messages to Iguana server threads.
+4. Both ARM and Thumb trampoline vectors are mapped and handle context saving/restoration cleanly.
+
 ## SESSION 2vv — Reverse Engineering of System Error Log Descriptor Block (`0x1755d1ec`)
 Disassembly and memory inspection of the Qualcomm error logger header at `0x16ef0e30`:
 1. `0x16ef0e30` points to a string formatter template: `"%s%d\n\0\0\0...%s%s\n\0\0\0...%s %02d/%02d/%04d"`.
