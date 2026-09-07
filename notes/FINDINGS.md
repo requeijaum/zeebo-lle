@@ -445,6 +445,27 @@ down its variant-NAND branch, EXECUTE the open-source zloader in Unicorn with ou
 peripheral/MMU/NAND models — it is the same boot job, readable and BSD/Apache.
 That is a much higher-probability Phase-1 route than fighting the corporate SBL.
 
+## SESSION 2s — zloader compiles with clang-arm; nand.c uses DMOV DMA (next gate)
+Rafael approved build+zload the openzeebo zloader. Findings:
+- clang 19 (-target armv6k-none-eabi -mcpu=arm1136j-s -marm) compiles the C
+  cleanly (only memset/strlen redeclare warnings). arm-none-eabi-gcc is ABSENT
+  but not needed. dcc.S uses CP14 (`mrc 14,..`) the clang asm rejects — skip it
+  (dcc/jtag not needed for NAND boot). smem.c needs `-DDEBUG` for dprintf (then
+  dprintf IS declared in boot.h). main.c needs `-DPATCHNAME=...` for patch.h.
+- CRITICAL: arch_msm7k/nand.c drives the NAND controller through the ADM/DMOV
+  DMA (dmov_exec_cmdptr: builds pointers/command-list in RAM, writes DMOV_CMD_PTR,
+  waits RSLT_VALID, drains RSLT). Commands reach the NAND regs via CRCI
+  (CMD_SRC/DST_CRCI_NAND_*). So executing real flash reads needs a FUNCTIONAL
+  DMOV/DMA model (walk pointer->command-list, execute each descriptor = move src->
+  dst, include CRCI to NAND), not just our handshake stub. THIS is the real gate
+  for booting the open-source loader — the DMOV DMA execution.
+- Phase-1 revised: build a functional ADM/DMOV model (walk the command/pointer
+  lists nand.c emits; on CRCI NAND descriptors, service via NandController), then
+  boot zloader.main in Unicorn at 0x00a00000. High probability given source in hand.
+- build_zloader.sh committed; current objects partial (arch_armv6 irq/jtag/misc
+  + board/init/tags build; the rest needs the -DDEBUG/-DPATCHNAME fixes + dmov
+  functional model before it boots usefully).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
