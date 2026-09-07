@@ -1,2 +1,13 @@
 nand/*.bin
 refs/*.h
+tools/cpp/zeebo_boot
+tools/cpp/zeebo_kernel_boot
+tools/cpp/zeebo_dual_core
+tools/cpp/zeebo_nand_relocator
+tools/cpp/zeebo_mddi_display
+tools/cpp/zeebo_smd_bridge
+tools/cpp/zeebo_adreno130_gpu
+tools/cpp/zeebo_fb_sink
+tools/cpp/zeebo_partition
+tools/cpp/zeebo_elf
+tools/cpp/zeebo_devices_test
