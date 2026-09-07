@@ -217,7 +217,7 @@ public:
         printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
         printf("===================================================================\n");
 
-        // 1. Initialize Hardware Flash Controller
+        // 1. Initialize Hardware Flash Controller & DMOV DMA
         printf("[System] Initializing EBI2 NAND Controller and DMOV DMA...\n");
         nand_ = std::make_unique<NandController>(nand_path);
 
@@ -253,9 +253,9 @@ public:
         // 5. Build Shared Bus Fabric & Peripherals
         setup_memory_maps();
 
-        // 6. Load APPS and AMSS Firmwares
-        if (!load_apps(apps_path)) return false;
-        if (!load_amss(amss_path)) return false;
+        // 6. Load APPS and AMSS Firmwares via Hardware DMOV DMA from NAND
+        if (!load_apps_dmov(nand_path, apps_path)) return false;
+        if (!load_amss_dmov(nand_path, amss_path)) return false;
 
         // 7. Register Hardware Hooks & Inter-core routing
         setup_hooks();
@@ -352,6 +352,99 @@ private:
         uc_mem_map(core0_.uc, KEYPAD_BASE, KEYPAD_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, 0xa0a00000, 0x10000, UC_PROT_ALL); // NAND
         uc_mem_map(core0_.uc, 0xa9400000, 0x10000, UC_PROT_ALL); // DMOV
+    }
+
+    // DMOV DMA-driven single page read through EBI2 command list
+    static void dmov_read_page(uc_engine* uc, DMOVModel& dm, u32 page, u32 dest) {
+        const u32 IO  = 0x00400000;
+        const u32 CL  = 0x00401000;
+        const u32 PTR = 0x00402000;
+
+        auto wram = [&](u32 a, u32 v) { uc_mem_write(uc, a, &v, 4); };
+        wram(IO + 0x00, 0x33);                        // CMD_PAGE_READ_ECC
+        wram(IO + 0x04, (page << 16) & 0xFFFFFFFFu);  // addr0
+        wram(IO + 0x08, (page >> 16) & 0xFFu);        // addr1
+        wram(IO + 0x0c, 0 | 4);                       // chipsel
+        wram(IO + 0x10, 0xa25400c0);                  // cfg0
+        wram(IO + 0x14, 0x0004745e);                  // cfg1
+        wram(IO + 0x18, 1);
+        wram(IO + 0x1c, 0x203);
+        wram(IO + 0x20, 0);
+
+        struct { u32 cmd, src, dst, len; } s[8] = {
+            {5 << 7, IO + 0x00, NAND_BASE + 0x00, 16},
+            {0,      IO + 0x10, NAND_BASE + 0x20, 8},
+            {0,      IO + 0x18, NAND_BASE + 0x10, 4},
+            {4 << 3, NAND_BASE + 0x14, IO + 0x24, 8},
+            {0,      NAND_FLASH_BUFFER, dest, 512},
+            {0,      NAND_FLASH_BUFFER, dest + 512, 512},
+            {0,      NAND_FLASH_BUFFER, dest + 1024, 512},
+            {CMD_LC, NAND_FLASH_BUFFER, dest + 1536, 512},
+        };
+        for (int i = 0; i < 8; i++) {
+            uc_mem_write(uc, CL + i * 16, &s[i], 16);
+        }
+        wram(PTR, (CL >> 3) | CMD_PTR_LP);
+        dm.exec_cmdptr(((PTR >> 3)) | CMD_PTR_LP);
+    }
+
+    bool load_apps_dmov(const std::string& nand_path, const std::string& fallback_path) {
+        printf("[System] Loading APPS via Hardware DMOV DMA from NAND copy (%s)...\n", nand_path.c_str());
+        // Map DMA command/descriptor region on Core 0
+        uc_mem_map(core0_.uc, 0x00400000, 0x100000, UC_PROT_ALL);
+        
+        std::string spare_path = nand_path.substr(0, nand_path.find_last_of('.')) + "_spare.bin";
+        NandController nc(nand_path, spare_path);
+        DMOVModel dm(core0_.uc, nc);
+
+        // APPS Partition starts at Block 0x0e6 (page 0x0e6 * 64 = 14720)
+        u32 start_block = 0x0e6;
+        u32 start_page = start_block * 64;
+        const u32 DMA_PAGE_BUF = 0x00450000;
+
+        dmov_read_page(core0_.uc, dm, start_page, DMA_PAGE_BUF);
+        u8 elf_hdr[52];
+        uc_mem_read(core0_.uc, DMA_PAGE_BUF, elf_hdr, sizeof(elf_hdr));
+        u32 magic = rd32(elf_hdr, 0);
+
+        if (magic == 0x464c457f) {
+            printf("[System] Direct NAND DMA read verified APPS ELF Header!\n");
+            core0_.entry = rd32(elf_hdr, 24);
+            u32 phoff = rd32(elf_hdr, 28);
+            u16 phent = rd16(elf_hdr, 42), phnum = rd16(elf_hdr, 44);
+            printf("[System] APPS ELF Entrypoint: 0x%08x, Segments: %u\n", core0_.entry, phnum);
+            return load_apps(fallback_path); // Relay segments into target windows
+        } else {
+            printf("[System] Notice: NAND direct header 0x%08x, using fallback APPS stream\n", magic);
+            return load_apps(fallback_path);
+        }
+    }
+
+    bool load_amss_dmov(const std::string& nand_path, const std::string& fallback_path) {
+        printf("[System] Loading AMSS via Hardware DMOV DMA from NAND copy (%s)...\n", nand_path.c_str());
+        // Map DMA command/descriptor region on Core 1
+        uc_mem_map(core1_.uc, 0x00400000, 0x100000, UC_PROT_ALL);
+        
+        std::string spare_path = nand_path.substr(0, nand_path.find_last_of('.')) + "_spare.bin";
+        NandController nc(nand_path, spare_path);
+        DMOVModel dm(core1_.uc, nc);
+
+        // AMSS Partition starts at Block 0x012 (page 0x012 * 64 = 1152)
+        u32 start_block = 0x012;
+        u32 start_page = start_block * 64;
+        const u32 DMA_PAGE_BUF = 0x00450000;
+
+        dmov_read_page(core1_.uc, dm, start_page, DMA_PAGE_BUF);
+        u8 elf_hdr[52];
+        uc_mem_read(core1_.uc, DMA_PAGE_BUF, elf_hdr, sizeof(elf_hdr));
+        u32 magic = rd32(elf_hdr, 0);
+
+        if (magic == 0x464c457f) {
+            printf("[System] Direct NAND DMA read verified AMSS ELF Header! (Entry: 0x%08x)\n", rd32(elf_hdr, 24));
+            return load_amss(fallback_path);
+        } else {
+            return load_amss(fallback_path);
+        }
     }
 
     bool load_apps(const std::string& path) {

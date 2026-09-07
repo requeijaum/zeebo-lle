@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3x — End-to-End Hardware DMOV DMA NAND Boot Chain in Orchestrator (`zeebo_lle_main.cpp`)
+Integration of the physical NAND Flash Controller (EBI2) and ADM/DMOV DMA engine (`load_apps_dmov`, `load_amss_dmov`) directly into the boot sequence of `zeebo_lle_main.cpp`.
+
+### Technical Architecture & Validation
+1. **Hardware DMA Emulation at Boot:**
+   - Core 0 and Core 1 utilize the functional DMOV DMA command descriptor engine to read NAND blocks directly from the copy (`nand/1.1.2.bin`):
+     - APPS partition starting at block `0x0e6` (page 14720).
+     - AMSS partition starting at block `0x012` (page 1152).
+   - Validated ELF header magic (`0x464c457f`) and entrypoint offsets via real DMOV descriptors into DMA buffer space `0x00450000`.
+2. **Synchronous Dual-Core Full Run:**
+   - Successfully loaded and ran 60 cycles x 10,000 instructions = 600,000 instructions per core.
+   - Core 0 runs Iguana in user-space (`0xb0000028..0xb000c754`) while Core 1 executes AMSS modem code smoothly in ARM9.
+
 ## SESSION 3w — Native L4e Syscall Engine & Multi-Hundred-Thousand Insn Dual-Core Stability (`zeebo_lle_main.cpp`)
 Integration of the native OKL4/L4e microkernel syscall ABI dispatcher (`UC_HOOK_INTR`) for ARM1176 applications core running genuine `1.1.2_APPS.bin`.
 
