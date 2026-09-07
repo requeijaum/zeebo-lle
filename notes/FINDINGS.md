@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3f — Reverse Engineering of AMSS High-Memory Service Vector Table (`0x16f80f00..0x16f80f30`)
+Decoding the master RTOS service dispatch vector table at `0x16f80f00`:
+1. Vector Architecture:
+   - Alternating ARM instruction pairs: `ldr pc, [pc, #-4]` (`0xe51ff004`) immediately preceded by the 32-bit absolute target pointer.
+   - Translates Thumb calls from the AMSS application space into core OS services and device drivers.
+2. Complete Vector Mapping:
+   - `0x16f80f04`: jumps to `0x00d10588` — L4e kernel panic/trap handler (bypassed in harness).
+   - `0x16f80f0c`: jumps to `0x1730f2ab` — `rex_set_sigs` (signals event mask to target TCB).
+   - `0x16f80f14`: jumps to `0x1730f395` — `rex_clr_sigs` (clears acknowledged event signals).
+   - `0x16f80f1c`: jumps to `0x1730f443` — `rex_wait` (suspends task until one of requested signal mask bits is set).
+   - `0x16f80f24`: jumps to `0x1730f327` — `rex_get_sigs` / task signal status query.
+   - `0x16f80f2c`: jumps to `0x00b33109` — hardware timer watchdog tick acknowledge (`0xc500010c`).
+3. Synthesis:
+   - This completes the architectural map of the entire REX RTOS synchronization API used by the modem firmware.
+   - All signal management routines (`set_sigs`, `clr_sigs`, `wait`, `get_sigs`) are grouped into this contiguous vector block.
+
 ## SESSION 3e — Reverse Engineering of REX Wait Dispatch and Event Polling Loop (`0x16ef0b02..0x16ef0b1a`)
 Complete disassembly of the core RTOS event pump at `0x16ef0b02`:
 1. Loop Entry and Argument Setup:
