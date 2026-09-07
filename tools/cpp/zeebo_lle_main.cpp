@@ -320,6 +320,15 @@ private:
         uc_mem_map(core0_.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
         uc_mem_map(core1_.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
 
+        // Initialize ProcComm and SMSM in SMEM
+        std::vector<u8> smem_init(0x1000, 0);
+        u32 ready = 1; // PCOM_READY
+        memcpy(smem_init.data() + 0x14, &ready, 4); // MDM_STATUS
+        u32 apps_state = 0x0000002b; // SMSM_INIT | SMSM_OSENTERED | SMSM_SMDINIT | SMSM_RPCINIT
+        memcpy(smem_init.data() + 0x100, &apps_state, 4);
+        uc_mem_write(core0_.uc, SMEM_BASE, smem_init.data(), smem_init.size());
+        uc_mem_write(core1_.uc, SMEM_BASE, smem_init.data(), smem_init.size());
+
         // Inter-core Doorbell MSM_CSR (0xC0100000)
         uc_mem_map(core0_.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
         uc_mem_map(core1_.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
@@ -591,6 +600,15 @@ private:
                 uc_mem_write(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
             }
         }
+        // ProcComm command write by Core 0
+        else if (addr == SMEM_BASE + 0x00 && type == UC_MEM_WRITE) { // APP_COMMAND
+            u32 cmd = (u32)value;
+            printf("[ProcComm] Core 0 issued command 0x%x\n", cmd);
+            u32 status_success = 3; // PCOM_CMD_SUCCESS
+            uc_mem_write(uc, SMEM_BASE + 0x04, &status_success, 4); // APP_STATUS
+            u32 cmd_done = 1; // PCOM_CMD_DONE
+            uc_mem_write(uc, SMEM_BASE + 0x00, &cmd_done, 4);
+        }
         // MDDI write
         else if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) {
             sys->mddi_->write((u32)(addr - MSM_MDDI_BASE), (u32)value);
@@ -622,6 +640,10 @@ private:
             static u32 ticker = 100000;
             ticker += 5000;
             uc_mem_write(uc, 0xc5000108, &ticker, 4);
+        }
+        else if (addr == SMEM_BASE + 0x10 && type == UC_MEM_WRITE) { // MDM_COMMAND
+            u32 cmd = (u32)value;
+            printf("[ProcComm] Core 1 (Modem) acked/issued command 0x%x\n", cmd);
         }
     }
 

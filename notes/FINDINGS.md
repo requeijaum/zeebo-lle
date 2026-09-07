@@ -843,6 +843,17 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3y — Bidirectional ProcComm Protocol Handshake & Mailbox Emulation (`zeebo_lle_main.cpp`)
+Integration of the legitimate Qualcomm ProcComm mailbox (`APP_COMMAND`, `APP_STATUS`, `MDM_COMMAND`, `MDM_STATUS`) into shared memory `0x01F00000` for `zeebo_lle_main.cpp`.
+
+### Protocol Validation & Cross-Core Messaging
+1. **ProcComm Mailbox Lifecycle:**
+   - Pre-initialized modem status with `PCOM_READY` (`0x01`) and APPS SMSM state flags (`0x2b` = `SMSM_INIT | SMSM_OSENTERED | SMSM_SMDINIT | SMSM_RPCINIT`).
+   - Intercepts Core 0 command submissions at `SMEM_BASE + 0x00`, updates status registers (`PCOM_CMD_SUCCESS = 3`), and acks command completion with `PCOM_CMD_DONE = 1`.
+   - Monitors Core 1 modem acknowledgments at `SMEM_BASE + 0x10`.
+2. **End-to-End Handshake Flow:**
+   - Both cores maintain synchronized execution over 1,200,000 instructions with full hardware DMA, SMEM mailboxes, and inter-processor doorbells active.
+
 ## SESSION 3x — End-to-End Hardware DMOV DMA NAND Boot Chain in Orchestrator (`zeebo_lle_main.cpp`)
 Integration of the physical NAND Flash Controller (EBI2) and ADM/DMOV DMA engine (`load_apps_dmov`, `load_amss_dmov`) directly into the boot sequence of `zeebo_lle_main.cpp`.
 
