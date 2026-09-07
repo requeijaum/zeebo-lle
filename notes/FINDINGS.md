@@ -617,6 +617,24 @@ APPSBL/loader prepares (or embedded inside the APPS/AMSS image), not a discrete
 NAND partition. This refines ROADMAP Phase 2: boot the L4e kernel via the chain,
 not by loading a kernel-only blob.
 
+## SESSION 2bb — zloader.main is a PATCHER (beco, honest): escalate to mini-boot
+Probing the zloader boot derail (0x0228ce70 -> heap/RAM-low mapping): with the
+low RAM + heap fully mapped the zloader runs cleanly (final pc 0xa01a2c in .text,
+DMOV=1 config OK), no derail. But honest reassessment: zloader.main is a BUILDER
+of the BREW-signature patch — it scans NAND to LOCATE the pattern (find_pattern),
+then blinks LED waiting for the power button (wait_power_pressed -> wait_forever).
+Its end state (patch applied / UNSUPPORTED blink) is NOT a boot-to-OS path. So
+continuing to drive it has low value; the valuable byproduct was the DMA->NAND
+partition read (mini_boot, session 2z), which is the real boot link and is
+byte-identical verified. RESOLUTION: stop pushing zloader.main; the OpenZeebo
+loader served its purpose (validated the DMA->NAND path on real firmware). The
+next real step toward booting an OS is the L4e/REX boundary via the chain, which
+requires the runtime kernel (not a discrete blob — see 2aa). Given the QEMU
+MSM7k RFC (2w) is not merged, the honest options are: (i) write a small esa kernel
+bring-up directly using L4e refman + kernel msm_nand + MMU map, or (ii) wait/
+collaborate on the QEMU machine. Pause-and-consolidate recommended; mini-boot is
+the session's solid milestone.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
