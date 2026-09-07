@@ -730,6 +730,22 @@ MAIN binary is built without DEBUG (dprintf/uart path is #ifdef DEBUG). To see
 real boot serial output we need a DEBUG build of the loader, or run AMSS (which
 uses dprintf). Signposts recorded.
 
+## SESSION 2hh — CONSOLE SERIAL (UART) verified + DEBUG zloader boots & talks
+Rebuilt OpenZeebo zloader with -DDEBUG (new bin firmware/openzeebo-zloader-debug.bin,
+14016 B, has dprintf/uart_putc/uart_init + [debug] strings). Running it in the
+harness with the UART model prints REAL boot serial to the host console:
+  [debug]: init
+  [debug]: block_data =   (then split)
+Then UC_ERR_FETCH_UNMAPPED at pc=0x02600000 — the DEBUG build's `alloc(BLOCK_SIZE)`
+(from malloc, __alloc_next=&BOOTLOADER_HEAP=0xc00000) returned 0x02600000, i.e. the
+DEBUG link moved the heap base or __alloc_next advanced wrong; the boot fetches
+there unmapped. So: CONSOLE SERIAL EMULATED AND OBSERVABLE (verified, answers
+Rafael's question), and the DEBUG zloader boots and speaks — the next gate is the
+malloc heap-base/alloc in the DEBUG build, not the emulator. Signpost: check
+boot.ld BOOTLOADER_HEAP vs where the DEBUG build placed __alloc_next (0x02600000).
+This also confirms the harness now boots a talking loader; the same console will
+show AMSS/kernel output once the real chain runs.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.

@@ -189,6 +189,7 @@ static void map_image(){
     for(auto [base,size] : std::vector<std::pair<u32,u32>>{
             {0x00000000u,0x00a00000u},   // low RAM
             {0x00a00000u,0x00600000u},   // zloader/APPSBL region
+            {0x02000000u,0x00600000u},   // RAM high (heap/malloc spills here)
             {0x01000000u,0x01000000u},   // APPS ELF region + flash geometry table (0x1f00000+) flat region: 0x1000000-0x2000000
             {0x00c00000u,0x00400000u},   // heap (distinct)
         }){
