@@ -1,8 +1,40 @@
-# L4e (OKL4 2.1.1 / Pistachio-embedded) ARM syscall ABI — Zeebo mapping
+# L4e (OKL4 2.1.1 / Pistachio-embedded) ARM syscall ABI — CORRECTED 2026-09-06
 
-Source of truth: OKL4 2.1.1 kernel source from userlandkernel/baseband-research
-(NICTA/Open Kernel Labs). The Zeebo's `l4e_min_pagesize`/`L4_Restore` strings
-match this kernel family exactly.
+Source of truth: the NICTA **L4-embedded Reference Manual (N1 rev2)** — the
+authoritative L4e ABI spec (downloaded from cecs.pdx.edu). The Zeebo's
+`l4e_min_pagesize`/`L4_Restore` strings match this kernel family.
+
+## AUDIT CORRECTION — the earlier svc-immediate map was WRONG
+An audit (2026-09-06, per Rafael's standing request) against the primary source
+found my prior claim "svc #0x14 => MAP_CONTROL, ...6 syscalls" was INVALID.
+On ARM, per RefMan N1 rev2 Appendix C.2 (verbatim):
+
+> "The system-calls, which are invoked by the `bl` instruction, take the target
+> of the calls from the system call link fields in the kernel interface page...
+> One may invoke the system calls with any instruction that branches to the
+> appropriate target, as long as the return-address is contained in r14."
+
+Example: `bl 0xFE0000B4` = KernelInterface. Consequences:
+- The syscall trigger is a **`bl` to a KIP (Kernel Interface Page) link address**,
+  NOT `svc #imm` / SP-magic.
+- MR0-5 (the first six message registers) map to **r3-r8**; sp and lr preserved.
+- UTCB / MyLocalId for ARM is read from a 32-bit load at `0xFF000FF0`.
+
+The OKL4 user-side library (`ipc.spp`: `mov sp,#SYSNUM; swi SWINUM`) is a
+LIBRARY CHOICE, not the L4e ABI; and the firmware's `mvn sp,#0x4b; svc #0x14`
+matches neither (sp=0xffffffb4 != SYSBASE(=0xffffff00)+num; imm 0x14 not in the
+SWINUM=0x1400+num set). The svc#0x14 thunk we trapped in the firmware is likely a
+shim/veneer over the real KIP-link syscalls.
+
+## What still holds (verified)
+- Kernel IS L4e/OKL4 + REX on top (string evidence in AMSS/APPS).
+- Message registers MR0-5 = r3..r8.
+- UTCB pointer readable from 0xFF000FF0; KIP syscall-link base ~0xFE00..-0xFE0F.
+- Registers r8..r12 are clobbered (undefined) after most syscalls.
+
+## Correct next step
+Derive the REAL syscall set from the firmware's KIP link fields (find the KIP,
+read the `bl` targets the guest actually branches to), NOT from svc immediates.
 
 ## ARM syscall convention (from install-time ipc.spp / lipc.spp)
 User-side thunk pattern (identical to our firmware's):
@@ -41,24 +73,18 @@ Our firmware builds the same by `mvn sp,#imm` (gives 0xffffffxx) + `svc #imm`.
 #define SYSNUM(name)  (SYSBASE + SYSCALL_##name)
 #define SWINUM(name)  (SWIBASE + SYSCALL_##name)
 
-## Zeebo firmware thunks -> L4e syscall (by immediate)
-Byte scan of 1.1.2_APPS.bin (pattern EF00mmii, little-endian ii mm 00 ef):
-  svc #0x14             -> syscall #0x14           = MAP_CONTROL         (x7)  [nb: 
-                         canonical SWINUM would be 0x1414; the raw 0x14 bases
-                         likely on a variant where the guest kernel masks]
-  svc #0x1404 (SWINUM)  -> low 0x04 = THREAD_SWITCH                      (x9)
-  svc #0x1408 (SWINUM)  -> low 0x08 = THREAD_CONTROL                     (x5)
-  svc #0x140c (SWINUM)  -> low 0x0c = EXCHANGE_REGISTERS                 (x5)
-  svc #0x1410 (SWINUM)  -> low 0x10 = SCHEDULE                           (x5)
-  svc #0x1414 (SWINUM)  -> low 0x14 = MAP_CONTROL                        (x5)
-The dominant thunk at runtime was svc #0x14 (sel ~0x4b via mvn sp) — the one our
-first trap hit. Both #0x14 and #0x1414 decode to MAP_CONTROL; the same syscall
-appears with two encodings (raw vs SWIBASE-based), likely a fast/slow path or a
-version skew in the guest library. Confirm by disassembling the guest kernel's
-own SVC dispatcher if needed.
+## Zeebo firmware thunks — INVALIDATED map (do not use)
+The same-immediates scan above (svc 0x14/0x1404/.../0x1414) was used to claim a
+6-syscall map, but the audit (session 2o) proved the svc immediate is NOT the arm
+L4e trigger — it is a `bl` to a KIP link. The `mvn sp,#0x4b; svc #0x14` thunk is a
+shim; its SP-magic (0xffffffb4) and immediate (0x14) match neither SYSNUM/SWINUM.
+Treat the old "MAP_CONTROL/THREAD_*" mapping as INVALID. (Kept here only as a
+record of the wrong turn; do not derive syscall semantics from svc immediates on
+ARM L4e.)
 
-## Protocol-level note
-REX on L4e implements its wait/signal/scheduler by issuing these L4e syscalls
+## Protocol-level note (still valid)
+REX on L4e implements its wait/signal/scheduler by issuing L4e syscalls
 (thread_switch, schedule, exchange_registers for context switch; lipc for
-inter-task signals). A REX shim therefore needs to service a SMALL IPC/thread
-surface — not a full microkernel. The 6 syscalls here are the tractable set.
+inter-task signals). A REX shim therefore services a SMALL IPC/thread surface,
+not a full microkernel — but the syscalls must be located via the KIP link
+fields, not svc immediates.

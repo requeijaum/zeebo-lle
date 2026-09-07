@@ -370,6 +370,42 @@ is genuinely full boot-chain bring-up (the element that reads NAND + relocates t
 OS is later than APPSBL's reachable code). Increment (a) is exhausted. RESUME.md
 documents the honest state and next steps for a dedicated bring-up session.
 
+## SESSION 2o — AUDIT CORRECTION: the L4e syscall ABI mapping was WRONG (primary source)
+Audited after delivery against primary source (Rafael's standing request). The
+NICTA L4-embedded Reference Manual (N1 rev2, the authoritative L4e spec) ARM C.2
+Systemcalls states (verbatim): "The system-calls, which are invoked by the [ARM]
+`bl` instruction, take the target of the calls from the system call link fields
+in the kernel interface page... invoke with any instruction that branches to the
+appropriate target, as long as the return-address is contained in r14." Example =
+`bl 0xFE0000B4` for KernelInterface. MR0-5 map to r3-r8; sp and lr are PRESERVED
+across syscalls.
+CONCLUSION (correction): on ARM, L4e syscalls are triggered by a `bl` to a KIP
+(kernel-interface-page) link address, NOT by `svc #imm`+SP-magic. My earlier
+claim "svc #0x14 => MAP_CONTROL, svc #0x1404=>THREAD_SWITCH..." was a leap: I saw
+the imediato 0x14 and matched it to OKL4's SYSCALL_map_control=0x14, but the OKL4
+USER-side lib (ipc.spp `mov sp,#SYSNUM; swi SWINUM`) is an OKL4 user-library
+choice, NOT the L4e ABI, and the firmware's `mvn sp,#0x4b; svc #0x14` matches
+NEITHER (sp=0xffffffb4 != SYSBASE+num, imm 0x14 not in SWINUM=0x1400+num set).
+So the 6-syscall "MAP_CONTROL/THREAD_*..." mapping is INVALID and must not be
+relied on. What still holds: the kernel IS L4e+REX (string-verified), MR0-5=r3-r8,
+UTCB pointer at 0xFF000FF0 (refman ARM: read from 0xFF00 0FF0 = MyLocalId), KIP
+link base 0xFE00.... The real trigger is a bl into the KIP, so the svc#0x14 thunk
+we saw is likely a shim/veneer, not the ABI. Re-derive the actual syscalls from
+the KIP links in the firmware, not from svc immediates.
+
+## SESSION 2p — Audit: further confirmations + MMU entry check
+NAND ID 0x5580b1ad: CONFIRMED correct — it appears verbatim in openzeebo real
+code (tools/nand_util/nandread.py & nandwrite.py `if nand_id != 0x5580b1ad`,
+zloader/flash.c `#define NAND_ID 0x5580b1ad`), not just the KB. NAND controller
+self-test passes. MMU parse (arm11_mmu.py: 135 sections + 15 coarse) spot-checked
+vs the raw dump: c5300000->c0000000, c1d00000->aa600000, f0000000->10000000,
+b0100000->100a3800 all correct.
+NEW CONFIRMATION: the APPS ELF entry vaddr 0x10000000 is NOT a valid section in
+the ARM11 real MMU map (ARM11 sections in 0xf0-0x11f start at 0x10200000). The
+link-time entry points at a VA the running system does not map — further proof
+that the loader re-maps the APS image (we cannot boot APPS at its ELF entry in
+isolation; the loader's KIP/link setup is required).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.

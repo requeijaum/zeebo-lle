@@ -6,12 +6,14 @@ leia `ROADMAP.md` + `notes/FINDINGS.md` (log completo, sessões 2a–2m).
 ## Onde estamos
 - **Objetivo**: bootar o firmware REAL do Zeebo (MSM7201A) em emulação LLE, via
   Unicorn ARMv6 (camada QEMU-free), a partir do dump NAND 1.1.2.
-- **Kernel identificado**: L4e (OKL4 2.1.1, NICTA Pistachio-embedded) + REX RTOS
+- **Kernel identificado**: L4e (NICTA Pistachio-embedded / OKL4 lineage) + REX RTOS
   por cima. AMSS/APPS são tasks REX.
-- **Superfície de syscall L4e mapeada**: 6 syscalls (svc 0x14/1414 MAP_CONTROL,
-  0x1404 THREAD_SWITCH, 0x1408 THREAD_CONTROL, 0x140c EXCHANGE_REGS,
-  0x1410 SCHEDULE). ABI ARM: `mov ip,sp; mov sp,#SYSNUM; swi SWINUM`
-  (SWINUM=0x1400+num, SYSNUM=0xffffff00+num). Ref em `docs/l4e-syscall-abi.md`.
+- **ABI syscall ARM corrigida (auditoria 2026-09-06)**: NÃO é `svc #imm`. Per
+  NICTA L4e RefMan N1 rev2 ARM C.2, syscalls são `bl` para links da KIP
+  (Kernel Interface Page), retorno em r14; MR0-5=r3-r8; UTCB lido de 0xFF000FF0;
+  exemplo `bl 0xFE0000B4`=KernelInterface. O antigo mapa "svc#0x14→MAP_CONTROL..."
+  estava ERRADO (foi um salto indevido do header de usuário OKL4 para a ABI);
+  derrubar re-derivar syscalls dos KIP links, não do imediato do svc.
 
 ## Conquistado (verificado)
 1. **Mapa MMU real** ARM11 VA→PA (150 entradas) extraído de
