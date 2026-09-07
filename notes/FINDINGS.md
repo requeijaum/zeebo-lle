@@ -843,6 +843,17 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2vv — Reverse Engineering of System Error Log Descriptor Block (`0x1755d1ec`)
+Disassembly and memory inspection of the Qualcomm error logger header at `0x16ef0e30`:
+1. `0x16ef0e30` points to a string formatter template: `"%s%d\n\0\0\0...%s%s\n\0\0\0...%s %02d/%02d/%04d"`.
+2. The argument pointer list at `0x1755d1ec` embeds the diagnostic metadata tags:
+   - Offset `+0x00` (`0x1755d1ec`): `"; Version "`
+   - Offset `+0x0b` (`0x1755d1f7`): `"; Build ID: "`
+   - Offset `+0x18` (`0x1755d204`): `"; Error line: "`
+   - Offset `+0x27` (`0x1755d213`): `"; Error file: "`
+3. The registration at `0x16ef0b70` passes this block when an assertion or error handler is armed.
+4. With our state machine overrides (`0x16ef0a82`, `0x16ef0a9c`, `0x16ef0aa2`), the system does not trigger the fatal error formatter and instead continues normal execution loop processing.
+
 ## SESSION 2uu — Reverse Engineering of Packet Dequeue Consumer (`0x16e8cb96..0x16e8cbba`)
 Disassembly of the ONCRPC queue processing engine invoked from router `0x16ef0b3c`:
 1. `0x16e8cb96`: `ldr r0, [sp, #0xb8]` (reads queue context pointer).
