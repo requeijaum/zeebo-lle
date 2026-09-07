@@ -26,10 +26,17 @@ zeebo_devices_test: zeebo_devices_test.cpp zeebo_devices.h
 test: zeebo_devices_test
 	./zeebo_devices_test
 
+# GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
+gpu:
+	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration
+
+test-gpu: gpu
+	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration
+
 clean:
 	rm -f zeebo_harness zeebo_devices_test
 
-.PHONY: all test clean
+.PHONY: all test clean gpu test-gpu
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

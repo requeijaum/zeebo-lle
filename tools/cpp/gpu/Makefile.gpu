@@ -1,0 +1,29 @@
+# Makefile.gpu — ISOLATED build for the GPU skeleton (FASE 1).
+# Kept separate from tools/cpp/Makefile on purpose: another agent is editing the
+# main Makefile/codebase concurrently. Build with:  make -f gpu/Makefile.gpu
+# Two build modes:
+#   make -f gpu/Makefile.gpu             -> headless (software only, no GL dep)
+#   make -f gpu/Makefile.gpu gpu_smoke_gl -> with GL host backend stub compiled in
+CXX ?= g++
+CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra -Ignu
+gpu_smoke: gpu_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h pm4_adreno.h
+	$(CXX) $(CXXFLAGS) gpu_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gpu_smoke
+
+# GL host stub: compiles gl_host_rasterizer.cpp under the guard. No -lGL yet
+# because the stub does not call GL symbols (bodies are TODO). When the FASE 2
+# bodies land, add: -lGL -lGLEW (or EGL/OSMesa) here.
+gpu_smoke_gl: gpu_smoke.cpp soft_rasterizer.cpp gl_host_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h pm4_adreno.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_GL_HOST gpu_smoke.cpp soft_rasterizer.cpp gl_host_rasterizer.cpp rasterizer_factory.cpp -o gpu_smoke_gl
+
+.PHONY: clean
+clean:
+	rm -f gpu_smoke gpu_smoke_gl igl_smoke
+
+# IglHook (produtor CORRETO, FASE 1 real) — prova por framebuffer sem Unicorn.
+igl_smoke: igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
+	$(CXX) $(CXXFLAGS) igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o igl_smoke
+
+# Handoff GPU->display no build do emulador: soft rasterizer -> PPM 640x480 RGB565
+# (mesmo formato do fb_sink). Satisfaz GPU_TODO §7 FASE 1.
+gpu_display_integration: gpu_display_integration.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
+	$(CXX) $(CXXFLAGS) gpu_display_integration.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gpu_display_integration
