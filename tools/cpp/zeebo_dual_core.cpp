@@ -100,11 +100,29 @@ static u32 rreg(uc_engine* uc, int r) {
     return v;
 }
 
-// Hook for Core 0 (L4e microkernel)
+// Hook for Core 0 (L4e Syscall Engine: MAP_CONTROL svc #0x14)
 static void core0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
     CoreState* cs = (CoreState*)ud;
     cs->insns++;
-    // Trap at 0xf001d060 is benign halt/idle loop
+}
+
+static void core0_intr_hook(uc_engine* uc, uint32_t intno, void* ud) {
+    if (intno == 2) { // ARM SWI/SVC
+        u32 pc = 0, sp = 0, lr = 0, r12 = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R12, &r12);
+        u32 op = 0;
+        uc_mem_read(uc, (pc - 4) & ~3u, &op, 4);
+        u32 svc_num = op & 0x00FFFFFF;
+        if (svc_num == 0x14) { // MAP_CONTROL
+            u32 success = 0;
+            uc_reg_write(uc, UC_ARM_REG_R0, &success);
+            if (r12) uc_reg_write(uc, UC_ARM_REG_SP, &r12);
+            if (lr)  uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        }
+    }
 }
 
 // Hook for Core 0 (L4e microkernel MMIO)
@@ -215,8 +233,8 @@ int main(int argc, char** argv) {
     uc_mem_write(core1.uc, SMEM_BASE, &s_init, sizeof(s_init));
 
     // Setup memory for Core 0 (Real MSM7201A APPS: L4e + Iguana + BREW)
-    // Physical RAM window (0x10000000..0x15000000 = 80MB)
-    uc_mem_map(core0.uc, 0x10000000, 0x05000000, UC_PROT_ALL);
+    // Physical RAM window (0x10000000..0x16000000 = 96MB covering all 14 segments up to 0x14953040)
+    uc_mem_map(core0.uc, 0x10000000, 0x06000000, UC_PROT_ALL);
     // Virtual MMU mappings for L4e Kernel (0xf0000000) and Iguana User Space (0xb0000000)
     uc_mem_map(core0.uc, 0xf0000000, 0x01000000, UC_PROT_ALL);
     uc_mem_map(core0.uc, 0xb0000000, 0x02000000, UC_PROT_ALL);
@@ -289,10 +307,11 @@ int main(int argc, char** argv) {
     }
 
     // Register hooks
-    uc_hook h_c0, h_m0, h_u0, h_c1, h_m1;
+    uc_hook h_c0, h_m0, h_u0, h_i0, h_c1, h_m1;
     uc_hook_add(core0.uc, &h_c0, UC_HOOK_CODE, (void*)core0_code_hook, &core0, 0, ~0ULL);
     uc_hook_add(core0.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)core0_mem_hook, &core0, 0, ~0ULL);
     uc_hook_add(core0.uc, &h_u0, UC_HOOK_MEM_UNMAPPED, (void*)core0_unmapped_hook, &core0, 1, 0);
+    uc_hook_add(core0.uc, &h_i0, UC_HOOK_INTR, (void*)core0_intr_hook, &core0, 1, 0);
     uc_hook_add(core1.uc, &h_c1, UC_HOOK_CODE, (void*)core1_code_hook, &core1, 0, ~0ULL);
     uc_hook_add(core1.uc, &h_m1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)core1_mem_hook, &core1, 0, ~0ULL);
 
@@ -300,7 +319,7 @@ int main(int argc, char** argv) {
 
     // Interleaved execution slices
     const int SLICE_INSNS = 10000;
-    const int TOTAL_CYCLES = 20;
+    const int TOTAL_CYCLES = 60;
     for (int cycle = 0; cycle < TOTAL_CYCLES; cycle++) {
         // Step Core 0
         uc_err e0 = uc_emu_start(core0.uc, core0.entry, 0, 0, SLICE_INSNS);

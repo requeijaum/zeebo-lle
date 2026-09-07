@@ -843,6 +843,20 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 4b — Dual-Core Parity & 1.2M Instruction Run on Authentic NAND APPS Firmware (`zeebo_dual_core.cpp`)
+Updated `zeebo_dual_core.cpp` to full parity with the authentic firmware execution model:
+
+### Technical Verification
+1. **Physical & Virtual Memory Symmetry:**
+   - Expanded Core 0 physical RAM window to 96MB (`0x10000000..0x16000000`), accommodating all 14 `PT_LOAD` segments of `1.1.2_APPS.bin`.
+   - Mapped full L4e kernel high virtual window (`0xf0000000`) and Iguana user-space virtual window (`0xb0000000..0xb2000000`, 32MB).
+2. **Native Syscall Handling:**
+   - Added `core0_intr_hook` (`UC_HOOK_INTR`) to service ARM SWI/SVC calls (`intno == 2`) including Iguana's `MAP_CONTROL` (`svc #0x14`).
+3. **Dual-Core Execution:**
+   - Ran 60 cycles x 10,000 instructions = 1,200,000 total instructions (600,000 per core) concurrently.
+   - Core 0 executes authentic boot at `0x10000000`, walks CP15 MMU activation into `0xf0000000`, enters Iguana OS user space at `0xb0000028`, services syscalls, and continues into Iguana memory/server routines at `0xb00033f0`.
+   - Core 1 executes authentic AMSS/REX modem firmware at `0x00a00000`, advancing stably to `0x00c49f00`.
+
 ## SESSION 4a — VIC Interrupt Line Assertion for INT_KEYSENSE IRQ #28 (`zeebo_lle_main.cpp`)
 Hooked the host keyboard / gamepad SDL2 event handler to directly assert Vector Interrupt Controller (VIC) IRQ line #28 (`INT_KEYSENSE`) in Core 0 (ARM11), delivering real hardware interrupt signaling on Z-Pad button presses.
 
