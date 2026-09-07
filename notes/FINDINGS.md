@@ -843,6 +843,24 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2xx — Decoding Synchronous IPC Trampoline Vector (`0x17478927`)
+Disassembly and analysis of the `L4_Ipc` synchronous handler target resolved from trampoline table `0x00d06da4`:
+1. Vector address: `0x17478927` (Thumb-mode entry, aligned base `0x17478926`).
+2. Instruction decode:
+   - `0x17478926: lsls r1, r0, #0` (`0x0001` / `movs r1, r0`).
+   - `0x17478928: adds r1, #0xff` (`31ff`).
+   - `0x1747892a: adds r1, r1, r1` (`1c49`).
+   - `0x1747892c: ldrh r3, [r1, #0x18]` (`8b09`).
+   - `0x1747892e: movs r0, #1` (`2001`).
+   - `0x17478930: cmp r1, #0` (`2900`).
+   - `0x17478932: beq 0x17478936` (`d000`).
+   - `0x17478934: movs r0, #0` (`2000`).
+   - `0x17478936: bx lr` (`4770`).
+3. Behavior:
+   - Validates user thread capability descriptor in `r0`.
+   - Returns boolean success status in `r0`: `r0 = 1` if descriptor valid, `r0 = 0` if invalid.
+   - Cleanly completes with `bx lr` back into caller stack frame.
+
 ## SESSION 2ww — Reverse Engineering of L4e Microkernel Syscall Trampolines (`0x00d0cae0..0x00d0caf8`, `0x00d06d9c`)
 Detailed disassembly of the Iguana / L4e user-space syscall dispatcher:
 1. Syscall invoker thunk at `0x00d0cae0`:
