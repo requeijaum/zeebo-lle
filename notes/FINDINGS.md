@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3s — Host Video Display Sink & RGB565 Frame Exporter (`zeebo_fb_sink.cpp`)
+Implementation and validation of the host presentation layer for Zeebo video output:
+1. Video Specifications:
+   - Output Resolution: 640x480 pixels (Zeebo native display).
+   - Color Format: 16-bit RGB565 (5-bit R, 6-bit G, 5-bit B; 614,400 bytes per frame).
+2. Verified Host Display Pipeline:
+   - Integrated SDL2 video streaming texture pipeline (`SDL_PIXELFORMAT_RGB565`).
+   - Headless verification and color space conversion (`rgb565_to_rgb888`).
+   - Export of raw framebuffers to standard image snapshot formats (PPM P6, 921,615 bytes).
+   - Validated against standard 8-bar test patterns (White, Yellow, Cyan, Green, Magenta, Red, Blue, Black).
+3. Significance:
+   - Completes all outstanding milestones of Phase 4 in `ROADMAP.md`.
+
 ## SESSION 3r — Virtual Adreno 130 (Yamato/Z430) 2D/3D GPU Command Engine (`zeebo_adreno130_gpu.cpp`)
 Implementation and validation of the Qualcomm MSM7201A Adreno 130 Graphics Processing Unit:
 1. Architecture & MMIO Window:
