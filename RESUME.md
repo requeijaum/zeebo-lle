@@ -8,12 +8,12 @@ leia `ROADMAP.md` + `notes/FINDINGS.md` (log completo, sessões 2a–2m).
   Unicorn ARMv6 (camada QEMU-free), a partir do dump NAND 1.1.2.
 - **Kernel identificado**: L4e (NICTA Pistachio-embedded / OKL4 lineage) + REX RTOS
   por cima. AMSS/APPS são tasks REX.
-- **ABI syscall ARM corrigida (auditoria 2026-09-06)**: NÃO é `svc #imm`. Per
-  NICTA L4e RefMan N1 rev2 ARM C.2, syscalls são `bl` para links da KIP
-  (Kernel Interface Page), retorno em r14; MR0-5=r3-r8; UTCB lido de 0xFF000FF0;
-  exemplo `bl 0xFE0000B4`=KernelInterface. O antigo mapa "svc#0x14→MAP_CONTROL..."
-  estava ERRADO (foi um salto indevido do header de usuário OKL4 para a ABI);
-  derrubar re-derivar syscalls dos KIP links, não do imediato do svc.
+- **ABI syscall ARM RECONCILIADA (2026-09-06)**: NÃO é bl->KIP (refman é genérico).
+  O firmware Zeebo usa `mvn sp,#~mask; svc #IMM` com imm=syscall (0=ipc, 4=
+  thread_switch, 8=thread_control, 0xc=exchange_regs, 0x10=schedule, 0x14=
+  map_control, 0x18=space_control, 0x20=cache, 0x24=security, 0x28=lipc); SP
+  magic é máscara separada. (Supera a leitura antiga "6 syscalls svc 0x14/1414";
+  a 2o supercorrigiu — este é o entendimento final.)
 
 ## Conquistado (verificado)
 1. **Mapa MMU real** ARM11 VA→PA (150 entradas) extraído de
