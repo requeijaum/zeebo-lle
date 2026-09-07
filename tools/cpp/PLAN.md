@@ -22,9 +22,16 @@ em RAM pelos caminhos que o loader real usa, com inspeção completa.
         entry 0xa00000 com transfers legítimos (0xb17004->0xb1a89e->Thumb loops).
       - APPS: insn#0 pc=0x10000000 — entry NÃO coberto por PT_LOAD (re-confirma 2p):
         o loader real reloca APPS; isolado não executa. Boundary L4e/REX confirmado.
-- [ ] **M4. syscall L4e via KIP**: localizar os links da KIP no firmware e
-      relacionar os bl-targets (corrigindo a ABI, que é bl->KIP, não svc#imm).
-- [ ] **M5. Boot de chain**: juntar todo o provado — DMOV->NAND->partição->RAM
-      ->entry->syscalls — num caminho contínuo inspecionável no harness.
+- [x] **M4. syscall L4e via svc#imm (reconciliação)**: probe_kip.py + disasm do AMSS
+      bloco 0xf002480c mostram o thunk real: `mov ip,sp; mvn sp,#~mask; svc #imm`,
+      EX: `mvn sp,#0xfb; svc #4` (thread_switch), svc#0=ipc, #0x10=schedule,
+      #0x1c/#0x20 (cache)... => o IMEDIATO do svc É o número da syscall, e o
+      SP-magic (~N) é uma máscara/selector distinta (0xff/0xfb/0xef/e3/df).
+      RECONCILIA a auditoria 2o: o refman L4e (bl->KIP) é GENÉRICO; o firmware
+      Qualcomm usa svc#imm. A correspondência svc#0x14->MAP_CONTROL (2f) estava
+      certa no princípio (imm=seletor); o erro 2o era só no valor do SP-magic.
+      Atualizar skill: ABI = svc#imm com imm 0/4/8/c/10/14/18-28 = syscall.
+- [ ] **M5. Boot de chain**: juntar DMOV->NAND->partição->RAM->entry->syscalls
+      num caminho contínuo inspecionável no harness.
 
 ## Ordem: M1 -> M2 -> M3 (cada um verificado com dados reais), M4/M5 conforme.
