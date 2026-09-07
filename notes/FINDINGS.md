@@ -843,6 +843,19 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3a — Identification of QDSP Voice Processor Subsystem (`0x16ea9cb0`)
+Analysis of procedure error strings and QDSP service hooks connected to the ONCRPC dispatcher:
+1. Memory dump of string literal at `0x16ea9cb0`:
+   - Value: `"= QDSP_VOICEPROCTASK_UPVOCPROCQUEUE_MAX_CMD_SIZE failed"`.
+2. Architecture & Subsystem Identification:
+   - Identifies the subsystem as **Qualcomm QDSP (Digital Signal Processor) Voice Processing Task** (`QDSP_VOICEPROCTASK`).
+   - The specific queue monitored by this assertion is the Upstream Voice Processor Command Queue (`UPVOCPROCQUEUE`).
+   - Maximum command buffer size constraint verified by the assertion matches the 1280-byte (`0x500`) budget identified in SESSION 2zz (`0x16e8cbd0`).
+3. Communication Architecture on MSM7201A:
+   - The ARM11 (Apps / BREW) communicates audio and voice parameters to the ARM9 (Modem / AMSS) via ONCRPC.
+   - The ARM9 then dispatches these commands directly to the QDSP5 hardware engine via shared QDSP command queues.
+   - Proves that the packet consumer pipeline (`0x16e8cba0..0x16e8cbe0`) routes directly into DSP task management.
+
 ## SESSION 2zz — Reconstructing RPC Packet Dispatch Callback Pipeline (`0x16e8cba0..0x16e8cbe0`)
 Detailed decode of the inner dispatch engine in the ONCRPC dequeue consumer:
 1. Instruction sequence:
