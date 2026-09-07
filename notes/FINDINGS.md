@@ -843,6 +843,23 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2tt — Reconstructing ONCRPC Port Triple Query Helpers (`0x16ef0a82`, `0x16ef0a9c`, `0x16ef0aa2`)
+Reverse engineering of the three status query functions called before packet handling:
+1. `0x16ef0ae8`: `bl 0x16ef0a9c`
+   - Accesses control block `0x1755d1dc` (literal `0x16ef0e10`).
+   - Checks byte at `+0x01` (`ldrb r0, [r0, #1]`).
+   - Returns 0 if channel is free/unlocked.
+2. `0x16ef0af0`: `bl 0x16ef0a82`
+   - Accesses control block `0x1755d1dc`.
+   - Checks status byte at `+0x03` (`ldrb r0, [r0, #3]`).
+   - Returns port connection state (`3 = active/ready`).
+3. `0x16ef0af4`: `bl 0x16ef0aa2`
+   - Accesses control block `0x1755d1dc`.
+   - Reads byte at `+0x02` (`ldrb r0, [r0, #2]`).
+   - Returns 0 if no pending hardware error/abort condition is flagged.
+4. Combined validation in `0x16ef0ae8..0x16ef0b06`:
+   - All three helpers read consecutive offset bytes from `0x1755d1dc` (`+1`, `+3`, `+2`), confirming that `0x1755d1dc` is the unified channel state record for the ONCRPC modem router.
+
 ## SESSION 2ss — Reconstructing Hardware Mode Stack Table at `0x1755d264`
 Detailed reverse engineering of the stack registry iterated at `0x16ef0b42`:
 1. `0x16ef0b42` iterates an array of 16-byte stack descriptors located at `0x1755d264`.
