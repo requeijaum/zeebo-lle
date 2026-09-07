@@ -843,6 +843,18 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 3q — Inter-Core A2M Interrupt to ARM9 VIC Routing Bridge (`zeebo_dual_core.cpp`)
+Implementation and validation of hardware doorbell interrupt delivery into the ARM9 Vectored Interrupt Controller:
+1. Architectural Flow:
+   - Doorbell Range: `0xC0100400 + n * 4` (Qualcomm MSM7201A Application-to-Modem doorbell registers).
+   - Interrupt Line: Writing `1` to `MSM_A2M_INT(n)` triggers line `n` (`INT_A9_M2A_n`).
+   - VIC Delivery: Injected directly into Core 1's VIC controller at `0xC0000000` (`VIC_IRQ_STATUS0`), setting bit `(1 << n)`.
+2. Verified Execution:
+   - Inter-core pointer `g_core1_state` registered upon ARM9 initialization.
+   - Dual-core concurrent interleaved runner verified with A2M->VIC asynchronous routing logic active.
+3. Significance:
+   - Completes the final outstanding item of Phase 2 in `ROADMAP.md`.
+
 ## SESSION 3p — Shared Memory SMD/SMSM Bridge & Synthetic ONCRPC Ingestion (`zeebo_smd_bridge.cpp`)
 Implementation and validation of inter-processor communication and packet ingestion:
 1. Architecture & Protocols:

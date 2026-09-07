@@ -108,11 +108,22 @@ static void core0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud)
 }
 
 // Hook for Core 0 (L4e microkernel MMIO)
+static CoreState* g_core1_state = nullptr;
+
 static void core0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
     // Inter-core doorbell: Core 0 writes to MSM_A2M_INT(n) at 0xC0100400 + n*4
     if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440 && type == UC_MEM_WRITE) {
         u32 int_num = (addr - (MSM_CSR_BASE + 0x400)) / 4;
         printf("[Doorbell A2M] Core 0 fired interrupt #%u (val=0x%llx) to Core 1!\n", int_num, (unsigned long long)value);
+        
+        // Connect to ARM9 VIC: Assert INT_A9_M2A_n on Core 1 VIC status register
+        if (g_core1_state && g_core1_state->uc) {
+            u32 vic_status0 = 0;
+            uc_mem_read(g_core1_state->uc, 0xc0000000, &vic_status0, 4); // VIC_IRQ_STATUS0
+            vic_status0 |= (1 << int_num);
+            uc_mem_write(g_core1_state->uc, 0xc0000000, &vic_status0, 4);
+            printf("[VIC Routing] Core 1 VIC_IRQ_STATUS0 updated to 0x%08x\n", vic_status0);
+        }
     }
 }
 
@@ -172,6 +183,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     uc_ctl_set_cpu_model(core1.uc, UC_CPU_ARM_926);
+    g_core1_state = &core1;
 
     // Shared regions
     uc_mem_map(core0.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
