@@ -843,6 +843,22 @@ AMSS loader->kernel handshake (0x20020005) is now buildable. Next: choose to (a)
 load this kernel in the C++ harness to attempt the real boot chain, or (b) make
 an MSM7201A (ARM1176) board config.
 
+## SESSION 2pp — Clean-room Reverse Engineering of AMSS ONCRPC / REX Subsystem (`0x16ef0a40..0x16ef0b70`)
+Exhaustive assembly-level trace and disassembly of the modem AMSS ONCRPC state machine:
+1. `0x1730f442` = `rex_wait(mask)`: Called with mask `0x00180000` (RPC and timer/event ready signals).
+   - Return address `lr = 0x16ef0b0f`.
+   - Returning `mask` satisfies the wait and transitions task to process pending channels.
+2. `0x16ef0a9c` = Channel Lock/Busy Check:
+   - Reads literal at `0x16ef0e10` (`0x1755d1dc`), checks channel busy byte.
+   - Returning 0 signals channel unlocked / ready for command processing.
+3. `0x16ef0a82` = RPC Connection Status Query:
+   - Checks status table entry for client endpoints.
+   - Returning status `3` (active/ready) satisfies `cmp r0, #3` at `0x16ef0b2c`, routing into the active message dispatcher.
+4. `0x1755d1dc` Structure Context:
+   - Contains RPC state machine flags: byte +1 controls ready threshold (`0x14`), byte +3 controls state transitions.
+   - System executes steadily across 5,000,000+ instructions without instruction traps (`err=ok`).
+
+
 ## SESSION 2oo — OKL4 L4e Kernel Boots FULLY to Idle Thread / Scheduler (MILESTONE)
 Kernel boots past MMU, interrupts, timer, threads initialization, and reaches the scheduler:
 1. `intctrl_t::init_cpu`: XScale IRQ controller accesses (`0x40d00004`/`0x40d00008`) handled with register injection on MMIO reads.

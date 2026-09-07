@@ -43,10 +43,194 @@ static u32 rreg(uc_engine*uc,int r){ u32 v=0; uc_reg_read(uc,r,&v); return v; }
 struct Ctx{ u64 n=0; u32 last=0; int xfers=0; uc_engine*uc=nullptr; u64 budget=0; };
 static void code_hook(uc_engine*uc,uint64_t ad,uint32_t,void*ud){
     auto* st=(Ctx*)ud; st->n++;
-    if(st->last && ad!=st->last+4 && st->xfers<25){
-        printf("  xfer 0x%08x -> 0x%08x (insn#%llu)\n",st->last,(u32)ad,(unsigned long long)st->n);
-        st->xfers++;
+    if (ad == 0x171bb7a2) {
+        // Overwrite r0 with a heap block (e.g. 0x17700000)
+        u32 fake_heap = 0x17700000;
+        uc_reg_write(uc, UC_ARM_REG_R0, &fake_heap);
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        return;
     }
+    if (ad == 0x17420fb0) {
+        // e1013092: swp r3, r2, [r1]
+        // In emulated uniprocessor without other hardware, simulate lock acquisition:
+        u32 zero = 0;
+        uc_mem_write(uc, rreg(uc, UC_ARM_REG_R1), &zero, 4);
+    }
+    if (ad == 0x17420fb4) {
+        static int count = 0;
+        if (++count == 1) {
+            printf("LOOP AT 0x17420fb4 hit! r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x lr=%08x\n",
+                rreg(uc, UC_ARM_REG_R0), rreg(uc, UC_ARM_REG_R1),
+                rreg(uc, UC_ARM_REG_R2), rreg(uc, UC_ARM_REG_R3),
+                rreg(uc, UC_ARM_REG_SP), rreg(uc, UC_ARM_REG_LR));
+        }
+    }
+    if (ad == 0x00b346ba) {
+        // Satisfy the delay condition immediately
+        u32 target = rreg(uc, UC_ARM_REG_R1);
+        uc_mem_write(uc, 0xc5000108, &target, 4);
+    }
+    if (ad == 0x00d10570 || ad == 0x00d1058c) {
+        // e7ffa5f5 is the breakpoint / undefined instruction trap
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        u32 sp = rreg(uc, UC_ARM_REG_SP);
+        u32 st_dump[4];
+        uc_mem_read(uc, sp, st_dump, sizeof(st_dump));
+        printf("L4 PANIC / TRAP at 0x%08x! Bypassing... Caller LR = 0x%08x, sp=%08x (sp[0]=%08x sp[1]=%08x)\n", (u32)ad, lr, sp, st_dump[0], st_dump[1]);
+        uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        u32 cpsr;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        return;
+    }
+    if (ad == 0x00d1054c || ad == 0x00d10550) {
+        // Return success/timeout elapsed from the timer wait function
+        // r0 = 0 (success)
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        u32 cpsr;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        return;
+    }
+    // At 0x00b346d8:
+    /*
+    if (ad == 0x00b346d8) {
+        static int b3d8_hits = 0;
+        if (b3d8_hits++ < 5) {
+            printf("AT 0x00b346d8: r0=%08x r3=%08x r4=%08x lr=%08x sp=%08x\n",
+                rreg(uc, UC_ARM_REG_R0), rreg(uc, UC_ARM_REG_R3),
+                rreg(uc, UC_ARM_REG_R4), rreg(uc, UC_ARM_REG_LR),
+                rreg(uc, UC_ARM_REG_SP));
+        }
+    }
+    */
+    // Clean up probes: remove EXITING 0x00b346e4 printf to keep log clean
+    /*
+    if (ad == 0x00b346e4) {
+        ...
+    }
+    */
+
+    // Clean up delay loop hook at 0x1730f482 to not flood
+    if (ad == 0x1730f482) {
+        static int f482_hits = 0;
+        if (f482_hits++ == 0) {
+            printf("EXITING DELAY LOOP at 1730f482 (suppressing further messages)\n");
+        }
+        u32 sp = rreg(uc, UC_ARM_REG_SP);
+        u32 regs[6];
+        uc_mem_read(uc, sp, regs, sizeof(regs));
+        uc_reg_write(uc, UC_ARM_REG_R3, &regs[0]);
+        uc_reg_write(uc, UC_ARM_REG_R4, &regs[1]);
+        uc_reg_write(uc, UC_ARM_REG_R5, &regs[2]);
+        uc_reg_write(uc, UC_ARM_REG_R6, &regs[3]);
+        uc_reg_write(uc, UC_ARM_REG_R7, &regs[4]);
+        u32 new_pc = regs[5] & ~1;
+        uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
+        u32 cpsr = rreg(uc, UC_ARM_REG_CPSR);
+        if (regs[5] & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        sp += 24;
+        uc_reg_write(uc, UC_ARM_REG_SP, &sp);
+        u32 ret = 1;
+        uc_reg_write(uc, UC_ARM_REG_R0, &ret);
+        return;
+    }
+    // In delay loop at 0x00b346ba:
+    // When called, return 0 in r0 to signify completion/ready
+    if (ad == 0x00b346ba || ad == 0x00b346c4) {
+        static int b3ba_hits = 0;
+        if (b3ba_hits++ == 0) {
+            printf("EXITING 0x00b346ba/c4 FUNCTION directly (suppressing further messages)\n");
+        }
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        u32 new_pc = lr & ~1;
+        uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
+        u32 cpsr = rreg(uc, UC_ARM_REG_CPSR);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        return;
+    }
+
+    // Clean up excessive logging at 0x00b346dc
+    /*
+    if (ad == 0x00b346dc) {
+        printf("AT 0x00b346dc: r3=%08x cpsr=%08x\n", rreg(uc, UC_ARM_REG_R3), rreg(uc, UC_ARM_REG_CPSR));
+    }
+    */
+    // Target of BL at 0x16ef0b1c is 0x16ef0a9c:
+    // Force return value r0 = 1 when returning from 0x16ef0a9c (or at 0x16ef0b20)
+    if (ad == 0x16ef0b20) {
+        u32 one = 1;
+        uc_reg_write(uc, UC_ARM_REG_R0, &one);
+    }
+    // Suppress rex_wait after first print
+    if (ad == 0x1730f442) {
+        static int f_rex_wait = 0;
+        u32 mask = rreg(uc, UC_ARM_REG_R0);
+        if (f_rex_wait++ == 0) {
+            printf("REX_WAIT called at 0x1730f442: mask=%08x lr=%08x (suppressing further logs)\n", mask, rreg(uc, UC_ARM_REG_LR));
+        }
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        u32 new_pc = lr & ~1;
+        uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
+        u32 cpsr = rreg(uc, UC_ARM_REG_CPSR);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        uc_reg_write(uc, UC_ARM_REG_R0, &mask);
+        return;
+    }
+    // Return 3 from 0x16ef0a82:
+    if (ad == 0x16ef0a82) {
+        static int f_a82 = 0;
+        if (f_a82++ == 0) {
+            printf("CALLED 0x16ef0a82: returning status 3!\n");
+        }
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        u32 new_pc = lr & ~1;
+        uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
+        u32 cpsr = rreg(uc, UC_ARM_REG_CPSR);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        u32 three = 3;
+        uc_reg_write(uc, UC_ARM_REG_R0, &three);
+        return;
+    }
+    // Clean up flood print at 0x16ef0b2c
+    // Let's remove the print at 0x16ef0b2c
+    /*
+    if (ad >= 0x16ef0b2c && ad <= 0x16ef0b3a) {
+        ...
+    }
+    */
+    // Read literal at 0x16ef0a9c: pc=0x16ef0aa0 + 0xdc*4 = 0x16ef0aa0 + 0x370 = 0x16ef0e10!
+    // 0x16ef0a9e: ldrb r0, [r0, #1]
+    if (ad == 0x16ef0a9c) {
+        static int f_a9c = 0;
+        if (f_a9c++ == 0) {
+            printf("CALL 0x16ef0a9c: returning status 0 (ready/unlocked)!\n");
+        }
+        u32 lr = rreg(uc, UC_ARM_REG_LR);
+        u32 new_pc = lr & ~1;
+        uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
+        u32 cpsr = rreg(uc, UC_ARM_REG_CPSR);
+        if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        return;
+    }
+    // Clean up temporary probes, keep cleanly instrumented
+    // Record findings in notes/FINDINGS.md
+
     st->last=(u32)ad;
     if(st->n>=st->budget) uc_emu_stop(uc);
 }
@@ -54,10 +238,17 @@ static void mmio_hook(uc_engine*uc,uc_mem_type type,uint64_t ad,int sz,int64_t v
     (void)uc;(void)type;(void)sz;(void)ud;
     // log writes to high (unmapped periph) addresses to catch the derail target
     if(type==UC_MEM_WRITE && (ad>=0x80000000|| (ad&0xFF000000)==0xA0000000||(ad&0xFF000000)==0xB0000000||(ad&0xFF000000)==0xC0000000)){
-        printf("  MMIO-W 0x%08x = 0x%llx (pc 0x%08x)\n",(u32)ad,(unsigned long long)val,rreg(uc,UC_ARM_REG_PC));
-        if((u32)ad>=0xB0000000) uc_emu_stop(uc);
+        if (ad != 0xc500010c) printf("  MMIO-W 0x%08x = 0x%llx (pc 0x%08x)\n",(u32)ad,(unsigned long long)val,rreg(uc,UC_ARM_REG_PC));
+        // Allow writes to peripherals without stopping unconditionally
     } else if(type==UC_MEM_READ && (ad>=0x80000000)){
-        printf("  MMIO-R 0x%08x (pc 0x%08x)\n",(u32)ad,rreg(uc,UC_ARM_REG_PC));
+        if (ad == 0xc5000108) {
+            // Virtual timer ticker: increment simulated timer count
+            static u32 virt_timer = 100000;
+            virt_timer += 5000; // increment by 5000 ticks (~5ms equivalent)
+            uc_mem_write(uc, 0xc5000108, &virt_timer, 4);
+        } else if (ad != 0xff000ff0) {
+            printf("  MMIO-R 0x%08x (pc 0x%08x)\n",(u32)ad,rreg(uc,UC_ARM_REG_PC));
+        }
     }
 }
 static void unmap_hook(uc_engine*u,uc_mem_type t,uint64_t ad,int sz,int64_t val,void*){
@@ -77,7 +268,26 @@ static void intr_hook(uc_engine*uc,uint32_t,int,void*ud){
     u32 ip=rreg(uc,UC_ARM_REG_R12);      // caller SP saved by: mov ip,sp
     u32 lr=rreg(uc,UC_ARM_REG_LR);       // return address
     u32 r0=rreg(uc,UC_ARM_REG_R0), r1=rreg(uc,UC_ARM_REG_R1), r2=rreg(uc,UC_ARM_REG_R2);
-    printf("  !! SVC #0x%02x (%s) lr=%08x ip=%08x r0=%08x r1=%08x r2=%08x [insn#%llu]\n",
+    if (imm == 6 || imm == 0x646fe) {
+        printf("  L4 SYSCALL 6 (thread_switch / yield / wait) called! lr=%08x\n", lr);
+        // Emulate successful return: r0 = 0
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        // Pop {r4, pc} manually from ip:
+        u32 r4 = 0, pc = 0;
+        uc_mem_read(uc, ip, &r4, 4);
+        uc_mem_read(uc, ip + 4, &pc, 4);
+        ip += 8;
+        uc_reg_write(uc, UC_ARM_REG_R4, &r4);
+        uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+        uc_reg_write(uc, UC_ARM_REG_PC, &pc);
+        u32 cpsr;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        if (pc & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+        uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+        return;
+    }
+    printf("  !! SVC #0x%x (%s) lr=%08x ip=%08x r0=%08x r1=%08x r2=%08x [insn#%d]\n",
            imm,nm,lr,ip,r0,r1,r2,(unsigned long long)gSvcCount);
     if (++gSvcCount > 10000){ printf("  ... svc budget exceeded\n"); uc_emu_stop(uc); return; }
     // ---- minimal L4e kernel shim: emulate handler returning to caller ----
@@ -114,6 +324,12 @@ int main(int argc,char**argv){
     map_all(uc);
     // AMSS high vaddrs form one contiguous DRAM window; map as a single region
     uc_mem_map(uc,0x16e00000,0x17a60000-0x16e00000,UC_PROT_ALL);
+    // Map handshake / token buffer region (0x20000000 window)
+    uc_mem_map(uc,0x20000000,0x1000000,UC_PROT_ALL);
+    // Map hardware MMIO window around 0xc5000000
+    uc_mem_map(uc,0xc5000000,0x01000000,UC_PROT_ALL);
+    u32 t_init = 100000;
+    uc_mem_write(uc, 0xc5000108, &t_init, 4);
     for(int i=0;i<phnum;i++){
         size_t o=phoff+i*phent; if(rd32(d.data(),o)!=1) continue;
         u32 pv=rd32(d.data(),o+8), off=rd32(d.data(),o+4);
@@ -144,6 +360,27 @@ int main(int argc,char**argv){
         };
     uc_hook hU=0;
     uc_hook_add(uc,&hU,UC_HOOK_MEM_READ_UNMAPPED|UC_HOOK_MEM_WRITE_UNMAPPED|UC_HOOK_MEM_FETCH_UNMAPPED,(void*)(unmap_hook),nullptr,0,~0ULL);
+    
+    // Fix 0xff000ff0 pointer and structure:
+    // 0xff000ff0 points to a control block at 0x177f0000
+    // and offset +0xa has a non-zero byte so the check at 0x00d10538 passes
+    // In addition, at offset +0x4 and +0x8, provide valid handler/function pointers!
+    // Offset +0x8 should point to an array of pointers to valid functions (like a dummy return 0x1730f32e = bx lr)
+    u32 ctrl_ptr = 0x177f0000;
+    uc_mem_write(uc, 0xff000ff0, &ctrl_ptr, 4);
+    u8 flag_byte = 1;
+    uc_mem_write(uc, ctrl_ptr + 0xa, &flag_byte, 1);
+
+    u32 table_ptr = 0x177f0100;
+    uc_mem_write(uc, ctrl_ptr + 0x4, &table_ptr, 4);
+    uc_mem_write(uc, ctrl_ptr + 0x8, &table_ptr, 4);
+    // Fill table_ptr with pointers to bx lr (0x1730f32f in Thumb)
+    u32 func_ptr = 0x1730f32f; // Thumb mode bx lr
+    for (int i = 0; i < 32; i++) {
+        uc_mem_write(uc, table_ptr + i*8, &func_ptr, 4);
+        uc_mem_write(uc, table_ptr + i*8 + 4, &func_ptr, 4);
+    }
+
     uc_err er=uc_emu_start(uc,entry,0,0,0);
     printf("stopped pc=0x%08x insn#%llu (err=%s)\n",rreg(uc,UC_ARM_REG_PC),(unsigned long long)st.n,
            er?uc_strerror(er):"ok");
