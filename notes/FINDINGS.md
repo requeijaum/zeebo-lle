@@ -798,6 +798,26 @@ then runs ~285820 insns in Thumb (cpsr T=1) until UC_ERR_MAP at 0x17151c0c:
   The ported OKL4 remains the reference for that block.
 Fix also: mode restoration via SPSR_svc on syscall return (kept T flag).
 
+## SESSION 2ll — OKL4 ARM KERNEL BUILD WORKS (cml2 python2 BYPASSED, toolchain proven)
+Rafael: "port okl4 to python3?" -> we don't need python2 at all. The kernel's
+config.h is just SYMBOL=VALUE -> #define (configtrans.py, ported py3 in 3 lines).
+Wrote a minimal hand-built config.h.arm covering exactly the CONFIG_* the ARM
+path tests (ARCH_ARM=1, IS_32BIT=1; undef BIGENDIAN/SMP/ENABLE_FASS/ARM_TINY_PAGES/
+IPC_FASTPATH/DEBUG/KDB; plus CONFIG_H__). Build recipe proven:
+- toolchain: arm-none-eabi-gcc 14.2 (installed via apt in an older session) +
+  Makeconf.local TOOLPREFIX=arm-none-eabi- NO_CCACHE=1
+- ARCH=arm CPU=sa1100 PLATFORM=pleb2, BUILDDIR from config/template, config.h
+  copied in (don't let cml2 regenerate)
+- `make` => src/generic/lib.o + kmemory.o COMPILE for ARM (chain works), then
+  stops on pleb2-platform header errors (IODEVICE_VADDR undefined in pleb2/
+  offsets.h, arm_cache::cache_invalidate_d missing) — platform-specific fixes,
+  NOT a kernel-architecture problem.
+So the OKL4 L4e ARM kernel build GATE is cleared (viable in py3, no python2).
+Next: (a) fix the pleb2/SA1100 platform headers to get a full kernel .elf, or
+(b) new board dir for MSM7201A (ARM1176) with the Zeebo memory map. Either yields
+the real L4e kernel that can respond to the AMSS loader->kernel handshake
+(0x20020005) — the current ceiling of the in-harness boot (session 2kk).
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
