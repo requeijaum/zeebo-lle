@@ -68,11 +68,12 @@ class NandController:
     spare_path : 1.1.2_spare.bin  (2112B/page incl. spare) — optional, preferred
     """
     def __init__(self, data_path, spare_path=None, nand_id=0x5580b1ad):
+        self._data_blob = open(data_path, "rb").read()
         if spare_path:
             self._blob = open(spare_path, "rb").read()
             self._stride = PAGE_FULL
         else:
-            self._blob = open(data_path, "rb").read()
+            self._blob = self._data_blob
             self._stride = PAGE_DATA
         self.nand_id = nand_id
         self.reg = {}          # sticky register file
@@ -89,8 +90,11 @@ class NandController:
             self.reg[R_DEV0_CFG1] = 0x0004745e
 
     def _page_bytes(self, page):
-        off = page * self._stride
-        return self._blob[off:off + self._stride]
+        # Page DATA comes from the DATA image (2048B/page, contiguous), NOT the
+        # spare image: 1.1.2_spare.bin is 528-byte chunks (512 data + 16 spare)
+        # interleaved, so contiguous-2112 reads corrupt everything past byte 511.
+        off = page * PAGE_DATA
+        return self._data_blob[off:off + PAGE_DATA]
 
     # -- MMIO interface --
     def read(self, off, size=4):

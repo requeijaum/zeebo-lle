@@ -56,6 +56,13 @@ class DMOVModel:
         self.exec_count = 0
         self.last_chan = None
         self.log = []
+        self.buf_cursor = 0
+
+    def get_buffer_cursor(self):
+        return self.buf_cursor
+
+    def advance_buffer_cursor(self, nbytes):
+        self.buf_cursor = (self.buf_cursor + nbytes) % 2048
 
     # ---- helpers ----
     def _read_ram(self, addr, size):
@@ -125,13 +132,16 @@ class DMOVModel:
         dst_nand = self._is_nand_reg(dst)
         if src_nand:
             off = self._nand_off(src)
-            # special: FLASH_BUFFER reads return page data; others scalar regs
+            # FLASH_BUFFER is a drain-cursor window: every DMA of `len` bytes
+            # reads the NEXT `len` bytes of the page (kernel msm_nand + zloader
+            # use a CONSTANT src=FLASH_BUFFER with advancing dst). Track cursor.
             if src == NAND_FLASH_BUFFER:
-                # read 512 bytes from the page buffer into RAM dst
+                cur = self.get_buffer_cursor()
                 for i in range(0, min(ln, 2048), 4):
-                    v = self.nand.read(self._nand_off(src) + i, 4)
+                    v = self.nand.read(self._nand_off(src) + cur + i, 4)
                     try: uc.mem_write(dst + i, struct.pack("<I", v & 0xFFFFFFFF))
                     except Exception: pass
+                self.advance_buffer_cursor(min(ln, 2048) - (cur % 4) if False else min(ln,2048))
             else:
                 v = self.nand.read(off, min(ln, 4))
                 try: uc.mem_write(dst & 0xFFFFFFFF, struct.pack("<I", v & 0xFFFFFFFF))
@@ -157,6 +167,9 @@ class DMOVModel:
                     except Exception:
                         break
             else:
+                # EXEC_CMD write kicks a new page read => reset the drain cursor.
+                if dst == NAND_BASE + 0x10:
+                    self.buf_cursor = 0
                 try:
                     v = struct.unpack("<I", bytes(uc.mem_read(src & 0xFFFFFFFF, min(ln, 4))))[0]
                     self.nand.write(off, v, min(ln, 4))

@@ -585,6 +585,28 @@ Hynx 256MB, 0xd580b12c Micr 128MB) confirmam a geometria 2048/64pp/64oob. Conclu
 sem erro de ID. O valor é Samsung 1Gbit/128MB 2KB-page — casa com 1.1.2.bin
 (65536 pag*2048=128MB).
 
+## SESSION 2z — MINI-BOOT COMPLETE: partitions AMSS+APPS read via DMA, byte-identical
+tools/mini_boot_read_partition.py: reads a full NAND partition through the REAL
+DMA->NAND path (DMOVModel + NandController), landing it in RAM, then verifies
+against the raw dump. RESULT — both partitions byte-identical to 1.1.2.bin:
+  AMSS: 21626880 B (block 0x12, 165 blocks) first16 7f454c46 (ELF) PASS
+  APPS: 22151168 B (block 0xe6, 169 blocks) first16 7f454c46 (ELF) PASS
+This is the "missing link" (session 2j) made concrete: the chain reads the OS
+image off NAND and places it in RAM — now verified end-to-end with REAL firmware
+content, via the exact descriptor sequence (page<<16/(page>>16)&0xff, DMOV_CMD_
+PTR, EXEC, FLASH_BUFFER drain).
+TWO FIXES the audit caught (valuable — would have bitten us later):
+  1. NandController read page DATA from the DATA image, NOT the SPARE file:
+     1.1.2_spare.bin is 528-byte chunks (512 data + 16 spare, per zeemu kSpare
+     Stride=0x210), so contiguous-2112 reads corrupt everything past byte 511.
+     The old self-test only checked first-16-bytes so it passed hiding this.
+  2. FLASH_BUFFER is a DRAIN-CURSOR window: kernel msm_nand + zloader use a
+     CONSTANT src=MSM_NAND_FLASH_BUFFER with advancing DST (data_dma_addr_curr
+     += sectordatasize). Hardware reads the NEXT `len` bytes each DMA; we track a
+     cursor reset on EXEC. Without it, all 4x512 sectors returned sector 0.
+VERIFIED against the kernel driver refs/msm_nand-kernel-driver.c. This closes the
+FS<-NAND<-DMA path completely with real content.
+
 ## Next milestone (bigger piece of work)
 1. Model the NAND controller at 0xa0a00000 (+ MPU 0xa0b00000): page 2048B,
    64 pages/block, spare 64B, ID 0x5580b1ad (all in KB). Feed it from 1.1.2.bin.
