@@ -48,3 +48,11 @@ gl_quickwins_smoke: gl_quickwins_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rast
 
 test-quickwins: gl_quickwins_smoke
 	./gl_quickwins_smoke
+
+# QW10 near-plane homogeneous clipping + QW11 perspective-correct interpolation.
+# Feeds the rasterizer CLIP-SPACE (x,y,z,w) vertices directly — strict pixel TDD.
+gl_clip_smoke: gl_clip_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h
+	$(CXX) $(CXXFLAGS) gl_clip_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gl_clip_smoke
+
+test-clip: gl_clip_smoke
+	./gl_clip_smoke

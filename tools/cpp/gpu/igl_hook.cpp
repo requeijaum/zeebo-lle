@@ -28,7 +28,10 @@ void IglHook::read_matrix(GuestMachine& gm, u32 va, Mat4& out){
     for(int i=0;i<16;i++) out.m[i] = gm.read_component(va + i*4, glenum::FIXED);
 }
 
-// obj (x,y,z,1) -> clip = mvp*v -> NDC = clip/w. Z preservado p/ depth (não usado ainda).
+// obj (x,y,z,1) -> clip = mvp*v. The rasterizer NOW owns the perspective divide
+// (QW10 near-plane clipping z+w>=0 happens BEFORE the divide; QW11 does reciprocal-w
+// interpolation). So we hand it CLIP-SPACE (x,y,z,w). Identity/ortho projections give
+// cw=1, so clip==NDC and the divide is a no-op — existing NDC-era behavior preserved.
 void IglHook::transform_vertex(const Mat4& mvp, Vertex& v){
     const f32* m = mvp.m; // col-major
     f32 x=v.x,y=v.y,z=v.z,w=1;
@@ -36,8 +39,7 @@ void IglHook::transform_vertex(const Mat4& mvp, Vertex& v){
     f32 cy = m[1]*x+m[5]*y+m[9]*z+m[13]*w;
     f32 cz = m[2]*x+m[6]*y+m[10]*z+m[14]*w;
     f32 cw = m[3]*x+m[7]*y+m[11]*z+m[15]*w;
-    if (cw != 0){ v.x=cx/cw; v.y=cy/cw; v.z=cz/cw; }
-    else { v.x=0; v.y=0; v.z=0; } // w=0: ponte no infinito; fora da view
+    v.x=cx; v.y=cy; v.z=cz; v.w=cw;   // clip-space; divide deferred to rasterizer
 }
 
 std::vector<Vertex> IglHook::assemble(GuestMachine& gm, int first, int count){
