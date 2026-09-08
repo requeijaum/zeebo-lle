@@ -34,6 +34,7 @@
 #define ZEEBO_L4_MMU_WITH_UNICORN 1
 #include "zeebo_l4_mmu.h"
 #include "zeebo_control_server.h"
+#include "zeebo_probe_registry.h"
 #include "qdsp5/qdsp5_capture_hook.h"
 #include "qdsp5/qdsp5_dispatcher.h"
 #include "zeebo_audio_sink.h"
@@ -365,7 +366,63 @@ public:
 
     bool init_control(int port) {
         control_ = std::make_unique<zeebo_lle::ControlServer>();
+        register_probes();
         return control_->Start(port);
+    }
+
+    // QW3: register the minimal read-only diagnostic probe set. Each handler
+    // reads live subsystem state and returns a JSON fragment; none mutate the
+    // guest. Exposed to agents via the `probe.list` / `probe.get` commands.
+    void register_probes() {
+        probes_.Register("mmu", "APPS L4 MMU / min page-size state", [this] {
+            u32 min_page = 0;
+            uc_mem_read(core0_.uc, 0xb0041284, &min_page, 4); // l4e_min_pagesize result
+            u32 page_info = 0;
+            uc_mem_read(core0_.uc, KIP_BASE + 0xc8, &page_info, 4);
+            char b[160];
+            snprintf(b, sizeof(b),
+                     "{\"kip_base\":%u,\"page_info\":%u,\"min_page_log2\":%u}",
+                     (unsigned)KIP_BASE, page_info, min_page);
+            return std::string(b);
+        });
+        probes_.Register("bootinfo", "Iguana OKL4 BootInfo header @0xb0d00000", [this] {
+            u32 magic = 0, w1 = 0;
+            uc_mem_read(core0_.uc, 0xb0d00000, &magic, 4);
+            uc_mem_read(core0_.uc, 0xb0d00004, &w1, 4);
+            char b[128];
+            snprintf(b, sizeof(b), "{\"base\":%u,\"word0\":%u,\"word1\":%u}",
+                     (unsigned)0xb0d00000u, magic, w1);
+            return std::string(b);
+        });
+        probes_.Register("irq", "MSM VIC pending interrupt status", [this] {
+            u32 vic0 = 0, vic1 = 0;
+            uc_mem_read(core0_.uc, MSM_VIC_BASE, &vic0, 4);
+            uc_mem_read(core1_.uc, MSM_VIC_BASE, &vic1, 4);
+            char b[128];
+            snprintf(b, sizeof(b), "{\"vic_status_c0\":%u,\"vic_status_c1\":%u}", vic0, vic1);
+            return std::string(b);
+        });
+        probes_.Register("gpu", "Adreno 130 draw counters / framebuffer dirty", [this] {
+            unsigned draws = gpu_ ? gpu_->draws() : 0u;
+            bool dirty = gpu_ ? gpu_->is_fb_dirty() : false;
+            char b[96];
+            snprintf(b, sizeof(b), "{\"draws\":%u,\"fb_dirty\":%s}",
+                     draws, dirty ? "true" : "false");
+            return std::string(b);
+        });
+        probes_.Register("mmio.unknown", "Recent unknown-MMIO accesses (structured)", [this] {
+            std::string js = mmio_unknown_.LatestJson();
+            char pre[64];
+            snprintf(pre, sizeof(pre), "{\"seen\":%llu,\"events\":",
+                     (unsigned long long)mmio_unknown_.CountSeen());
+            // Reuse the log's event array, wrap with total-seen counter.
+            const std::string marker = "\"events\":";
+            size_t p = js.find(marker);
+            std::string arr = (p != std::string::npos)
+                ? js.substr(p + marker.size(), js.size() - (p + marker.size()) - 1)
+                : std::string("[]");
+            return std::string(pre) + arr + "}";
+        });
     }
 
     void set_paused(bool p) {
@@ -1198,6 +1255,18 @@ public:
     void process_control_request(std::shared_ptr<zeebo_lle::ControlRequest>& req, int cycle) {
         if (req->cmd == "ping") {
             req->reply.set_value("{\"ok\":true,\"pong\":true}");
+            return;
+        }
+        if (req->cmd == "probe.list") {
+            req->reply.set_value(probes_.ListJson());
+            return;
+        }
+        if (req->cmd == "probe.get") {
+            if (req->str_probe.empty()) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"missing_probe\"}");
+                return;
+            }
+            req->reply.set_value(probes_.GetJson(req->str_probe));
             return;
         }
         if (req->cmd == "backtrace") {
@@ -2327,7 +2396,7 @@ private:
     }
 
 
-    static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t /*value*/, void* ud) {
+    static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
@@ -2339,13 +2408,32 @@ private:
         }
         // Map dynamically to continue discovery
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+        // QW8: structured record of a genuinely unknown MMIO access on Core 0.
+        {
+            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+            const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
+            sys->mmio_unknown_.Record(zeebo_lle::MmioEvent{
+                /*core=*/0, /*pc=*/pc, /*addr=*/(unsigned long)addr,
+                /*width=*/(unsigned)size, /*is_write=*/is_wr,
+                /*has_value=*/is_wr, /*value=*/(unsigned long long)value});
+        }
         return true;
     }
 
     static bool c1_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
-        (void)type; (void)size; (void)value; (void)ud;
         // Dynamically map unmapped page for Core 1 (e.g. MMIO / MSM peripheral discovery)
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+        // QW8: structured record of a genuinely unknown MMIO access on Core 1.
+        {
+            u32 pc = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+            const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
+            sys->mmio_unknown_.Record(zeebo_lle::MmioEvent{
+                /*core=*/1, /*pc=*/pc, /*addr=*/(unsigned long)addr,
+                /*width=*/(unsigned)size, /*is_write=*/is_wr,
+                /*has_value=*/is_wr, /*value=*/(unsigned long long)value});
+        }
         return true;
     }
 
@@ -2605,6 +2693,10 @@ private:
 
     // ControlServer instance for remote interactive debugging
     std::unique_ptr<zeebo_lle::ControlServer> control_;
+    // QW3: enumerable read-only diagnostic probes (probe.list / probe.get)
+    zeebo_lle::ProbeRegistry probes_;
+    // QW8: bounded structured log of unknown-MMIO accesses (read-only diag)
+    zeebo_lle::MmioEventLog mmio_unknown_{128};
     bool paused_ = false;
     bool stepping_ = false;
     bool quit_requested_ = false;
