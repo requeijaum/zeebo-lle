@@ -154,6 +154,18 @@ test_control_server: test_control_server.cpp zeebo_control_server.h
 test_probe_registry: test_probe_registry.cpp zeebo_probe_registry.h
 	$(CXX) $(CXXFLAGS) -o $@ test_probe_registry.cpp -pthread
 
+# QW17: isolated regression for c0_intr_hook syscall pc-resume convention.
+# Default run (offset 0 == pc) is the GREEN gate; `4` reproduces the pre-fix RED.
+test_intr_pc_resume: test_intr_pc_resume.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_intr_pc_resume.cpp -lunicorn
+
+test-intr-pc-resume: test_intr_pc_resume
+	./test_intr_pc_resume
+	@# Negative mutation: buggy pc+4 convention MUST fail (skips sentinel).
+	@if ./test_intr_pc_resume 4 >/dev/null 2>&1; then \
+	  echo "FAIL: buggy pc+4 convention unexpectedly passed"; exit 1; \
+	else echo "OK: buggy pc+4 convention fails as expected (RED reproduced)"; fi
+
 test-cli: zeebo_lle_main test_cli_paths
 	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
 	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
@@ -170,7 +182,7 @@ test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
 check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
-       test_probe_registry test-txn
+       test_probe_registry test-txn test-intr-pc-resume
 	./test_audio_sink
 	./test_control_server
 	./test_probe_registry

@@ -2248,19 +2248,21 @@ private:
         uc_reg_write(uc, UC_ARM_REG_R0, &res_r0);
         u32 target_pc = 0;
         if (syscall == 0xb4) {
-            target_pc = pc + 4;
+            // UC_HOOK_INTR delivers pc already at svc+4; resume at pc (not pc+4),
+            // otherwise we double-advance to svc+8 and skip one guest instruction (QW17).
+            target_pc = pc;
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             // Invalida o TB de execução no Unicorn para que ele recompile o bloco seguinte
             uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
             uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
         } else if (syscall == 0x00) {
-            target_pc = pc + 4; // avança após svc #0x1400 (ou seja, 0xb000c834: pop {r1, r2})
+            target_pc = pc; // pc already == svc+4 (0xb000c834: pop {r1, r2}); QW17: no extra +4
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
         } else if (syscall == 0x0c) { // L4_ExchangeRegisters
-            target_pc = pc + 4;
+            target_pc = pc; // pc already == svc+4; QW17: no extra +4
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, pc, 16);
         } else {
