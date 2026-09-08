@@ -1,9 +1,12 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, investigação causal integrada)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, QW17-QW19 integrados)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão consolida as quatro frentes da investigação causal do boot: saneamento do parser de argumentos CLI (`d137813`), correção da corrupção de pilha ABI no `L4_KernelInterface` (`4224919`), suíte de fuzzing diferencial (`318bf8d`) e captura forense corrigida provando que Core 0 executa ~1.47M de instruções reais do Iguana até o stall em `0xb000d708` (`size_log2=56` / avanço nulo).
-O Passo 13 permanece aberto: o parser de BootInfo segue bytes reais e os primeiros 96MB são mapeados, mas o laço de decomposição de fpages entra em novo stall (`size_log2=56` / descritores whole-space); `bi_execute` continua não alcançado.
+Esta revisão consolida a resolução dos quick wins QW17, QW18 e QW19:
+- QW17 (`a88a9bd`): correção da convenção de PC-resume no `c0_intr_hook` (`target_pc = pc`), eliminando salto de instrução pós-syscall.
+- QW18: fechamento por análise causal da integridade de pilha/trap-id em interrupções fallback.
+- QW19 (`475ee1c`): correção da restauração de frame callee-saved (`push/pop {r4-r8, sb, sl, fp, lr/pc}`) no stub de `MapControl` (`0xb000c930`, syscall `0x14`), eliminando a corrupção de `r4` que causava o stall `size_log2=56` / `0xb000d708`.
+O Passo 13 avança agora para a validação do término dos 96 blocos de `mempool_init` no cold boot completo e o destravamento de `bootinfo_init` / `bi_execute`.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -295,10 +298,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
   - Parser host-only comprovado contra a cópia `1.1.2_APPS.bin`: BootInfo no offset `0x57000`, magic `0x1960021d`, 10 `BI_TAG_VIRT_POOLS` e 5 `BI_TAG_PHYS_POOLS`; mutações dos bytes alteram/rejeitam o parse como esperado.
-  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`) e parser posicional CLI (`d137813`): Core 0 executa ~1.47M de instruções reais do Iguana e processa 96 mapeamentos legítimos de 1 MiB (`0xb0d00000..0xb6d00000`).
-  - Novo ponto de bloqueio isolado (captura forense corrigida Path C): a rotina de decomposição entra em laço de fpages inteiras / tamanho inválido em `0xb000d708` (`size_log2 = 56`), resultando em `1 << 56 == 0` (avanço nulo em ARM32 `add r4, r4, r0`) e gerando chamadas repetidas a descritores whole-space (`0xb000d6b8`); `bi_execute` e `0xb000aa94` continuam não alcançados.
-  - QW13 (`7355364`, `a6c1967`) prova transação MapControl no Unicorn — regiões, ordem, permissões, escrita real, nil malformado e whole-space sem overflow — mas o echo idêntico dos MRs não prova writeback load-bearing.
-  - Próximo gate: determinar o motivo do fallback de decomposição pós-96MB em `mempool_init`, corrigir o avanço para atingir `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e loop `0xb000aa94`. Não forçar registradores nem usar instruction-count.
+  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`), parser posicional CLI (`d137813`), correção de PC-resume QW17 (`a88a9bd`) e correção do stub MapControl QW19 (`475ee1c`).
+  - Causa raiz do stall em `0xb000d708` (`size_log2 = 56`) resolvida: a restauração do frame de callee-saved (`push/pop`) em `0xb000c930` agora preserva `r4` (ponteiro virtual do pool). Em isolamento, o laço de 96 fpages de 1 MiB conclui com `r0=1` e `r4=0xb6d00000`.
+  - Próximo gate: validar no emulador completo a saída limpa de `mempool_init` para `bootinfo_init` (`0xb0001e80`) e `bi_execute@0xb00001fc` com `r0=0`, seguido por `extensions_init@0xb00017b8`. Proibido forçar registradores ou validar por instruction-count.
 - [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
   - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
@@ -340,6 +342,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW17 | **concluído** | Correção do PC-resume no `c0_intr_hook` (`target_pc = pc`, evitando pular 1 instrução) (`a88a9bd`) | baixo | microteste `test_intr_pc_resume.cpp` com asserção RED e GREEN integrada em `make check`; elimina avanço duplo em syscalls 0xb4/0x00/0x0c |
 | QW18 | **concluído** | Eliminação de escritas legadas em `sp+0/4/8` no handler de interrupção 0xb4 de `zeebo_lle_main.cpp:2223` | baixo | Fechado por análise causal sem alteração de código: trap 0xb000c738 intercepta antes e SP codifica trap-id em região segura de interrupção |
 | QW19 | **concluído** | Retomada no `pop` (`svc+4`) para stub de `MapControl` (syscall 0x14) em `c0_intr_hook` (`475ee1c`) | baixo | TDD reproduzindo restauração do frame de registradores (`r4-r8, sb, sl, fp`) no stub `0xb000c930` (`test_mapcontrol_frame_resume.cpp`); elimina corrupção de r4 que causava `size_log2=56` |
+| QW20 | **proposto** | Alinhamento do alvo `make clean` e remoção de artefatos de teste não rastreados | baixo | `make clean` remove todos os binários de teste (`test_intr_pc_resume`, `test_mapcontrol_frame_resume`, `test_cli_paths`, `*.o`) garantindo workspace 100% puro pós-clean |
+| QW21 | **proposto** | Teste de regressão para convenção de retorno de `L4_ExchangeRegisters` (syscall `0x0c` / `0x140c`) | baixo | microteste TDD sob Unicorn validando restauração de registradores de controle e ausência de corrupção de frame |
+| QW22 | **proposto** | Teste de limite de fpage whole-space em `zeebo_l4_mmu.h` sem overflow de 32 bits | baixo | teste unitário determinístico para `1 << size_log2` quando `size_log2 >= 32` em `L4_FpageAdd` / helpers de MMU |
 
 ### P1 — Infraestrutura após o Passo 13
 
@@ -375,8 +380,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Estratégia de execução paralela
 
-- **Concluído:** QW2–QW7, QW9, QW12 e QW14–QW16; todos integrados com TDD, mutações load-bearing e revisão independente. QW1/QW8 permanecem parciais honestos.
-- **Frente A — cadeia crítica:** QW12 concluiu a observação e QW13 fixou a cobertura transacional, mas o Passo 13 segue bloqueado até um retorno de MR distinguível no guest vivo.
+- **Concluído:** QW2–QW7, QW9, QW12, QW14–QW17, QW18 (análise) e QW19; todos integrados com TDD, mutações load-bearing e revisão independente. QW1/QW8 permanecem parciais honestos.
+- **Frente A — cadeia crítica:** QW17 e QW19 eliminaram o desvio espúrio e a destruição de registradores callee-saved (`r4`) no stub de `MapControl`. O laço de 96 fpages de 1 MiB agora completa sem corrupção; a frente avança para a observação da transição para `bootinfo_init` e `bi_execute`.
 - **Frente E — GL estrutural:** QW9 ATITC concluído; QW10/QW11 em execução no mesmo worktree, com RED discriminante antes da produção.
 - **Frente de hardening curto:** QW14/QW15/QW16 concluídos; `--strict-unmapped` permanece opt-in e QDSP5 não foi alterado.
 - **Depois do Passo 13:** Passo 14 e P1 na ordem checkpoint → tempo híbrido → JSON-RPC → GDB; só promover objetos, extensões e applets alcançados pelo boot real.
