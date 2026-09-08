@@ -1,10 +1,11 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, GL + auditoria Ymir/ares/higan)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, quick wins integrados)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão separa execução comprovada de mera carga, incorpora o hardening de `640147b`,
-o frontend/rasterizador GLES clean-room informado por fatos verificáveis do Zeebx e a auditoria
-arquitetural Ymir/ares/higan consolidada em `677679a`.
+Esta revisão registra, no lote original, seis quick wins concluídos, dois parciais honestos
+e três pendentes, além de cinco novos candidatos priorizados. O Passo 13 não foi promovido:
+o parser de BootInfo segue bytes reais, mas a sequência de 96 fpages continua sendo hipótese de
+`mempool_init` até ser observada no boot vivo.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -110,6 +111,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 ### Fase 7: Suíte de Conformidade de CPU e Validação Cruzada (Testkit Conformance)
 - [x] Construir sonda LLE de conformidade (`zeebo_lle_mod_probe`) com interface compatível ao `mod_probe` do `zeebulator`.
 - [x] Executar e validar 12 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob ARM11 Unicorn: 12/12 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `memory`, `muldiv`, `shifter`, `thumb2branch`).
+- [x] QW6 (`a447dde`, `1ed62ec`): primeiro vetor transacional ARM/Thumb com INIT/FINAL completos e traço ordenado de prefetch/load/store; valores de load vêm de `UC_HOOK_MEM_READ_AFTER`, não de zeros pré-read. O runner falha por mudança de ordem/endereço/valor mesmo quando o estado final coincide.
 - [x] Testar a execução do módulo limpo `zbtest.mod` (construído via SDK oficial BREW) no LLE e mapear o ponto de despacho para `AEEMod_Load`.
 
 ### Fase 8: Estado Reproduzível e Áudio
@@ -126,7 +128,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Pipeline fixed-function: modelview/projection, viewport, Triangles/TriStrip/TriFan, arrays habilitados explicitamente, current color, texturas RGBA8/RGB565, duas unidades, repeat, bilinear, depth LESS/depth-write e blend SRC_ALPHA/ONE_MINUS_SRC_ALPHA (`b7019fa`).
 - [x] Robustez: smokes retornam falha real, índices esparsos são compactados (`100005→7` leituras), MVP coerente e bridge normaliza o bit Thumb dos VAs; slots não modelados continuam no wrapper/firmware sem corrupção de R0 (`33924a6`, `7f1844f`).
 - [x] Gates por pixels: `gpu_smoke`, `igl_smoke`, display, transform e bridge fazem parte de `make check`; clear `0xF800/0x001F`, textura `0x001F`, depth `0x07E0`, blend `0x8010`, bilinear `0x8410`.
-- [ ] Quick wins GL: alpha-test, culling/front-face, demais depth funcs/blend factors e `glTexParameterx` (nearest/linear, repeat/clamp), cada um com teste RED→GREEN por pixel.
+- [x] Quick wins GL QW4/QW5/QW7 (`e078422`, `9dfdc9e`): alpha-test; culling com defaults GLES CCW/`GL_BACK`; `glTexParameterx` por textura (NEAREST/LINEAR, REPEAT/CLAMP); oito depth funcs e fatores usuais de blend. Gate `gl_quickwins_smoke`: 13/13 pixels/comportamentos PASS. `glFrontFace` não foi inventado porque nenhum slot vivo foi observado; MIN_FILTER permanece estado-only até existir LOD/minificação.
 - [ ] Compatibilidade de jogos: ATITC em `glCompressedTexImage2D`, clipping do near-plane, interpolação perspectiva e `GL_OES_draw_texture`.
 - [ ] Caminhos guest reais: observar o retorno do `eglGetProcAddress` do firmware e registrar apenas o VA vivo; resolver `IEGLSurfaceManip` somente após QueryInterface/objeto vivo. Não usar trampolim, string ou vtable sintética do Zeebx.
 
@@ -170,9 +172,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Implementado `IglGuestBridge::resolve_from_object(uc, obj_va, is_igl)` resolvendo diretamente de `obj[0]=&vtable`.
   - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
 - [ ] **Core 0 — fechamento do BootInfo/`bi_execute` (Passo 13)**:
-  - A rotina isolada de decomposição produz fpages de 1 MiB, mas o boot completo ainda apresenta descritor `size_log2>=32` em `0xb0d00000` e cursor estacionado em `0xb000d6dc`.
-  - Estado honesto: a estrutura e os endereços do caminho até `bi_execute@0xb00001fc` estão mapeados, porém ainda não há prova de retorno `r0=0` nem de chegada ao loop `0xb000aa94`.
-  - Próxima prova: validar os bytes/tags BootInfo e a sequência integral de fpages até `r7=0xb6d00000`, sem forçar registradores.
+  - QW1 parcial (`f196f14`, `b5d0766`, `433ba9c`) criou parser host-only e gate separado `test-bootinfo-real`: bytes reais confirmam BootInfo no offset de arquivo `0x57000`, magic `0x1960021d`, 10 pools virtuais e 5 físicos; mutações provam que o parser segue os bytes.
+  - Limite comprovado: nenhum `BI_TAG_VIRT_POOLS` cobre `0xb0d00000..0xb6d00000` e `0xb6d00000` não aparece como word no firmware. As 96 fpages de 1 MiB são uma hipótese aritmética da execução de `mempool_init`, não resultado do parser e não conclusão da QW1.
+  - O boot vivo ainda apresenta descritor `size_log2>=32` e cursor estacionado em `0xb000d6dc`; não há prova de retorno `bi_execute@0xb00001fc` com `r0=0` nem de chegada a `0xb000aa94`.
+  - Próxima prova: capturar via ControlServer a sequência real de MRs/fpages e o avanço `r4/r7` até `0xb6d00000`, sem forçar registradores e sem validar por instruction-count.
 - [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (commit `7bc384c`)**:
   - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
   - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista).
@@ -258,7 +261,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - `reksio.mod`: bloco indireto `@0x3b1d400`, 64 KiB, FNV-1a `0xd9339103`.
     - `274755` (Z-Wheel / ZeeboApp, CLSID `0x01070798`): bloco indireto `@0x3a92000`, 64 KiB, FNV-1a `0x544a6f30`, assinatura ASCII `"274755"`.
     - `tectoy.mod`: bloco indireto `@0x6026200`, 64 KiB, FNV-1a `0xf7c3c740`, assinatura ASCII `"tectoy.claro.com.br"`, dirent `inode=0x7ff13, parent=0x1fae8`.
-  - Harness `test_efs2_fs.cpp` expandido de 18 para **31/31 testes PASS**. Suíte completa verde.
+  - Harness `test_efs2_fs.cpp` expandido para **33/33 testes PASS**. Suíte completa verde.
 - [x] **Passo 8: Diagnóstico Preciso da Rotina de FPage e Mempool (Concluído `645f332` / Análise)**:
   - Desmistificado `0xb000d4a8`: não se trata de loop de polling de produtor externo, mas de rotina determinística `l4e_min_pagesize()` / CTZ (*Count Trailing Zeros*) que varre `KIP[0xc8]` (`PageInfo = 0x01111006`) e calcula `log2(min_pagesize) = 12` (páginas de 4 KiB), armazenando em `0xb0041284`.
   - Causa raiz do travamento em `mempool_init`: a rotina de decomposição `0xb000d4dc` itera aumentando `size_log2` a partir de 12. Quando os limites virtual e físico repassados via BootInfo (`0xb0d00000`) não estão estritamente alinhados ou extrapolam a memória convencional, a rotina não encontra uma fpage cobrindo o bloco, resultando em avanço nulo `r0 = 0` em `0xb000d6dc: add r4, r4, r0` e prendendo o loop.
@@ -281,16 +284,19 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - `vram_stat`: telemetria de framebuffer RGB565 (resolução, soma de pixels `pixel_sum`, pixel central, flag `blank`, draw calls).
     - `set_hook`: injeção dinâmica de ações e desvios sem necessidade de recompilar C++.
   - Validado via teste automatizado de cliente Python sobre instância viva com `--headless`.
+  - QW2 (`e906492`, `0594592`): deduplicação opt-in no cliente Python por máscara+janelamento, contagem de omitidos e invalidação após `poke` somente quando `ok=true`; 25/25 asserções.
+  - QW3 (`0b8e446`, `03bdcc1`, `2044d4f`): `ProbeRegistry` read-only com `probe.list/get` para MMU, BootInfo, IRQ, GPU e acessos não mapeados; `PageInfo=0x01111006` decodifica `min_page_log2=12`; debug-agent vivo 22/22.
+  - QW8 parcial: `unmapped.unknown` mantém log estruturado e limitado de core/PC/endereço/largura/direção/valor, sem afirmar MMIO. Ainda não implementa pausa/erro e preserva a política existente de auto-map-and-continue.
 - [x] **Passo 15: Harness Autônomo e Classificação Honesta de Apps (`aa3fa5c`, endurecido em `640147b`)**:
   - `tools/cpp/zeebo_debug_agent.py` oferece `peek`, `poke`, `trace`, VRAM, backtrace, catálogo e relatórios via TCP NDJSON/JSON-RPC.
   - **Execução comprovada:** somente Z-Wheel/274755 completa `EVT_APP_START`, retorna `r0=1` e gera `pixel_sum=2013081600`.
   - **Carga comprovada, execução ainda não:** `reksio.mod` e `tectoy.mod` são `loaded_only`; bytes injetados e progresso genérico do Core 0 não contam como execução do applet.
   - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
-  - Resolução do parser `bi_execute` (`0xb00001fc`) do bloco `__okl4_bootinfo` (`0xb0d00000`):
-    - Alinhamento das faixas de pools virtuais (`BI_TAG_VIRT_POOLS` = 5) e físicas (`BI_TAG_PHYS_POOLS` = 6) para a rotina de fpage `0xb0000184`.
-    - Garantir retorno `r0 = 0` em `0xb0003448` para evitar salto de pânico em `0xb0003450` (`"PANIC: Bootinfo did not initialise correctly"`).
-    - Concluir `extensions_init` (`0xb00017b8`) e alcançar o loop de servidores em `0xb000aa94`.
+  - Parser host-only comprovado contra a cópia `1.1.2_APPS.bin`: BootInfo no offset `0x57000`, magic `0x1960021d`, 10 `BI_TAG_VIRT_POOLS` e 5 `BI_TAG_PHYS_POOLS`; mutações dos bytes alteram/rejeitam o parse como esperado.
+  - A faixa `0xb0d00000..0xb6d00000` não deriva desses records: nenhum pool a cobre e `0xb6d00000` não aparece como word no firmware. A enumeração de 96 fpages permanece hipótese separada.
+  - Próximo gate: observar no boot vivo `mempool_init@0xb000d5b4`, MRs UTCB/fpages e avanço `r4/r7`; depois exigir `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e loop `0xb000aa94`.
+  - Não forçar registradores, não fabricar records e não usar instruction-count como prova.
 - [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
   - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
@@ -302,28 +308,33 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 ### P0 — Cadeia crítica de boot real
 
 1. **Passo 13 — BootInfo/`bi_execute`**
-   - Confirmar por bytes os registros BI_TAG_VIRT_POOLS/PHYS_POOLS em `0xb0d00000` e gerar fpages de 1 MiB (`size_log2=20`) até `r7=0xb6d00000`.
-   - Gate: execução real passa por `bi_execute@0xb00001fc` com `r0=0`, atravessa `extensions_init@0xb00017b8` e alcança `0xb000aa94`.
-   - Proibido validar por instruction-count ou forçar registradores.
+   - Já provado por bytes: BootInfo @ file offset `0x57000`, magic `0x1960021d`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`; o parser não contém evidência da faixa de 96 MiB.
+   - Próximo experimento: script Python sobre ControlServer que pare em `mempool_init@0xb000d5b4`, capture MRs/fpages e comprove cada avanço por endereço/dado até o retorno de `bi_execute`.
+   - Gate: execução real passa por `bi_execute@0xb00001fc` com `r0=0`, atravessa `extensions_init@0xb00017b8` e alcança `0xb000aa94`; proibido forçar registradores ou validar por instruction-count.
 2. **Passo 14 — threads/IPC Iguana → BREW**
    - Completar semântica observada de `L4_ThreadControl(0x0c)`, `L4_Ipc(0x00)` e `L4_ExchangeRegisters(0x10)`.
    - Gate: handoff orgânico ao AEECShell/BREW em `0x10137000`/`0x10c874f4`, com objeto IGL/IEGL vivo capturado pelo bridge.
 
 ### Quick wins independentes
 
-| Ordem | Quick win | Esforço | Ganho | Prova obrigatória |
-|---|---|---:|---|---|
-| QW1 | Harness isolado de BootInfo que enumera tags/fpages reais | baixo-médio | encurta diretamente o Passo 13 e elimina boot cego | sequência de tags, VAs e bytes até `0xb6d00000` |
-| QW2 | Deduplicação de trace no cliente Python: máscara de PCs, janela de repetição, contador de omitidos e invalidação após `poke` | baixo | torna loops/CTZ/NOP-slide legíveis sem instrumentação C++ permanente | teste com sequência repetida + SMC produzindo saída determinística |
-| QW3 | `ProbeRegistry` mínimo no ControlServer para MMU/BootInfo, IRQ e GPU (`probe.list/get`; `set` somente onde seguro) | baixo-médio | substitui probes descartáveis e acelera RE orientada por agente | teste RPC prova leitura sem mutar bytes/flags/eventos |
-| QW4 | Alpha-test + culling/front-face no `SoftRasterizer` | baixo | corrige sprites recortados e faces invertidas | pixels discard/CCW/CW |
-| QW5 | `glTexParameterx`: nearest/linear e repeat/clamp por textura | baixo | remove sampling incorreto sem mexer no boot | textura 2×2 nas bordas |
-| QW6 | Converter um teste ARM11 para vetor transacional (estado inicial/final + prefetch/load/store) | baixo-médio | detecta erro de barramento que 12/12 por estado final pode ocultar | caso ARM/Thumb com transações e bytes esperados |
-| QW7 | Demais depth funcs e blend factors usados no GLES 1.x | baixo-médio | amplia compatibilidade 3D/HUD | matriz de pixels por função |
-| QW8 | Falha estruturada para MMIO não mapeado, com PC/endereço/largura/direção e pausa | baixo-médio | troca leitura zero/falha opaca por evidência acionável | teste de acesso inválido sem falso progresso |
-| QW9 | ATITC RGB/RGBA em `glCompressedTexImage2D` | médio | alto impacto nos jogos comerciais | blocos conhecidos → pixels/hash |
-| QW10 | Clipping `z+w>=0` antes do divide | médio | evita triângulos explodindo na tela | triângulo cruzando near-plane |
-| QW11 | Interpolação corrigida por perspectiva | médio | texturas 3D corretas | quad inclinado com baseline |
+| Ordem | Estado | Quick win | Esforço | Prova obrigatória |
+|---|---|---|---:|---|
+| QW1 | **parcial honesto** | Parser/harness BootInfo por bytes reais | baixo-médio | PASS: magic/tags/10 pools virtuais/5 físicos + mutações; pendente: nenhuma prova firmware-derived das 96 fpages |
+| QW2 | **concluído** | Deduplicação de trace no cliente Python + invalidação SMC após `poke ok=true` | baixo | 25/25 + debug-agent 22/22 |
+| QW3 | **concluído** | `ProbeRegistry` read-only (`probe.list/get`) para MMU/BootInfo/IRQ/GPU/unmapped | baixo-médio | PageInfo vivo `0x01111006→12`; RPC e debug-agent 22/22 |
+| QW4 | **concluído** | Alpha-test + culling com defaults CCW/`GL_BACK` | baixo | pixels discard/CW/CCW/default; sem slot `glFrontFace` inventado |
+| QW5 | **concluído** | `glTexParameterx`: nearest/linear e repeat/clamp por textura | baixo | textura 2×2 nas bordas; MIN_FILTER state-only documentado |
+| QW6 | **concluído** | Primeiro vetor ARM11 transacional | baixo-médio | INIT/FINAL completos + traço ordenado P/L/S com valores reais via `READ_AFTER`; CPU 12/12 |
+| QW7 | **concluído** | Oito depth funcs e fatores usuais de blend GLES1 | baixo-médio | matriz de pixels; quickwins GL 13/13 |
+| QW8 | **parcial honesto** | Log limitado `unmapped.unknown` com core/PC/endereço/largura/direção/valor | baixo-médio | log passivo validado; falta pausa/erro opt-in sem confundir RAM inválida com MMIO |
+| QW9 | **pendente** | ATITC RGB/RGBA em `glCompressedTexImage2D` | médio | blocos conhecidos → pixels/hash |
+| QW10 | **pendente** | Clipping `z+w>=0` antes do divide | médio | triângulo cruzando near-plane sem explosão |
+| QW11 | **pendente** | Interpolação corrigida por perspectiva | médio | quad inclinado com baseline determinístico |
+| QW12 | **novo — prioridade 1** | Script Python `mempool/bi_execute` usando breakpoints, probes e dedup existentes | baixo | captura ordenada de PC, MRs UTCB, fpage, `r4/r7` e retorno; nenhum trace C++ novo |
+| QW13 | **novo — prioridade 2** | Regressão transacional de `L4_MapControl` para retorno dos MRs | baixo | cada chamada valida MR físico/fpage, avanço de 1 MiB e whole-space sem overflow |
+| QW14 | **novo** | Modo opt-in `--strict-unmapped` sobre o log QW8 | baixo-médio | acesso sintético pausa com erro estruturado; default continua byte-idêntico no boot 22/22 |
+| QW15 | **novo** | Integrar `run_qw6_txn.sh` ao gate e adicionar acesso cruzando página | baixo | mutações de ordem/valor/fronteira falham; agregado permanece verde |
+| QW16 | **novo** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` e validação explícita de sampler enums | baixo | testes de limites/enum inválido por estado e pixel, sem absorver slot não observado |
 
 ### P1 — Infraestrutura após o Passo 13
 
@@ -359,11 +370,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Estratégia de execução paralela
 
-- **Frente A — crítica:** QW1 + Passo 13 (BootInfo/fpages/`bi_execute`).
-- **Frente B — debug para agente:** QW2 e QW3, sem traces permanentes no core.
-- **Frente C — GL rápida:** QW4, QW5 e QW7 em commits TDD independentes.
-- **Frente D — conformidade/diagnóstico:** QW6 e QW8, validando transações e falhas por bytes/eventos.
-- **Frente E — GL estrutural:** QW9–QW11, uma feature por vez, sempre com frame/pixel determinístico.
+- **Concluído:** Frente B (QW2/QW3), Frente C (QW4/QW5/QW7) e QW6; todos integrados com TDD e revisão independente.
+- **Frente A — cadeia crítica:** QW12 primeiro, seguido de QW13 e Passo 13. QW1 permanece evidência auxiliar parcial, não milestone concluído.
+- **Frente E — GL estrutural:** QW9, QW10 e QW11 em worktrees separadas, uma feature por vez, sempre com frame/pixel/hash determinístico.
+- **Frente de hardening curto:** QW14, QW15 e QW16 podem avançar em paralelo sem bloquear BootInfo; `--strict-unmapped` deve ser opt-in.
 - **Depois do Passo 13:** Passo 14 e P1 na ordem checkpoint → tempo híbrido → JSON-RPC → GDB; só promover objetos, extensões e applets alcançados pelo boot real.
+- **QDSP5:** congelado até liberação explícita; executar seus testes, mas não editar `tools/cpp/qdsp5/`.
 
-Gate de toda frente: alvo afetado RED→GREEN, `make check`, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
+Gate de toda frente: alvo afetado RED→GREEN, `make check`, `test-bootinfo-real` quando houver afirmação sobre BootInfo, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
