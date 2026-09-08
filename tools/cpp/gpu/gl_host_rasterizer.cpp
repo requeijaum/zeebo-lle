@@ -62,6 +62,10 @@ public:
         // TODO: glGenTextures/glBindTexture/glTexImage2D(GL_RGBA,GL_UNSIGNED_BYTE)
         (void)w;(void)h;(void)rgba8; textures_[id]=id;
     }
+    void tex_parameter(u32 unit,u32 pname,u32 param) override {
+        // TODO: glTexParameteri(GL_TEXTURE_2D, pname, param) on active unit.
+        (void)unit;(void)pname;(void)param;
+    }
     void bind_texture(u32 unit,u32 id) override {
         // TODO: glActiveTexture(GL_TEXTURE0+unit); glBindTexture(2D, gltex)
         (void)unit;(void)id;

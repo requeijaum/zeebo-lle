@@ -41,3 +41,10 @@ igl_guest_bridge_test: igl_guest_bridge_test.cpp igl_hook.cpp soft_rasterizer.cp
 
 test-bridge: igl_guest_bridge_test
 	./igl_guest_bridge_test
+
+# Quick wins GLES (QW4 alpha/cull, QW5 texparameter, QW7 depth/blend) — pixel TDD.
+gl_quickwins_smoke: gl_quickwins_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
+	$(CXX) $(CXXFLAGS) gl_quickwins_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gl_quickwins_smoke
+
+test-quickwins: gl_quickwins_smoke
+	./gl_quickwins_smoke
