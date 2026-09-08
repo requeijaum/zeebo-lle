@@ -37,7 +37,20 @@ Aplicação no Zeebo:
 
 **Prioridade:** alta depois do Passo 13. No boot atual, um scheduler completo não resolve `bi_execute`; antes disso, basta criar a interface e um teste determinístico pequeno.
 
-### B. Probes versus tracers — adotar já
+### B. Barramento paginado com fast path e acesso de debug — adotar incrementalmente
+
+`libs/ymir-core/include/ymir/sys/bus.hpp` divide o espaço em páginas. Cada página aponta diretamente para RAM ou para handlers MMIO; mapeamento de arrays pode espelhar a mesma memória em várias faixas. O mesmo mapa mantém waitstates e separa `Read/Write` de `Peek/Poke` sem efeitos.
+
+Aplicação no Zeebo:
+
+- formalizar aliases VA→mesma RAM física sem duplicar armazenamento;
+- manter caminho direto para RAM e hooks apenas para MMIO;
+- associar custo de acesso por região ao futuro scheduler;
+- impedir que depuração altere FIFOs, flags read-to-clear ou ponteiros de transferência.
+
+Como Unicorn já controla mapeamento e hooks, aproveitar o desenho; não transplantar o template GPL.
+
+### C. Probes versus tracers — adotar já
 
 A documentação do Ymir separa:
 
@@ -53,15 +66,17 @@ Aplicação no Zeebo:
 - distinguir `peek` físico/sem efeito de uma leitura MMIO real;
 - manter tracing fora do C++ por padrão: o C++ publica eventos tipados somente quando um assinante existe; filtragem e automação ficam em Lua/Python/ControlServer.
 
+Tracers semânticos também distinguem execução, branch, call, return, exceção, interrupção e mudanças de pilha. Isso pode fortalecer o `backtrace`: o cliente mantém uma pilha de chamadas baseada em eventos reais, em vez de tentar inferi-la apenas da RAM.
+
 Isso atende à diretriz de parar de adicionar instrumentação ad hoc sem perder observabilidade.
 
-### C. Save-state validado e pós-restauração — corrigir o save-state atual
+### D. Save-state validado e pós-restauração — corrigir o save-state atual
 
 O Ymir usa três etapas por componente: `SaveState`, `ValidateState`, `LoadState`, com `PostLoadState`/sincronização quando caches, callbacks ou render threads precisam ser reconstruídos. O scheduler e os eventos pendentes também fazem parte do estado.
 
 O `ZeeboSaveStateManager` atual (`tools/cpp/zeebo_save_state.h`, versão 2) salva contextos Unicorn, contadores/PCs e todas as regiões mapeadas. Ele **não salva o estado dos modelos de dispositivo**, scheduler/eventos, hooks de script, GPU/GL, EFS/VFS ou metadados de IRQ. Portanto ainda não é checkpoint de máquina completa.
 
-Quick win proposto: formato chunked versão 3, com cada subsistema implementando:
+Quick win proposto: formato chunked versão 3, com hash da cópia de NAND/firmware e cada subsistema implementando:
 
 - `save(writer)`;
 - `validate(reader)` sem mutar a máquina;
@@ -70,7 +85,19 @@ Quick win proposto: formato chunked versão 3, com cada subsistema implementando
 
 Gate obrigatório: salvar no ponto A, rodar N eventos, guardar hash de bytes/pixels/registros; restaurar A, repetir N eventos e exigir os mesmos hashes.
 
-### D. Headless core e callbacks — já estamos alinhados
+### E. Protocolo JSON-RPC tipado — aproveitar sem quebrar NDJSON
+
+O clone local possui framing por linha e mensagens JSON-RPC 2.0 tipadas, com IDs, erros estruturados e notificações assíncronas. Nosso ControlServer já usa NDJSON, mas o parser textual e a ausência de notificações robustas são débitos conhecidos.
+
+Aplicação: manter o transporte TCP/NDJSON e evoluir o envelope para `id/method/params/result/error`; usar notificações para breakpoint, watchpoint e evento de probe. Fazer compatibilidade temporária com os comandos atuais.
+
+### F. Dirty tracking para o futuro dynarec — preservar no plano, não antecipar
+
+O trabalho de dynarec presente no clone local usa buckets de código com bits sujos e contadores de versão; blocos compilados verificam a versão da região e são recompilados após escrita. Também mantém caches por instância de CPU e telemetria de hit/miss/fallback.
+
+Aplicação futura: ARM11 e ARM9 com caches separados, `notify_write(address,size)`, regiões ROM dispensadas de tracking e gate intérprete-versus-JIT por bytes. Enquanto Unicorn continuar sendo o executor, `uc_ctl_remove_cache` permanece o mecanismo correto.
+
+### G. Headless core e callbacks — já estamos alinhados
 
 Ymir roda sem áudio/vídeo e oferece renderer nulo. O Zeebo LLE já é CLI/headless e valida pixels/bytes; não há mudança estrutural necessária.
 
@@ -89,7 +116,19 @@ Aplicação no Zeebo:
 
 É mais forte que validar apenas o PC final ou instruction-count e combina com o critério “bytes, nunca insn-count”.
 
-### B. GDB Remote Serial Protocol — aproveitar como adaptador, não substituir o agente
+### B. Serializer simétrico — aproveitar o contrato, não puxar nall
+
+O `nall::serializer` usa uma única função `serialize(s)` para leitura e escrita, reduzindo divergência entre dois caminhos manuais. Para o formato chunked v3 do Zeebo:
+
+- cada dispositivo declara seus campos uma vez;
+- header inclui magic, versão numérica, string de compatibilidade/build e hash da NAND;
+- inteiros são little-endian;
+- floats de GPU são serializados pelo padrão de bits, não pelo valor nativo, pois o próprio nall alerta que floating point não é portável entre implementações;
+- rejeitar integralmente o estado na fase de validação antes de mutar qualquer componente.
+
+Não vale importar toda a nall; uma interface local pequena preserva o benefício sem dependências transitivas.
+
+### C. GDB Remote Serial Protocol — aproveitar como adaptador, não substituir o agente
 
 O ares possui `nall::GDB::Server`, independente de sistema e dirigido por callbacks de memória, registradores, invalidação de cache, breakpoints e watchpoints. A integração real está no N64 e suporta GDB CLI, VSCode e CLion.
 
@@ -102,7 +141,7 @@ O Zeebo já possui pause/continue/step, breakpoints, `peek/poke`, backtrace e in
 
 **Prioridade:** média. É excelente para depuração humana e IDE, mas não desbloqueia o boot sozinho.
 
-### C. Trace masking e invalidação — portar o comportamento para a camada de scripts
+### D. Trace masking e invalidação — portar o comportamento para a camada de scripts
 
 O tracer de instruções do ares pode:
 
@@ -113,7 +152,18 @@ O tracer de instruções do ares pode:
 
 Aplicação: adicionar filtros equivalentes no cliente Python/Lua do Zeebo, alimentados por hooks existentes. Isso reduz logs gigantes sem nova instrumentação fixa no core.
 
-### D. Entropia determinística — adotar quando houver fontes não determinísticas
+### E. Barramento: falha explícita em acesso não mapeado — combinar com o fast path
+
+O barramento do N64 no ares despacha faixas de forma explícita e possui caminhos como `freezeUnmapped`/`freezeUncached`, registrando também o PC responsável. Não devemos trocar a LUT/memória direta do Zeebo por uma cascata de ranges, mas podemos adotar a política:
+
+- RAM e aliases continuam no caminho rápido;
+- MMIO conhecido vai para handlers tipados por largura;
+- região desconhecida pausa com endereço, largura, direção, valor e PC em evento estruturado;
+- escrita em região executável invalida o cache correspondente.
+
+Isso é mais diagnosticável que transformar silenciosamente uma falha de mapeamento em leitura zero ou sucesso.
+
+### F. Entropia determinística — adotar quando houver fontes não determinísticas
 
 O ares oferece seed determinístico. O Zeebo deve fixar RTC, RNG, input e ordem de eventos nos harnesses, registrando o seed no checkpoint. Isso será importante ao chegar ao BREW/Z-Wheel completo.
 
@@ -121,10 +171,13 @@ O ares oferece seed determinístico. O Zeebo deve fixar RTC, RNG, input e ordem 
 
 ### O que vale preservar
 
+- **contador relativo ARM11↔ARM9**: um `int64` representa qual core está adiantado; cada lado acumula a frequência do outro. É mais simples que um scheduler de corrotinas para apenas dois processadores;
+- **sync-on-shared-access**: deixar um core avançar e sincronizar o outro quando houver acesso às janelas IPC/SMD/mailbox compartilhadas; manter fallback configurável para slices conservadores;
 - serialização bidirecional uniforme e little-endian;
-- todos os componentes participam da sincronização antes do save-state;
-- debugger como árvore de memória/propriedades/tracers, evitando UI acoplada ao core;
-- componentes com clocks próprios sincronizados por scheduler.
+- save-state não pode avançar o tempo e todos os dispositivos devem participar;
+- componentes com clocks próprios precisam compartilhar uma linha temporal determinística.
+
+O melhor desenho para o Zeebo é híbrido: contador relativo/dívida para ARM11↔ARM9 e fila de deadlines do Ymir para timers, GPU, IRQ e QDSP5. O acesso compartilhado força reconciliação antecipada.
 
 ### O que não devemos importar agora
 
@@ -157,7 +210,9 @@ Converter um teste existente e provar acesso de barramento + estado final; depoi
 
 ### Depois do Passo 13
 
-- scheduler de deadlines absolutos;
+- protótipo do contador relativo ARM11↔ARM9 com fallback;
+- sync-on-shared-access nas janelas IPC/SMD;
+- scheduler de deadlines absolutos para periféricos/eventos;
 - GDB RSP ARM11;
 - watchpoints de leitura/escrita;
 - seed/RTC/input determinísticos integrados ao checkpoint.
