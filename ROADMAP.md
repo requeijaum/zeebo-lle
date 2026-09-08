@@ -158,3 +158,41 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - **Clean-room Absoluto:** `a1Sim` permanece estritamente como oráculo caixa-preta (proibido descompilar).
 - **Integridade da NAND:** Leitura exclusiva na cópia de trabalho; dump original preservado com `chmod a-w`.
 - **Validação por Execução Real:** Todo avanço deve ser demonstrado por código executável com commits atômicos e registros auditados em `notes/FINDINGS.md`.
+- **Rastreabilidade de build:** todo commit deve deixar o HEAD compilável — nenhum `#include`/alvo de Makefile pode apontar para arquivo não versionado. (Violado em `431461b`/`f51cccd`; corrigido em `0a5abd4`.)
+
+---
+
+## Como acelerar os itens restantes (estratégia de paralelização)
+
+Os 5 itens da Fase 11 têm uma **cadeia crítica** (1→2→3) e dois **trilhos independentes** (4, 5).
+
+Cadeia crítica (destrava boot user-space real):
+- **Item 1** é o gargalo raiz. O NOP-slide de Core1 (PC +0x9c40/ciclo) prova que `0x00a00000`
+  (e_entry cru) não é o vetor de reset do ARM9. Acelerar por: (a) scanner determinístico do
+  preâmbulo de reset (`msr cpsr_c,#0xd3` + `ldr sp`) sobre `1.1.2_AMSS.bin` — já há
+  `nand/sig_scan*.py` como base; (b) slide-detector de ~30 linhas no hook de Core1 que
+  `uc_emu_stop` ao detectar PC linear por N insns — troca 90s de boot cego por feedback
+  imediato; (c) cruzar o entry com o scheduler REX documentado (`rex_wait @0x16ef0b02`).
+- **Item 2** não depende do 1: a sonda de página vazia em `map_one` é instrumentação barata
+  e dá evidência byte-level imediata. Fazer junto com o 1.
+- **Item 3** provavelmente destrava sozinho quando o REX subir (item 1). Não forçar o bit —
+  apenas a sonda para confirmar a hipótese antes de qualquer hack.
+
+Trilhos independentes (podem rodar em paralelo já, contra as sondas isoladas):
+- **Item 4 (loader BREW):** o ponto de despacho `AEEMod_Load` já foi mapeado na Fase 7 pelo
+  `zeebo_lle_mod_probe`. Desenvolver/testar o `BrewLoader` contra essa sonda isolada — não
+  depende de 1-3. Só falta resolver os VAs de `ISHELL_CreateInstance`/`AEEClsCreateInstance`.
+- **Item 5 (GPU guest link):** `IglHook`/`GuestMachine` já estão prontos e verificados por
+  pixel. Só falta resolver os ponteiros globais `gpIGL`/`gpIEGL` e ligar ao Core0 — também
+  independente do boot completo.
+
+Plano de execução sugerido:
+- **Frente A (delegate_task, crítica):** Item 1 completo — scanner de reset + preâmbulo
+  Core1 (CPSR/SP) + slide-detector. Critério: Core1 executa branch real em <1000 insns.
+- **Frente B (delegate_task, paralela):** Item 2 (probe de página vazia) + Item 3 (sonda do
+  bit em `[desc+0xc8]`, sem forçar).
+- **Frente C (delegate_task, paralela):** Itens 4+5 — BrewLoader contra mod_probe + resolução
+  de `gpIGL`/`gpIEGL` ligando GuestMachine ao Core0.
+
+Evitar regressão: cada frente termina com `make test-gpu` (10/10), `make -C qdsp5 -f Makefile.qdsp5 test`,
+`test_audio_sink` e `run_lle_cputests.sh` (12/12) verdes antes do commit.
