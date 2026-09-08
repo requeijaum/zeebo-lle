@@ -236,24 +236,24 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Criados `tools/cpp/zeebo_input_harness.cpp`, `zeebo_input_stub.s` e alvo `test-input` no `Makefile`.
   - Provado por execução real: 32 eventos de tecla despachados e 32 consumidos com `r0 = 1`. Suíte completa de 23/23 testes verdes.
 
-- [ ] **Passo 2: Parser C++ EFS2APPS (`zeebo_efs2_fs.h`) e Extração de Extents (Passo 2 / Fase 13 - Em Andamento)**:
-  - Mapeada a arquitetura interna do EFS2 no Qualcomm MSM7201A: o sistema utiliza blocos indiretos de ponteiros `u32` para clusters de 512 bytes (`offset = 0x3220000 + cluster * 512`).
-  - Identificada tabela de ponteiros em `0x3b1d400` que aponta para clusters de dados reais (ex: arquivos de script/configuração em `0x3fcb200` e dados de imagem/recursos).
-  - Necessário consolidar o leitor de nós/blocos indiretos em `tools/cpp/zeebo_efs2_fs.h` e validar o teste `test-efs2-fs`.
+- [x] **Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Extração de Extents (Passo 2 / Fase 13 - Concluído `d53f6c4`)**:
+  - Implementado `tools/cpp/zeebo_efs2_fs.h`: classe `efs2::Efs2Filesystem` (header-only, determinístico) capaz de abrir `1.1.2.bin`, mapear `0:EFS2APPS` (`0x3220000`), escanear e indexar dirents com marcador `0x69` em $O(1)$ por `(parent_inode, name)` e por `inode`.
+  - Suporte a leitura de clusters de dados de 512B (`0x3220000 + cluster*512`) e resolução encadeada de blocos indiretos `u32` com terminador `0xFFFFFFFF`.
+  - Criado harness `tools/cpp/test_efs2_fs.cpp` e alvo `test-efs2-fs` no Makefile.
+  - Provado por bytes reais do dump: 69.634 dirents recuperados; dirent `reksio.mod` em `0x32606ef` validado (inode `0x265e4`, reclen 15, parent `0x4abef`); cluster `0x6d11` verificado com FNV-1a `0xa0f4d11f`; bloco indireto em `0x3b1d400` encadeado para 128 clusters (64 KiB) com FNV-1a `0xd9339103`. 18/18 testes PASS.
+- [ ] **Passo 6: Avanço do Boot User-space no Iguana OS / Core 0 (Em Andamento)**:
+  - Com o `L4_MapControl` tratado (commit `6fe15b6`), investigando o laço de polling do Iguana em `0xb000d4a8` lendo a KIP (`0xf0f00000 + 0xc8`).
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Extração via OOB Spare)**:
-   - Layout físico comprovado no `1.1.2_spare.bin`: 2.112 B/página divididos em 4 codewords de 528 B (512 B dados + 16 B spare/ECC).
-   - O VFS COW do EFS2 reside em `0:EFS2APPS` (`0x3220000` em diante), enquanto os binários executáveis e recursos do Appmgr (`fs:/mif/brewappmgr.mif`, `appmgrls.bar`) residem embutidos no ELF da partição `0:APPS` (`0x1cc0000`–`0x3220000`).
-   - Implementar leitor C++ que correlaciona os dirents da Z-Wheel (`274755`, `tectoy.cfg`, `.qxt`, `.qxm`, `.qxa`) com a cadeia de extents no spare.
-   - Adicionar alvo `test-efs2-fs` ao Makefile comprovando a extração dos arquivos com checksum real.
+1. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
+   - Identificar a semântica exata de sincronização/interrupção esperada pelo Core 0 no laço `0xb000d4a8`.
+   - Permitir que os servidores do Iguana OS progridam até o handoff para o loader de ELF/VFS.
 
-2. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
-   - Com o `L4_MapControl` tratado (sem crash de 4GB), diagnosticar o wait do produtor L4e em `0xb000d4a8` (`l4e_min_pagesize`/mailbox).
-   - Conectar a troca de IPC entre Iguana e o servidor de VFS nativo para alcançar o ponto de carga do executável do sistema.
+2. **Passo 7 (Integração VFS EFS2 com Iguana / BREW Loader)**:
+   - Conectar o parser `efs2::Efs2Filesystem` aos hooks de VFS para carregar dinamicamente assets e `.mod` diretamente da NAND sem depender de injeção em memória estática.
 
 ---
 
