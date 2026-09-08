@@ -192,6 +192,25 @@ int main() {
         CHECK(!pool.contains(0x10000000, 0x4001));
     }
 
+    // 8) fpage de espaço inteiro (size_log2=32) — operação de controle de AS.
+    //    Reproduz o descritor que travava o Core 0 do Iguana com UC_ERR_NOMEM:
+    //    va=0xb0d00000, phys=0x100000000, size=2^32, rwx=6.
+    {
+        // size_log2=32 => size_bytes() satura em 2^32.
+        Fpage ws(make_fpage(0xb0d00000, 32, false, true, true));
+        CHECK(ws.size_bytes() == ((u64)1 << 32));
+        CHECK(ws.is_whole_space());
+        CHECK(!ws.is_nil());
+
+        // phys_desc com base física de 4GB (0x100000000).
+        PhysDesc php(make_phys_desc(0x100000000ull, l4mem_io));
+        CHECK(php.phys_base() == 0x100000000ull);
+
+        // fpage normal de 4KB não é whole-space.
+        Fpage normal(make_fpage(0xb0001000, 12, true, true, true));
+        CHECK(!normal.is_whole_space());
+    }
+
     if (g_fail == 0) {
         printf("ALL TESTS PASSED\n");
         return 0;

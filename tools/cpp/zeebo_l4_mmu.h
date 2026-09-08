@@ -126,6 +126,13 @@ struct Fpage {
     bool is_nil() const { return raw == 0; }
     // fpage completa: size == 1 && base == 0 (fpage_t::is_complete_fpage()).
     bool is_complete() const { return size_log2() == 1 && (raw & ~0x3ffu) == 0; }
+
+    // fpage que cobre TODO o espaço de endereço (size_log2 >= 32 => 2^32 bytes).
+    // Em L4e/OKL4 2.1.1, map_control com uma fpage deste tamanho não é um mapeamento
+    // literal de RAM, mas uma OPERAÇÃO DE CONTROLE DE ESPAÇO inteiro (flush/unmap
+    // global ou concessão/revogação de permissão sobre todo o AS). Passar size=2^32
+    // para uc_mem_map estoura o range de 32 bits e retorna UC_ERR_NOMEM.
+    bool is_whole_space() const { return size_log2() >= 32; }
 };
 
 // --- Par de descritores decodificado ---------------------------------------
@@ -274,6 +281,9 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
     u64 va   = it.fpage.vaddr();
     u64 size = it.fpage.size_bytes();
     if (it.fpage.is_nil() || size == 0) return UC_ERR_OK;
+    // fpage de espaço inteiro (2^32): operação de controle, não mapeamento de RAM.
+    // Não repassar ao uc_mem_map (estouraria 32 bits -> UC_ERR_NOMEM).
+    if (it.fpage.is_whole_space()) return UC_ERR_OK;
 
     u64 base = va & ~(PAGE - 1);
     u64 end  = (va + size + PAGE - 1) & ~(PAGE - 1);
@@ -329,6 +339,8 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
     u64 va   = it.fpage.vaddr();
     u64 size = it.fpage.size_bytes();
     if (it.fpage.is_nil() || size == 0) return UC_ERR_OK;
+    // Espaço inteiro (2^32): controle de AS, não aliasing de RAM física.
+    if (it.fpage.is_whole_space()) return UC_ERR_OK;
 
     u64 base  = va & ~(PAGE - 1);
     u64 end   = (va + size + PAGE - 1) & ~(PAGE - 1);
@@ -393,6 +405,23 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
 
         if (it.fpage.is_nil()) {
             // fpage nil em modify = unmap; aqui apenas ignoramos (shim neutro).
+            continue;
+        }
+
+        // fpage de espaço inteiro (size_log2 >= 32, size=2^32) OU phys_base fora
+        // da faixa física de 32 bits (>= 4GB): em L4e/OKL4 2.1.1 isto NÃO é um
+        // mapeamento literal de RAM, e sim uma operação de controle sobre todo o
+        // address space (flush/unmap global de mappings ou concessão/revogação de
+        // permissão de espaço). Não há RAM de host correspondente a mapear; tratar
+        // como no-op de sucesso evita o UC_ERR_NOMEM (2^32 estoura o range de 32
+        // bits do uc_mem_map) que travava o Core 0 no loop de mempool_init.
+        if (it.fpage.is_whole_space() || it.phys.phys_base() >= 0x100000000ull) {
+            printf("  [ctl %u] whole-space op: va=0x%08llx phys=0x%llx size=%llu "
+                   "rwx=%u -> address-space control (flush/perm), no RAM map\n",
+                   i, (unsigned long long)it.fpage.vaddr(),
+                   (unsigned long long)it.phys.phys_base(),
+                   (unsigned long long)it.fpage.size_bytes(), it.fpage.rwx());
+            mapped++;
             continue;
         }
 
