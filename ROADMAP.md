@@ -1,10 +1,9 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-07, after session 3c)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, revisão da base + estudo GL/Zeebx)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Decided by Rafael 2026-09-06. This revision is grounded in what sessions 2a-3c actually PROVED,
-including the live execution past 5M instructions and full reverse-engineering of L4e syscalls,
-ONCRPC routing, and QDSP5 hardware accelerator pipelines.
+Esta revisão separa execução comprovada de mera carga, incorpora o hardening de `640147b`
+e o frontend/rasterizador GLES clean-room informado por fatos verificáveis do Zeebx.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -94,7 +93,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Integrar subsistema `UnifiedInput` ao laço de eventos do mestre `zeebo_lle_main.cpp`.
 
 ### Phase 5 — System Integration & Master Orchestrator [PROTOTIPADO E VALIDADO]
-- [x] Implementar as 3 frentes no orquestrador `zeebo_lle_main.cpp`: handoff da partição `0:APPS` no APPSBL com salto `bx r2` para `0x10000000`, motor de syscalls L4e abrangente (`L4_Ipc`, `L4_ThreadControl`, `L4_ExchangeRegisters`, `L4_MapControl`, `L4_SpaceControl`) e injeção bidirecional SMD/ONCRPC na fila do AMSS `0x17571748` disparada por campainhas A2M `0xC0100400`.
+- [x] Integrar no orquestrador o handoff `0:APPS`, o dispatcher L4e com `L4_MapControl` funcional e a ponte SMD/ONCRPC; a semântica completa de `L4_Ipc`, `L4_ThreadControl` e `L4_ExchangeRegisters` permanece no Passo 14.
 - [x] Atualizar `zeebo_dual_core.cpp` para carregar os 14 segmentos `PT_LOAD` do `1.1.2_APPS.bin` real na RAM física de 96MB (`0x10000000..0x16000000`), janelas virtuais L4e (`0xf0000000`) e Iguana (`0xb0000000..0xb2000000`), motor de syscalls (`UC_HOOK_INTR`) e validar execução concorrente estável de 1,2 milhão de instruções (600k por núcleo) com `1.1.2_AMSS.bin`.
 - [x] Conectar sinalização de interrupção real `INT_KEYSENSE` (IRQ #28) no controlador de interrupções VIC do ARM11 (`0xC0000000`) ao disparar eventos do Z-Pad / SDL2.
 - [x] Mapear e carregar integralmente os 14 segmentos `PT_LOAD` do super-ELF real `1.1.2_APPS.bin` com coexistência das janelas físicas (`0x10000000..0x16000000`, 96MB) e virtuais (L4e `0xf0000000`, Iguana `0xb0000000`, BREW `0x10137000+`).
@@ -109,7 +108,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ### Fase 7: Suíte de Conformidade de CPU e Validação Cruzada (Testkit Conformance)
 - [x] Construir sonda LLE de conformidade (`zeebo_lle_mod_probe`) com interface compatível ao `mod_probe` do `zeebulator`.
-- [x] Executar e validar a bateria completa de 11 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob o núcleo ARM11 (Unicorn/ARM1176): 11/11 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `muldiv`, `shifter`, `thumb2branch`).
+- [x] Executar e validar 12 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob ARM11 Unicorn: 12/12 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `memory`, `muldiv`, `shifter`, `thumb2branch`).
 - [x] Testar a execução do módulo limpo `zbtest.mod` (construído via SDK oficial BREW) no LLE e mapear o ponto de despacho para `AEEMod_Load`.
 
 ### Fase 8: Absorção de Padrões HLE de Alta Relevância (Audio & SaveState Engine)
@@ -117,15 +116,16 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Incorporar mixer de áudio multi-stream (`UnifiedAudioSink` em `zeebo_audio_sink.h`) com controle de canais e vtable HLE/LLE limpa evitando problemas de ciclo de vida e interworking.
 
 ### Fase 9: Subsistema Gráfico (Adreno 130 / IGL) — acoplamento LLE e rasterização
-- [x] Evidência de firmware (GPU_TODO §13): 3D é offload MPU→QDSP5 atrás de fachada OpenGL ES 1.1 ATI-Imageon; **não há ring buffer PM4 A2xx observável do lado ARM11** → descartar `pm4_adreno.h` como produtor (mantido como referência de estudo §14).
-- [x] Esqueleto `IGpuRasterizer` (Citra-style) + 2 backends (software correto + GL host stub) + `rasterizer_factory`, verificado por framebuffer (`gpu_smoke` 3/3: clear, triângulo, pm4-walk).
-- [x] Produtor correto `IglHook` interceptando a vtable IGL/IEGL (80/28 slots, ABI ARMADILHA: R0=1º arg real) → `IGpuRasterizer`, verificado por framebuffer (`igl_smoke` 3/3; 40 slots gl* fixados contra gl_hle.cpp).
-- [x] **Integração no build do emulador** (`tools/cpp/Makefile`: targets `gpu`/`test-gpu`) + handoff GPU→display provado por pixels em PPM 640x480 RGB565 (`gpu_display_integration`: clear azul 0x001F e vermelho 0xF800), commit `1508115`.
-- [x] **Transform fixed-function (mvp+viewport)** implementado no `IglHook` (stacks modelview/projection, slots de matriz reais, aplicação obj→clip→NDC por vértice) + rasterizer respeitando viewport; verificado por PIXEL (`igl_transform_smoke` 2/2: triângulo desenha e `glTranslatex(+0.5)` o desloca 160px — antigo centro fica vazio, novo centro preenchido), commit `fbb094d`. `make test-gpu` = 10/10 PASS.
-- [x] **Acoplamento do pipeline gráfico ao `zeebo_lle_main`**: `SoftRasterizer` e `IglHook` instanciados em `ZeeboLLESystem`. Framebuffer dirty do MDDI/Adreno 130 drena `rast_->end_frame()` diretamente para `sink_->update_frame(rgb565_src)` via textura SDL2 640x480 RGB565.
-- [x] **Entrada integrada de Gamepad e Teclado**: processamento de eventos `SDL_CONTROLLERBUTTONDOWN`/`UP` no `UnifiedInput` (`KEYPAD_BASE = 0xa9a00000`) para A, B, C, D, direcionais e Home, complementando o teclado.
-- [ ] Conectar os ponteiros de despacho global guest (`gpIGL`/`gpIEGL`) da vtable IGL à `GuestMachine` do `IglHook` no momento em que as tarefas BREW subirem.
-- [ ] Texturas/ATITC (`glTexImage2D`→upload, `glCompressedTexImage2D`→decode), multitexture+combine/dot3, backend GL host (ubershader).
+- [x] Evidência de firmware: 3D usa fachada OpenGL ES 1.x ATI-Imageon; o produtor observável no ARM11 é a vtable IGL/IEGL, não um ring PM4 A2xx.
+- [x] `IGpuRasterizer`, `SoftRasterizer`, `IglHook` e `IglGuestBridge` integrados ao orquestrador e ao sink SDL2 640×480 RGB565.
+- [x] Resolução determinística de objetos/vtables vivos (`obj[0]`) com validação contra segmentos PF_X; nenhum VA ou vtable fabricado.
+- [x] ABI legada separada e validada: IGL=80, IEGL=28, sem `this` nos métodos GL/EGL; `eglGetProcAddress=8`, `eglSwapBuffers=26`. IEGL11 nova permanece separada (`SwapBuffers=25`) e ainda não é ativada sem objeto vivo comprovado.
+- [x] Pipeline fixed-function: modelview/projection, viewport, Triangles/TriStrip/TriFan, arrays habilitados explicitamente, current color, texturas RGBA8/RGB565, duas unidades, repeat, bilinear, depth LESS/depth-write e blend SRC_ALPHA/ONE_MINUS_SRC_ALPHA (`b7019fa`).
+- [x] Robustez: smokes retornam falha real, índices esparsos são compactados (`100005→7` leituras), MVP coerente e bridge normaliza o bit Thumb dos VAs; slots não modelados continuam no wrapper/firmware sem corrupção de R0 (`33924a6`, `7f1844f`).
+- [x] Gates por pixels: `gpu_smoke`, `igl_smoke`, display, transform e bridge fazem parte de `make check`; clear `0xF800/0x001F`, textura `0x001F`, depth `0x07E0`, blend `0x8010`, bilinear `0x8410`.
+- [ ] Quick wins GL: alpha-test, culling/front-face, demais depth funcs/blend factors e `glTexParameterx` (nearest/linear, repeat/clamp), cada um com teste RED→GREEN por pixel.
+- [ ] Compatibilidade de jogos: ATITC em `glCompressedTexImage2D`, clipping do near-plane, interpolação perspectiva e `GL_OES_draw_texture`.
+- [ ] Caminhos guest reais: observar o retorno do `eglGetProcAddress` do firmware e registrar apenas o VA vivo; resolver `IEGLSurfaceManip` somente após QueryInterface/objeto vivo. Não usar trampolim, string ou vtable sintética do Zeebx.
 
 ### Fase 10: Subsistema QDSP5 (Áudio e Multimídia) — acoplamento ONCRPC e streaming
 - [x] Comando-plane mapeado (FINDINGS 2zz–3c): dispatcher `0x16e8cba0`, 4 task engines (VOICEPROC, VFE, JPEG, AUDPP), enfileiramento SMD/ONCRPC `0x17571748`, packet frame (+0x20 proc, +0x80 payload).
@@ -166,10 +166,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Constatado que `1.1.2_APPS.bin` é stripped (`e_shnum=0`) e as vtables são povoadas em runtime via `ISHELL_CreateInstance`.
   - Implementado `IglGuestBridge::resolve_from_object(uc, obj_va, is_igl)` resolvendo diretamente de `obj[0]=&vtable`.
   - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
-- [x] **Core 0 Iguana User-space Pipeline & Mapeamento de Pool L4_MapControl**:
-  - Falso diagnóstico do "gargalo de 4GB / size_log2=32" refutado por execução e RE: o calculador de fpages `0xb000d4dc` gera fpages legítimas de 1MB (`0xb0d00146`), e o comparador de mínimo em `0xb000d6fc` seleciona `size=1MB`.
-  - O loop `mempool_init` (`0xb000d5b4`) executa com sucesso 96 iterações de `L4_MapControl`, cobrindo de `0xb0d00000` a `0xb6d00000` (pool físico `0x10000000..0x16000000`).
-  - Sequência de boot do Iguana mapeada em `0xb0003424`: avança por `mempool_init`, `0xb00055dc`, `0xb000b1dc`, `0xb0001e80`, `0xb00056c4`, `0xb0004de4`, `0xb00070c8` até `bi_execute` (`0xb00001fc`) e o servidor em `0xb000345c`.
+- [ ] **Core 0 — fechamento do BootInfo/`bi_execute` (Passo 13)**:
+  - A rotina isolada de decomposição produz fpages de 1 MiB, mas o boot completo ainda apresenta descritor `size_log2>=32` em `0xb0d00000` e cursor estacionado em `0xb000d6dc`.
+  - Estado honesto: a estrutura e os endereços do caminho até `bi_execute@0xb00001fc` estão mapeados, porém ainda não há prova de retorno `r0=0` nem de chegada ao loop `0xb000aa94`.
+  - Próxima prova: validar os bytes/tags BootInfo e a sequência integral de fpages até `r7=0xb6d00000`, sem forçar registradores.
 - [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (commit `7bc384c`)**:
   - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
   - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista).
@@ -210,7 +210,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **Descoberta de MMU ARM9**: O dump de MMU L1 do hardware real comprova que `VA 0xf0000000 = PA 0x00a00000 (SECTION)` é SRAM física interna de dados. O código executável reside em seções físicas dedicadas (`0x16e00000..0x17b00000`). O heap em `0xf0000000` deve ter backing store de RAM física independente.
   - **Descoberta de Particionamento NAND vs eNAND (`/mmc4`)**: A NAND interna (128 MB) armazena exclusivamente o SO (BREW/Rex/L4) e o Z-Wheel (`274755`). Todos os jogos comerciais ficam na eNAND externa (`fs:/mmc4/`). O Z-Wheel é o aplicativo central autêntico presente no dump da NAND.
   - **Subsistema ZeeboNet e Schemas SQLite Mapeados (commits `0db8cfa`, `be2da3d`)**: Documentados em `notes/ZWHEEL_SQLITE_SCHEMAS.md` os schemas DDL de `tt_game_info` (`GAMEINFO`, `TITLETEXT`, `DBINFO`), `tt_prefs.db` (`PREFSINFO`), `tt_dlqueue.db` (`DLITEMINFO`) e cache DSL `ASSETS`. Mapeado o cliente embutido da loja na Z-Wheel, o destino direto em `fs:/mmc4/` e o daemon `ZeeboMCP` (`fs:/zmcp.dat`).
-- [x] **Estrutura de Arquivos EFS2APPS Mapeada (76.731 Dirents)**:
+- [x] **Estrutura de Arquivos EFS2APPS Mapeada (69.634 dirents)**:
   - Formato binário comprovado contra o dump `nand/1.1.2.bin`: `0x69 [inode u32][reclen u8][type u8][parent_ref u32][pad 00][name (reclen-5)]`.
   - Semântica de hierarquia decodificada: `parent_ref = (parent_inode << 8) | tag`.
   - Inode raiz `0x6064` indexa diretórios de primeiro nível (`"mod"`, `"mif"`, `".efs_private"`, `"err"`, etc.).
@@ -220,8 +220,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Causa do `UC_ERR_INSN_INVALID` identificada: `0xf0002cd4` inicializa free-list de 2MB em `0xf0000000`. Em `0xdf613b20`, o código relocado faz re-entry em VA absoluto `0xf000e6d4`. O clobber de heap sobrescreve essas instruções se o backing store físico não for desacoplado.
 - [x] **Isolamento de Memória do Heap REX no Core 1 (Passo 1 / Fase 13 - Concluído `c1b4cb4`)**:
   - Provedor de backing store físico de RAM de dados para `0xf0000000..0xf0200000` separado do `.text` preservado do AMSS via Split I/D. O particionador conclui e o ARM9 avança até `rex_sched` (`0xf0013b84`) decodificando código pristino.
-- [ ] **Parser C++ EFS2APPS `zeebo_efs2_fs.h` Focado no Z-Wheel (274755) e AppMgr (Passo 2 / Fase 13 - Em Andamento)**:
-  - Implementar extrator de extents/payload lendo os 64 bytes de metadados OOB/spare de cada página em `nand/1.1.2_spare.bin` para recompor os arquivos de diretórios `0x435` e `0x6064` (`fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/*`, `fs:/mif/274755.mif`, `fs:/mod/274755/*`).
+- [x] **Parser C++ EFS2APPS e extents (Passo 2 / Fase 13 — concluído em `d53f6c4`)**:
+  - `zeebo_efs2_fs.h` indexa 69.634 dirents em O(1), lê clusters de 512 B e blocos indiretos; gate atual 33/33.
 - [x] **Acoplamento do ZeeboApp ao Loop Principal do Core 0 e Display SDL2 (Passo 3 / Fase 13 - Concluído `5223647`, `06b61e5`)**:
   - Integrado o pipeline gráfico da Z-Wheel ao loop principal de `zeebo_lle_main`, conectando o ponto de despacho de applets da BREW ao pipeline de display SDL2 e criando a interface de controle CLI/telemetria.
 - [x] **Destravar IPC do Iguana OS no Core 0 - Resolução de `L4_MapControl` (Passo 4 / Fase 13 - Concluído `6fe15b6`)**:
@@ -278,13 +278,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - `vram_stat`: telemetria de framebuffer RGB565 (resolução, soma de pixels `pixel_sum`, pixel central, flag `blank`, draw calls).
     - `set_hook`: injeção dinâmica de ações e desvios sem necessidade de recompilar C++.
   - Validado via teste automatizado de cliente Python sobre instância viva com `--headless`.
-- [x] **Passo 15: Execução Universal de Apps e Jogos EFS2 via Agente de IA (Concluído `aa3fa5c`)**:
-  - Implementado o harness autônomo `tools/cpp/zeebo_debug_agent.py` para agentes de IA:
-    - CLI com suporte a `--peek`, `--poke`, `--trace`, `--vram`, `--run-app=<id_ou_nome>`, `--test-catalog`, `--report=<caminho>`.
-    - Conexão e orquestração determinística via TCP NDJSON/JSON-RPC sobre o `ControlServer` com tolerância a latência de injeção em memória (`0x12000000`).
-    - Validação de execução dos applets do catálogo (`274755`, `reksio.mod`, `tectoy.mod`): ciclo de vida com frame RGB565 real para a Z-Wheel (`pixel_sum = 2013081600`) e injeção/execução com backtrace honesto para applets `.mod`.
-    - Criado teste automatizado `tools/cpp/test_zeebo_debug_agent.py` e novo alvo `test-debug-agent` no Makefile (18/18 asserções PASS).
-    - Suíte de CI expandida para **10 alvos 100% verdes**.
+- [x] **Passo 15: Harness Autônomo e Classificação Honesta de Apps (`aa3fa5c`, endurecido em `640147b`)**:
+  - `tools/cpp/zeebo_debug_agent.py` oferece `peek`, `poke`, `trace`, VRAM, backtrace, catálogo e relatórios via TCP NDJSON/JSON-RPC.
+  - **Execução comprovada:** somente Z-Wheel/274755 completa `EVT_APP_START`, retorna `r0=1` e gera `pixel_sum=2013081600`.
+  - **Carga comprovada, execução ainda não:** `reksio.mod` e `tectoy.mod` são `loaded_only`; bytes injetados e progresso genérico do Core 0 não contam como execução do applet.
+  - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
   - Resolução do parser `bi_execute` (`0xb00001fc`) do bloco `__okl4_bootinfo` (`0xb0d00000`):
     - Alinhamento das faixas de pools virtuais (`BI_TAG_VIRT_POOLS` = 5) e físicas (`BI_TAG_PHYS_POOLS` = 6) para a rotina de fpage `0xb0000184`.
@@ -296,19 +294,35 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ---
 
-## Próximos Passos Priorizados (Plano de Ação Replanejado)
+## Próximos Passos Priorizados
 
-1. **Passo 13 (Avanço Estrito no Mempool / `mempool_init` e Execução de `bi_execute`)**:
-   - **Diagnóstico da Causa Raiz**: O travamento ocorre em `0xb000d6dc: add r4, r4, r0` dentro de `mempool_init`. A rotina decompõe o intervalo em fpages de 4GB (`size_log2 = 32`), gerando deslocamento nulo (`1 << 32 = 0`) para `va = 0xb0d00000`, travando o cursor `r4` indefinidamente antes de alcançar `bi_execute` (`0xb00001fc`).
-   - **Ação**: Ajustar a especificação dos limites do pool de memória convencional no descritor KIP/BootInfo ou na rotina de fpage para garantir potências de 2 válidas (ex.: fpages de 1 MiB / `size_log2 = 20`), permitindo que `r4` alcance `r7 = 0xb6d00000`.
-   - **Alvo**: Passar por `bi_execute` (`0xb00001fc`) com `r0 = 0`, contornando o pânico de inicialização em `0xb0003450` e alcançando o loop de servidores em `0xb000aa94`.
+### P0 — Cadeia crítica de boot real
 
-2. **Passo 14 (Syscalls OKL4 IPC/Threading e Vetor BREW)**:
-   - Implementar no dispatcher de SVC do `ZeeboLLESystem` (`case 0x00` L4_Ipc, `case 0x0c` L4_ThreadControl, `case 0x10` L4_ExchangeRegisters) o suporte neutro de microkernel para atender as threads de naming e pager criadas pelo Iguana OS.
-   - Conectar o vetor de inicialização do BREW (`0x10137000`) ao loop de escalonamento interfolheado.
+1. **Passo 13 — BootInfo/`bi_execute`**
+   - Confirmar por bytes os registros BI_TAG_VIRT_POOLS/PHYS_POOLS em `0xb0d00000` e gerar fpages de 1 MiB (`size_log2=20`) até `r7=0xb6d00000`.
+   - Gate: execução real passa por `bi_execute@0xb00001fc` com `r0=0`, atravessa `extensions_init@0xb00017b8` e alcança `0xb000aa94`.
+   - Proibido validar por instruction-count ou forçar registradores.
+2. **Passo 14 — threads/IPC Iguana → BREW**
+   - Completar semântica observada de `L4_ThreadControl(0x0c)`, `L4_Ipc(0x00)` e `L4_ExchangeRegisters(0x10)`.
+   - Gate: handoff orgânico ao AEECShell/BREW em `0x10137000`/`0x10c874f4`, com objeto IGL/IEGL vivo capturado pelo bridge.
 
-3. **Passo 15 (Expansão do Teste Autônomo de Apps via Agente de IA - Concluído `aa3fa5c` / Em Evolução)**:
-   - Utilizar o harness autônomo `tools/cpp/zeebo_debug_agent.py` para rodar diagnósticos programáticos contínuos de VRAM, backtrace e estabilidade de registradores para todos os applets presentes na NAND.
+### Quick wins independentes
+
+| Ordem | Quick win | Esforço | Ganho | Prova obrigatória |
+|---|---|---:|---|---|
+| QW1 | Alpha-test + culling/front-face no `SoftRasterizer` | baixo | corrige sprites recortados e faces invertidas | pixels discard/CCW/CW |
+| QW2 | `glTexParameterx`: nearest/linear e repeat/clamp por textura | baixo | remove sampling incorreto sem mexer no boot | textura 2×2 nas bordas |
+| QW3 | Demais depth funcs e blend factors usados no GLES 1.x | baixo-médio | amplia compatibilidade 3D/HUD | matriz de pixels por função |
+| QW4 | Harness isolado de BootInfo que enumera tags/fpages reais | baixo-médio | encurta o ciclo do Passo 13 e elimina boot cego | sequência de VAs/bytes até `0xb6d00000` |
+| QW5 | ATITC RGB/RGBA em `glCompressedTexImage2D` | médio | alto impacto nos jogos comerciais | blocos conhecidos → pixels/hash |
+| QW6 | Clipping `z+w>=0` antes do divide | médio | evita triângulos explodindo na tela | triângulo cruzando near-plane |
+| QW7 | Interpolação corrigida por perspectiva | médio | texturas 3D corretas | quad inclinado com baseline |
+
+### Itens deliberadamente não classificados como quick win
+
+- `eglGetProcAddress`, `IEGLSurfaceManip`, IEGL11/IGLES11 e strings GL: dependem de objeto/VA/retorno real observado no firmware; não fabricar trampolim, vtable, interface ou string do Zeebx.
+- Áudio/JPEG/VFE/QDSP5: aguardar liberação explícita do QDSP5.
+- Backend GL host/ubershader: otimização posterior; primeiro fechar correção do backend software e boot guest.
 
 ---
 
@@ -320,37 +334,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ---
 
-## Como acelerar os itens restantes (estratégia de paralelização)
+## Estratégia de execução paralela
 
-Os 5 itens da Fase 11 têm uma **cadeia crítica** (1→2→3) e dois **trilhos independentes** (4, 5).
+- **Frente A — crítica:** QW4 + Passo 13 (BootInfo/fpages/`bi_execute`).
+- **Frente B — GL rápida:** QW1–QW3 em commits TDD independentes.
+- **Frente C — GL estrutural:** QW5–QW7, uma feature por vez, sempre com frame/pixel determinístico.
+- **Depois do Passo 13:** Passo 14; só então promover objetos, extensões e applets alcançados pelo boot real.
 
-Cadeia crítica (destrava boot user-space real):
-- **Item 1** é o gargalo raiz. O NOP-slide de Core1 (PC +0x9c40/ciclo) prova que `0x00a00000`
-  (e_entry cru) não é o vetor de reset do ARM9. Acelerar por: (a) scanner determinístico do
-  preâmbulo de reset (`msr cpsr_c,#0xd3` + `ldr sp`) sobre `1.1.2_AMSS.bin` — já há
-  `nand/sig_scan*.py` como base; (b) slide-detector de ~30 linhas no hook de Core1 que
-  `uc_emu_stop` ao detectar PC linear por N insns — troca 90s de boot cego por feedback
-  imediato; (c) cruzar o entry com o scheduler REX documentado (`rex_wait @0x16ef0b02`).
-- **Item 2** não depende do 1: a sonda de página vazia em `map_one` é instrumentação barata
-  e dá evidência byte-level imediata. Fazer junto com o 1.
-- **Item 3** provavelmente destrava sozinho quando o REX subir (item 1). Não forçar o bit —
-  apenas a sonda para confirmar a hipótese antes de qualquer hack.
-
-Trilhos independentes (podem rodar em paralelo já, contra as sondas isoladas):
-- **Item 4 (loader BREW):** o ponto de despacho `AEEMod_Load` já foi mapeado na Fase 7 pelo
-  `zeebo_lle_mod_probe`. Desenvolver/testar o `BrewLoader` contra essa sonda isolada — não
-  depende de 1-3. Só falta resolver os VAs de `ISHELL_CreateInstance`/`AEEClsCreateInstance`.
-- **Item 5 (GPU guest link):** `IglHook`/`GuestMachine` já estão prontos e verificados por
-  pixel. Só falta resolver os ponteiros globais `gpIGL`/`gpIEGL` e ligar ao Core0 — também
-  independente do boot completo.
-
-Plano de execução sugerido:
-- **Frente A (delegate_task, crítica):** Item 1 completo — scanner de reset + preâmbulo
-  Core1 (CPSR/SP) + slide-detector. Critério: Core1 executa branch real em <1000 insns.
-- **Frente B (delegate_task, paralela):** Item 2 (probe de página vazia) + Item 3 (sonda do
-  bit em `[desc+0xc8]`, sem forçar).
-- **Frente C (delegate_task, paralela):** Itens 4+5 — BrewLoader contra mod_probe + resolução
-  de `gpIGL`/`gpIEGL` ligando GuestMachine ao Core0.
-
-Evitar regressão: cada frente termina com `make test-gpu` (10/10), `make -C qdsp5 -f Makefile.qdsp5 test`,
-`test_audio_sink` e `run_lle_cputests.sh` (12/12) verdes antes do commit.
+Gate de toda frente: alvo afetado RED→GREEN, `make check`, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
