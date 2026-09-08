@@ -241,19 +241,25 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Suporte a leitura de clusters de dados de 512B (`0x3220000 + cluster*512`) e resolução encadeada de blocos indiretos `u32` com terminador `0xFFFFFFFF`.
   - Criado harness `tools/cpp/test_efs2_fs.cpp` e alvo `test-efs2-fs` no Makefile.
   - Provado por bytes reais do dump: 69.634 dirents recuperados; dirent `reksio.mod` em `0x32606ef` validado (inode `0x265e4`, reclen 15, parent `0x4abef`); cluster `0x6d11` verificado com FNV-1a `0xa0f4d11f`; bloco indireto em `0x3b1d400` encadeado para 128 clusters (64 KiB) com FNV-1a `0xd9339103`. 18/18 testes PASS.
-- [ ] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (Em Andamento)**:
-  - Diagnóstico concluído: o laço `0xb000d4a8` foi superado pelo init da KIP (`47d6e6c`). O ponto de bloqueio atual está em `0xb000d860` (`L4_MapControl` chamado por `mempool_init`): a rotina espera que a syscall devolva os descritores atualizados em `MR[0]` e `MR[1]` no UTCB (`0xff000ff0`) para calcular o avanço do pool (`0xb000d868: ldr r2, [r1, #0x44]`). Sem a escrita de retorno nos MRs, o ponteiro de pool não avança.
+- [x] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (Concluído `770eb1a`)**:
+  - Implementado `write_mr(uc, utcb_base, index, val)` em `tools/cpp/zeebo_l4_mmu.h`.
+  - Em `handle_map_control`, os descritores processados agora são gravados de volta no UTCB (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`), atendendo à convenção do Iguana OS/OKL4.
+  - O Core 0 agora avança além de `0xb000d860`: o laço `mempool_init` itera com múltiplos VAs (`0x00000000`, `0xb0d00000`, etc.), progredindo a execução interfolheada (60 ciclos completos sem travamento em `0xb000d860`).
+  - Suíte completa de testes verde (exit 0).
+- [ ] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader (Em Andamento)**:
+  - Integrando o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
+  - Adicionando flags CLI `--efs2-ls` e `--efs2-run` para catalogar e carregar applets diretamente da partição EFS2 da NAND.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 6 (Escrever Retorno nos MRs do UTCB em `L4_MapControl`)**:
-   - Atualizar `handle_map_control` em `tools/cpp/zeebo_l4_mmu.h` para gravar o resultado da fpage mapeada/controlada de volta em `MR[0]` e `MR[1]` (`utcb_base + 0x40/0x44`).
-   - Testar o avanço do `mempool_init` além de `0xb000d860` até o próximo estágio de carga de servidores.
+1. **Passo 7 (Conclusão da Integração EFS2 / Carregador de Applets)**:
+   - Finalizar a integração de `efs2::Efs2Filesystem` no `ZeeboLLESystem`.
+   - Disponibilizar `--efs2-ls` para inspeção da partição e `--efs2-run` para despacho via `BrewLoader`.
 
-2. **Passo 7 (Integração VFS EFS2 com Iguana / BREW Loader)**:
-   - Conectar o parser `efs2::Efs2Filesystem` aos hooks de VFS para carregar dinamicamente assets e `.mod` diretamente da NAND sem depender de injeção em memória estática.
+2. **Passo 8 (Handoff Iguana OS → AEECShell / Z-Wheel)**:
+   - Sincronizar o avanço dos servidores Iguana com o loop contínuo de eventos do Core 0 e Core 1.
 
 ---
 
