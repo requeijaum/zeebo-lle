@@ -334,7 +334,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW13 | **bloqueado (guest vivo)** | Regressão transacional de `L4_MapControl`: transação de map sob Unicorn | baixo | valida regiões/ordem/permissões, escrita real de página, skip de malformado e whole-space sem overflow. NÃO prova write-back de MR ausente (echo idêntico é indistinguível por black-box); fechamento do Passo 13 pendente de harness de guest vivo |
 | QW14 | **novo** | Modo opt-in `--strict-unmapped` sobre o log QW8 | baixo-médio | acesso sintético pausa com erro estruturado; default continua byte-idêntico no boot 22/22 |
 | QW15 | **novo** | Integrar `run_qw6_txn.sh` ao gate e adicionar acesso cruzando página | baixo | mutações de ordem/valor/fronteira falham; agregado permanece verde |
-| QW16 | **novo** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` e validação explícita de sampler enums | baixo | testes de limites/enum inválido por estado e pixel, sem absorver slot não observado |
+| QW16 | **concluído** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` para [0,1], validação de enum de alpha-func e de combinações `glTexParameterx` (pname/param) | baixo | `gl_alpha_sampler_smoke` 17/17 estado+pixel; ref>1/<0 clampado, func/pname/param inválidos não mutam estado e retornam false (caminho firmware); sem slot `glFrontFace` inventado; MIN_FILTER mipmap rejeitado (limitação LOD documentada) |
 
 ### P1 — Infraestrutura após o Passo 13
 
