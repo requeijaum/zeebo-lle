@@ -2,10 +2,10 @@
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão registra onze quick wins concluídos, dois parciais honestos, um bloqueado no guest vivo
-e dois em execução (QW10/QW11). O Passo 13 não foi promovido: o parser de BootInfo segue bytes reais,
-mas a sonda viva QW12 observa `fpage=0xb0d00206` (`size_log2=32`) e cursor estacionado em
-`r4=0xb0d00000`; `bi_execute` continua não alcançado.
+Esta revisão registra treze quick wins concluídos, dois parciais honestos e um bloqueado no guest vivo.
+O Passo 13 não foi promovido: o parser de BootInfo segue bytes reais, mas a sonda viva QW12
+observa `fpage=0xb0d00206` (`size_log2=32`) e cursor estacionado em `r4=0xb0d00000`; `bi_execute`
+continua não alcançado.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -332,8 +332,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW7 | **concluído** | Oito depth funcs e fatores usuais de blend GLES1 | baixo-médio | matriz de pixels; quickwins GL 13/13 |
 | QW8 | **parcial honesto** | Log limitado `unmapped.unknown` com core/PC/endereço/largura/direção/valor | baixo-médio | log passivo validado; falta pausa/erro opt-in sem confundir RAM inválida com MMIO |
 | QW9 | **concluído** | ATITC RGB/RGBA em `glCompressedTexImage2D` slot 15 (`94a449c`) | médio | 15/15: RGB methods 0/1, alpha explícito/interpolado, crop 6×6, pixels/FNV do oracle independente |
-| QW10 | **em execução — RED válido** | Clipping homogêneo `z+w>=0` antes do divide | médio | código antigo falha casos fora/cruzando; implementação e regressões ainda pendentes |
-| QW11 | **em execução — RED válido** | Interpolação perspectiva de cor/textura; depth como `z/w` afim em screen space | médio | código afim antigo falha cor/textura; teste de depth corrigido matematicamente antes da implementação |
+| QW10 | **concluído** | Clipping homogêneo `z+w>=0` antes do divide (`707229f`) | médio | 19/19 checks em `gl_clip_smoke`: inside/outside/crossing com interpolação de vértices e culling de w~0/não finito |
+| QW11 | **concluído** | Interpolação perspectiva de cor/textura; depth como `z/w` afim em screen space (`707229f`) | médio | cor e textura normalizadas por 1/w; depth afim linear em tela sem duplo denominador; 5 mutações RED |
 | QW12 | **concluído** | Script Python `mempool/bi_execute` usando breakpoints/probes/dedup (`7d658cb`, `f3b2ed1`) | baixo | 49/49; evidência viva ordenada termina `blocked` em `stuck_add`; nenhum trace C++ |
 | QW13 | **bloqueado (guest vivo)** | Regressão transacional de `L4_MapControl` (`7355364`, `a6c1967`) | baixo | regiões/ordem/permissões/escrita/nil/whole-space provados; echo de MR não prova writeback load-bearing |
 | QW14 | **concluído** | `--strict-unmapped` opt-in (`2781e18`) | baixo-médio | primeiro acesso desconhecido pausa com evento estruturado; keypad não dispara; default 22/22 |
