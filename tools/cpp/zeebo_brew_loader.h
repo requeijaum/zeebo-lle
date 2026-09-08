@@ -19,6 +19,7 @@
 #include <vector>
 #include <fstream>
 #include <unicorn/unicorn.h>
+#include "zeebo_l4_mmu.h"
 
 namespace zeebo::brew {
 
@@ -55,6 +56,10 @@ public:
     explicit BrewLoader(uc_engine* uc = nullptr) : uc_(uc) {}
 
     void bind_uc(uc_engine* uc) { uc_ = uc; }
+    // VTLB LUT opcional (aliasing físico host-backed). Quando o alvo da injeção
+    // já está coberto pela LUT, escreve direto na RAM de host (O(1), sem cópia
+    // interna do Unicorn). Caso contrário cai no uc_mem_write normal.
+    void bind_lut(zeebo_l4::VtlbLut* lut) { lut_ = lut; }
     void set_symbols(const BrewSymbols& s) { sym_ = s; }
     const BrewSymbols& symbols() const { return sym_; }
     bool has_module() const { return mod_.injected; }
@@ -78,6 +83,12 @@ public:
         if (e != UC_ERR_OK) {
             printf("[BREW] inject_mod: uc_mem_write falhou: %s\n", uc_strerror(e));
             return false;
+        }
+        // Espelho na LUT (aliasing host-backed) quando disponível: garante que
+        // telemetria/leituras diretas enxerguem os bytes injetados sem uc_mem_read.
+        if (lut_ && lut_->is_mapped(load_va)) {
+            if (lut_->write(load_va, d.data(), d.size()))
+                printf("[BREW]   (espelhado na VTLB LUT host-backed @0x%08x)\n", load_va);
         }
         mod_ = AppletModule{};
         mod_.host_path = host_path;
@@ -106,6 +117,7 @@ public:
 
 private:
     uc_engine*   uc_ = nullptr;
+    zeebo_l4::VtlbLut* lut_ = nullptr;
     BrewSymbols  sym_{};
     AppletModule mod_{};
 

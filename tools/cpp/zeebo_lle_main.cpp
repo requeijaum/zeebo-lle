@@ -430,7 +430,7 @@ public:
         uc_ctl_tlb_mode(core0_.uc, UC_TLB_VIRTUAL);
         uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1176);
         core0_.name = "ARM11-Apps";
-        if (brew_) brew_->bind_uc(core0_.uc);
+        if (brew_) { brew_->bind_uc(core0_.uc); brew_->bind_lut(&vtlb_); }
 
         // 4. Initialize Core 1 (ARM926EJ-S — Modem Processor)
         printf("[System] Initializing Core 1 (ARM926EJ-S Modem Processor)...\n");
@@ -842,8 +842,30 @@ private:
         uc_mem_map(core0_.uc, GPT_TIMER_BASE, GPT_TIMER_SIZE, UC_PROT_ALL);
         uc_mem_map(core1_.uc, GPT_TIMER_BASE, GPT_TIMER_SIZE, UC_PROT_ALL);
 
-        // APPS Physical RAM space (0x10000000..0x16000000)
-        uc_mem_map(core0_.uc, APPS_RAM_PHYS_BASE, APPS_RAM_PHYS_SIZE, UC_PROT_ALL);
+        // APPS Physical RAM space (0x10000000..0x16000000) — host-backed pool
+        // para permitir aliasing físico real (PCSX2 VTLB / Dolphin fastmem).
+        // A pool é dona da RAM de host; map_control faz VAs adicionais apontarem
+        // para o MESMO backing store via uc_mem_map_ptr.
+        apps_pool_mem_.assign((size_t)APPS_RAM_PHYS_SIZE, 0);
+        apps_pool_.phys_base = APPS_RAM_PHYS_BASE;
+        apps_pool_.size      = APPS_RAM_PHYS_SIZE;
+        apps_pool_.host      = apps_pool_mem_.data();
+        {
+            uc_err ep = uc_mem_map_ptr(core0_.uc, APPS_RAM_PHYS_BASE,
+                                       (size_t)APPS_RAM_PHYS_SIZE, UC_PROT_ALL,
+                                       apps_pool_mem_.data());
+            if (ep != UC_ERR_OK) {
+                printf("[System] APPS_RAM pool map_ptr falhou (%s); fallback anônimo\n",
+                       uc_strerror(ep));
+                apps_pool_.host = nullptr; // desativa aliasing
+                uc_mem_map(core0_.uc, APPS_RAM_PHYS_BASE, APPS_RAM_PHYS_SIZE, UC_PROT_ALL);
+            } else {
+                // Identidade phys==va registrada na LUT (base do aliasing).
+                vtlb_.map(APPS_RAM_PHYS_BASE, APPS_RAM_PHYS_SIZE, apps_pool_mem_.data());
+                printf("[System] APPS_RAM pool host-backed @0x%08x (%u MB), VTLB LUT armada\n",
+                       (unsigned)APPS_RAM_PHYS_BASE, (unsigned)(APPS_RAM_PHYS_SIZE >> 20));
+            }
+        }
 
         // Core 0 L4e Virtual Windows
         uc_mem_map(core0_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel High VA
@@ -1207,7 +1229,10 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R1, &control);
                 u32 utcb_ptr = 0;
                 uc_mem_read(uc, 0xff000ff0, &utcb_ptr, 4);
-                res_r0 = zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control);
+                res_r0 = zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control,
+                             /*out_items=*/nullptr,
+                             sys->apps_pool_.host ? &sys->apps_pool_ : nullptr,
+                             sys->apps_pool_.host ? &sys->vtlb_ : nullptr);
                 printf("[Syscall] L4_MapControl(sid=0x%x, ctrl=0x%x) via UTCB@0x%08x -> res=0x%x\n",
                        sid, control, utcb_ptr, res_r0);
                 break;
@@ -1343,7 +1368,9 @@ private:
             uc_reg_read(uc, UC_ARM_REG_R2, &r2);
             uc_reg_read(uc, UC_ARM_REG_R4, &r4);
             u32 status = 0;
-            uc_mem_read(uc, (uint64_t)r0 + 0xc8, &status, 4);
+            // LUT-first (VTLB direto O(1)); cai em uc_mem_read se não mapeado.
+            if (!sys->vtlb_.read_u32((uint64_t)r0 + 0xc8, &status))
+                uc_mem_read(uc, (uint64_t)r0 + 0xc8, &status, 4);
             u64 n = ++sys->c0_poll_d4a8_iters_;
             // Log esparso: 1ª, 2ª e depois a cada potência de 2 (evita flood/lentidão).
             if (n <= 2 || (n & (n - 1)) == 0) {
@@ -1668,6 +1695,13 @@ private:
     std::map<u32, std::string> c0_script_hooks_;
     std::map<u32, std::string> c1_script_hooks_;
     uint64_t c0_poll_d4a8_iters_ = 0; // Item 3: contador de iterações do poll 0xb000d4a8
+
+    // Aliasing físico estilo PCSX2/Dolphin: pool de host da APPS_RAM + VTLB LUT.
+    // A pool é dona da RAM de host de 96MB mapeada em APPS_RAM_PHYS_BASE via
+    // uc_mem_map_ptr; map_one_aliased faz outros VAs apontarem para a MESMA RAM.
+    zeebo_l4::PhysPool  apps_pool_;
+    zeebo_l4::VtlbLut   vtlb_;
+    std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
     CoreState core0_;
     CoreState core1_;

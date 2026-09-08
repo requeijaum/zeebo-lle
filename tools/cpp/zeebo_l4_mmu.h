@@ -362,7 +362,9 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
 //   out_items : opcional, recebe os itens decodificados (para logging/teste)
 inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
                               u32 control,
-                              std::vector<MapItem>* out_items = nullptr) {
+                              std::vector<MapItem>* out_items = nullptr,
+                              const PhysPool* pool = nullptr,
+                              VtlbLut* lut = nullptr) {
     MapControl ctrl(control);
     u32 n = ctrl.count();
     if (n > IPC_NUM_MR / 2) n = IPC_NUM_MR / 2;
@@ -394,12 +396,25 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
             continue;
         }
 
-        uc_err e = map_one(uc, it);
-        printf("  [map %u] va=0x%08llx <- phys=0x%08llx size=%llu rwx=%u attr=%u -> %s\n",
+        uc_err e;
+        bool aliased = false;
+        if (pool && pool->host && it.phys.phys_base() != 0) {
+            e = map_one_aliased(uc, it, *pool, lut);
+            if (e == UC_ERR_ARG) {
+                // phys fora da pool: cai no mapeamento anônimo normal.
+                e = map_one(uc, it);
+            } else {
+                aliased = true;
+            }
+        } else {
+            e = map_one(uc, it);
+        }
+        printf("  [map %u] va=0x%08llx <- phys=0x%08llx size=%llu rwx=%u attr=%u %s-> %s\n",
                i, (unsigned long long)it.fpage.vaddr(),
                (unsigned long long)it.phys.phys_base(),
                (unsigned long long)it.fpage.size_bytes(),
                it.fpage.rwx(), (unsigned)it.phys.attributes(),
+               aliased ? "[aliased] " : "",
                uc_strerror(e));
         if (e == UC_ERR_OK) mapped++;
     }
