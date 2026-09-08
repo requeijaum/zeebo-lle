@@ -1073,12 +1073,19 @@ private:
         u16 phent = rd16(d.data(), 42), phnum = rd16(d.data(), 44);
 
         printf("[System] APPS ELF Entrypoint: 0x%08x, Segments: %u\n", core0_.entry, phnum);
+        std::vector<std::pair<u32,u32>> exec_ranges;
         for (int i = 0; i < phnum; i++) {
             size_t o = phoff + i * phent;
             if (rd32(d.data(), o) != 1) continue; // PT_LOAD
             u32 va = rd32(d.data(), o+8), pa = rd32(d.data(), o+12);
             u32 off = rd32(d.data(), o+4), fs = rd32(d.data(), o+16), ms = rd32(d.data(), o+20);
+            u32 flg = rd32(d.data(), o+24);
             u32 nmem = ms ? ms : fs; if (!nmem) continue;
+
+            // Coleta intervalos executáveis (p_flags bit0 = PF_X) para a validação
+            // estrutural determinística das vtables gpIGL/gpIEGL (firmware stripped:
+            // não há VA hardcodável; a vtable é aceita só se todos os slots são código).
+            if ((flg & 1u) && va) exec_ranges.emplace_back(va, va + nmem);
 
             u32 target = pa ? pa : va;
             uc_mem_write(core0_.uc, target, d.data() + off, fs);
@@ -1089,6 +1096,13 @@ private:
             if (pa && pa != target) {
                 uc_mem_write(core0_.uc, pa, d.data() + off, fs);
             }
+        }
+        // Arma o resolvedor determinístico das vtables IGL/IEGL com os segmentos
+        // executáveis reais do APPS.bin (validação estrutural — sem VA inventado).
+        if (igl_bridge_ && !exec_ranges.empty()) {
+            igl_bridge_->set_code_ranges(exec_ranges);
+            printf("[System] IglGuestBridge armado com %zu intervalos executáveis do APPS.bin "
+                   "(resolução determinística de gpIGL/gpIEGL)\n", exec_ranges.size());
         }
         return true;
     }

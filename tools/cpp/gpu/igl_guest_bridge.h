@@ -16,6 +16,8 @@
 #pragma once
 #include "igl_hook.h"
 #include <cstdint>
+#include <utility>
+#include <vector>
 #include <unicorn/unicorn.h>
 
 namespace zeebo::gpu {
@@ -35,6 +37,73 @@ public:
     void bind_iegl_vtable(uc_engine* uc, u32 vtable_va, int slots = 28) {
         bind_vtable(uc, vtable_va, slots, /*is_igl=*/false);
     }
+
+    // --- Resolução determinística (sem VA hardcoded) --------------------------
+    // O 1.1.2_APPS.bin é ELF STRIPPED (shnum=0): gpIGL/gpIEGL NÃO são exports
+    // estáticos — são globais preenchidos em runtime pela init EGL/GL do guest.
+    // Portanto o único caminho honesto é resolver a vtable a partir do OBJETO de
+    // interface vivo. Um objeto BREW IBase-derivado tem `obj[0] = &vtable`, e a
+    // vtable é um array de N ponteiros de função, TODOS apontando para segmentos
+    // executáveis do firmware. Validamos essa invariante estrutural antes de ligar.
+
+    // Registra os intervalos [lo,hi) de VA executável do firmware (dos program
+    // headers com flag X). Usado para validar que cada slot da vtable é código.
+    void set_code_ranges(const std::vector<std::pair<u32,u32>>& r) { code_ranges_ = r; }
+
+    // true se `va` (sem o bit Thumb) cai em algum segmento executável conhecido.
+    bool is_code_va(u32 va) const {
+        u32 v = va & ~1u;
+        for (const auto& pr : code_ranges_)
+            if (v >= pr.first && v < pr.second) return true;
+        return false;
+    }
+
+    // Valida estruturalmente uma vtable candidata: lê `slots` ponteiros a partir
+    // de vtable_va e exige que uma fração alta (>= min_ratio) aponte para código.
+    // Slots nulos são tolerados (funções não implementadas no wrapper). Retorna
+    // o número de slots-código; 0 = reprovada. NÃO liga nada (predicado puro).
+    int validate_vtable(uc_engine* uc, u32 vtable_va, int slots, double min_ratio = 0.75) const {
+        if (!uc || !vtable_va || code_ranges_.empty()) return 0;
+        int code = 0, nonnull = 0;
+        for (int s = 0; s < slots; ++s) {
+            u32 fn = 0;
+            if (uc_mem_read(uc, vtable_va + (u32)s * 4, &fn, 4) != UC_ERR_OK) return 0;
+            if (fn == 0) continue;
+            ++nonnull;
+            if (is_code_va(fn)) ++code;
+            else return 0; // ponteiro não-nulo que não é código -> não é vtable
+        }
+        if (nonnull == 0) return 0;
+        if ((double)code / (double)nonnull < min_ratio) return 0;
+        return code;
+    }
+
+    // Resolve gpIGL/gpIEGL a partir do VA de um OBJETO de interface vivo no guest
+    // (o ppOut de ISHELL_CreateInstance). Lê obj[0] = vtable_va, valida-a e liga.
+    // Retorna true se a vtable foi validada e ligada. Determinístico e honesto:
+    // sem endereço inventado, só o que o guest realmente escreveu na memória.
+    bool resolve_from_object(uc_engine* uc, u32 obj_va, bool is_igl) {
+        if (!uc || !obj_va) return false;
+        u32 vtbl = 0;
+        if (uc_mem_read(uc, obj_va, &vtbl, 4) != UC_ERR_OK || !vtbl) return false;
+        int slots = is_igl ? 80 : 28;
+        int good = validate_vtable(uc, vtbl, slots);
+        if (!good) {
+            printf("[IGL-bridge] resolve_from_object(%s): obj@0x%08x -> vtbl@0x%08x "
+                   "REPROVADA (não passou na validação estrutural)\n",
+                   is_igl ? "IGL" : "IEGL", obj_va, vtbl);
+            return false;
+        }
+        printf("[IGL-bridge] resolve_from_object(%s): obj@0x%08x -> vtbl@0x%08x "
+               "VALIDADA (%d/%d slots-código)\n",
+               is_igl ? "IGL" : "IEGL", obj_va, vtbl, good, slots);
+        bind_vtable(uc, vtbl, slots, is_igl);
+        if (is_igl) igl_vtable_va_ = vtbl; else iegl_vtable_va_ = vtbl;
+        return true;
+    }
+
+    u32 igl_vtable_va() const { return igl_vtable_va_; }
+    u32 iegl_vtable_va() const { return iegl_vtable_va_; }
 
     // Habilita o gate: só despacha GL depois que o guest chega a user-space.
     void set_guest_running(bool on) { guest_running_ = on; }
@@ -78,6 +147,9 @@ private:
     struct Target { bool is_igl; int slot; };
     IglHook& hook_;
     std::unordered_map<u32, Target> fn_map_;
+    std::vector<std::pair<u32,u32>> code_ranges_; // segmentos executáveis do firmware
+    u32 igl_vtable_va_ = 0;
+    u32 iegl_vtable_va_ = 0;
     bool guest_running_ = false;
 
     void bind_vtable(uc_engine* uc, u32 vtable_va, int slots, bool is_igl) {

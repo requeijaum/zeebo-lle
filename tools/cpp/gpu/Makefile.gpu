@@ -31,3 +31,12 @@ gpu_display_integration: gpu_display_integration.cpp igl_hook.cpp soft_rasterize
 # Transform fixed-function (mvp+viewport) — GPU_TODO §15 ERRO-3 — prova por PIXEL.
 igl_transform_smoke: igl_transform_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
 	$(CXX) $(CXXFLAGS) igl_transform_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o igl_transform_smoke
+
+# IglGuestBridge: prova a resolução DETERMINÍSTICA de gpIGL/gpIEGL (obj[0]->vtable
+# + validação estrutural contra os segmentos executáveis reais do APPS.bin) sob
+# uma instância Unicorn de verdade. Não há VA hardcoded (firmware é stripped).
+igl_guest_bridge_test: igl_guest_bridge_test.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igl_guest_bridge.h igl_hook.h
+	$(CXX) $(CXXFLAGS) igl_guest_bridge_test.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o igl_guest_bridge_test $(shell pkg-config --cflags --libs unicorn)
+
+test-bridge: igl_guest_bridge_test
+	./igl_guest_bridge_test
