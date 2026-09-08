@@ -12,11 +12,12 @@
 //
 // usage: zeebo_lle_txn_probe <file.bin> [num_instructions] [base_addr_hex]
 //
-// Output (one line per transaction, then a FINAL line):
+// Output (one INIT line, one line per transaction, then a FINAL line):
+//   INIT r0=.. .. r12=.. sp=.. lr=.. pc=.. cpsr=..   (full pinned initial state)
 //   T%04d P w=%d @0x%08x =0x%08x thumb=%d
-//   T%04d L w=%d @0x%08x =0x%08x
+//   T%04d L w=%d @0x%08x =0x%08x   (real post-read value via READ_AFTER)
 //   T%04d S w=%d @0x%08x =0x%08x
-//   FINAL r0=.. r1=.. r2=.. r3=.. r4=.. r5=.. r6=.. r7=.. sp=.. lr=.. pc=.. cpsr=..
+//   FINAL r0=.. .. r7=.. sp=.. lr=.. pc=.. cpsr=..   (full CPSR incl. T/mode)
 
 #include <cstdio>
 #include <cstdlib>
@@ -44,13 +45,36 @@ static void hook_code(uc_engine* uc, uint64_t address, uint32_t size, void* user
                 c->seq++, size, (uint32_t)address, instr, thumb);
 }
 
-static void hook_mem(uc_engine* uc, uc_mem_type type, uint64_t address,
-                     int size, int64_t value, void* user) {
-    (void)uc;
+static uint32_t mask_by_width(uint32_t v, int size) {
+    if (size == 1) return v & 0xFFu;
+    if (size == 2) return v & 0xFFFFu;
+    return v;
+}
+
+// Store hook: the value argument is valid at write time.
+static void hook_store(uc_engine* uc, uc_mem_type type, uint64_t address,
+                       int size, int64_t value, void* user) {
+    (void)uc; (void)type;
     Ctx* c = static_cast<Ctx*>(user);
-    const char* k = (type == UC_MEM_WRITE) ? "S" : "L";
-    std::printf("T%04d %s w=%d @0x%08x =0x%08x\n",
-                c->seq++, k, size, (uint32_t)address, (uint32_t)value);
+    std::printf("T%04d S w=%d @0x%08x =0x%08x\n",
+                c->seq++, size, (uint32_t)address,
+                mask_by_width((uint32_t)value, size));
+}
+
+// Load hook (UC_HOOK_MEM_READ_AFTER): fires AFTER the access completes, so the
+// bytes are actually present and can be read back off the bus -- including
+// literal-pool reads. The `value` callback argument on plain UC_HOOK_MEM_READ
+// is unpopulated (fake zero) at read time; READ_AFTER lets us report the real
+// transacted value. We never fabricate values from expected results.
+static void hook_load_after(uc_engine* uc, uc_mem_type type, uint64_t address,
+                            int size, int64_t value, void* user) {
+    (void)type; (void)value;
+    Ctx* c = static_cast<Ctx*>(user);
+    uint32_t v = 0;
+    int n = (size >= 1 && size <= 4) ? size : 4;
+    uc_mem_read(uc, address, &v, n);
+    std::printf("T%04d L w=%d @0x%08x =0x%08x\n",
+                c->seq++, size, (uint32_t)address, mask_by_width(v, size));
 }
 
 int main(int argc, char** argv) {
@@ -82,13 +106,32 @@ int main(int argc, char** argv) {
     uc_reg_write(uc, UC_ARM_REG_LR, &zero);
     for (int r = UC_ARM_REG_R0; r <= UC_ARM_REG_R12; ++r)
         uc_reg_write(uc, r, &zero);
-    uc_reg_write(uc, UC_ARM_REG_CPSR, &zero);
+    // Pin the full initial CPSR explicitly (SVC mode, ARM state, IRQ/FIQ masked)
+    // instead of relying on hidden Unicorn defaults, so the golden owns it.
+    uint32_t init_cpsr = 0x00000013u; // M=0b10011 SVC, T=0 ARM, no flags set
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &init_cpsr);
+
+    // Emit a deterministic INIT line pinning the FULL initial architectural
+    // state (all GPRs, SP/LR/PC and full CPSR incl. T/mode) before execution.
+    {
+        uint32_t ir[13], isp, ilr, ipc, icpsr;
+        for (int i = 0; i < 13; ++i) uc_reg_read(uc, UC_ARM_REG_R0 + i, &ir[i]);
+        uc_reg_read(uc, UC_ARM_REG_SP, &isp);
+        uc_reg_read(uc, UC_ARM_REG_LR, &ilr);
+        uc_reg_read(uc, UC_ARM_REG_PC, &ipc);
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &icpsr);
+        std::printf("INIT r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
+                    "r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x "
+                    "sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
+                    ir[0], ir[1], ir[2], ir[3], ir[4], ir[5], ir[6], ir[7],
+                    ir[8], ir[9], ir[10], ir[11], ir[12], isp, ilr, ipc, icpsr);
+    }
 
     Ctx ctx{uc, 0, count};
     uc_hook h_code, h_read, h_write;
     uc_hook_add(uc, &h_code, UC_HOOK_CODE, (void*)hook_code, &ctx, 1, 0);
-    uc_hook_add(uc, &h_read, UC_HOOK_MEM_READ, (void*)hook_mem, &ctx, 1, 0);
-    uc_hook_add(uc, &h_write, UC_HOOK_MEM_WRITE, (void*)hook_mem, &ctx, 1, 0);
+    uc_hook_add(uc, &h_read, UC_HOOK_MEM_READ_AFTER, (void*)hook_load_after, &ctx, 1, 0);
+    uc_hook_add(uc, &h_write, UC_HOOK_MEM_WRITE, (void*)hook_store, &ctx, 1, 0);
 
     // Step instruction-by-instruction so we honor the instruction budget and
     // stop cleanly once parked in the spin loop.
@@ -115,7 +158,7 @@ int main(int argc, char** argv) {
     std::printf("FINAL r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x "
                 "sp=%08x lr=%08x pc=%08x cpsr=%08x\n",
                 r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-                rsp, lr, fpc, cpsr & ~0x1fu);
+                rsp, lr, fpc, cpsr);
 
     uc_close(uc);
     return 0;
