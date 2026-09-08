@@ -211,9 +211,26 @@ int main(int argc, char** argv){
     uint32_t ret_r0 = rd_reg(uc, UC_ARM_REG_R0);
     uint32_t end_pc = rd_reg(uc, UC_ARM_REG_PC);
 
-    // Snapshot do framebuffer DEPOIS.
+    // ── Snapshot do framebuffer DEPOIS. ───────────────────────────────────────
     uint64_t sum_after=0; for(int i=0;i<kFbWidth*kFbHeight;i++) sum_after+=fb[i];
     u16 px = fb[(kFbHeight/2)*kFbWidth + kFbWidth/2];
+
+    // Salva frame resultante em PPM e PNG para inspeção visual
+    {
+        FILE* f = fopen("/tmp/zeebo_zwheel_rendered.ppm", "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", kFbWidth, kFbHeight);
+            for (int i = 0; i < kFbWidth * kFbHeight; i++) {
+                u16 p = fb ? fb[i] : 0;
+                u8 r = ((p >> 11) & 0x1f) * 255 / 31;
+                u8 g = ((p >> 5) & 0x3f) * 255 / 63;
+                u8 b = (p & 0x1f) * 255 / 31;
+                fputc(r, f); fputc(g, f); fputc(b, f);
+            }
+            fclose(f);
+            printf("[Z-Wheel] Frame renderizado salvo em: /tmp/zeebo_zwheel_rendered.ppm\n");
+        }
+    }
 
     printf("\n── Resultado ──────────────────────────────────────────────\n");
     printf("uc_emu_start: %s\n", uc_strerror(re));

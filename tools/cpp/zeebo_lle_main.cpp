@@ -506,6 +506,23 @@ public:
 
         if (fb && sink_) sink_->update_frame(fb);
 
+        // Salva frame em PPM para inspeção direta de imagem
+        {
+            FILE* f = fopen("/tmp/zeebo_zwheel_frame.ppm", "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", FB_WIDTH, FB_HEIGHT);
+                for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+                    u16 p = fb ? fb[i] : 0;
+                    u8 r = ((p >> 11) & 0x1f) * 255 / 31;
+                    u8 g = ((p >> 5) & 0x3f) * 255 / 63;
+                    u8 b = (p & 0x1f) * 255 / 31;
+                    fputc(r, f); fputc(g, f); fputc(b, f);
+                }
+                fclose(f);
+                printf("[Z-Wheel] Frame dump salvo em: /tmp/zeebo_zwheel_frame.ppm\n");
+            }
+        }
+
         if (headless) {
             printf("[Z-Wheel] Modo headless: frame único apresentado ao sink (sem janela).\n");
             return sum;
