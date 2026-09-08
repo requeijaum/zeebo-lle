@@ -55,16 +55,14 @@ MR_COUNT = 8
 
 
 def is_error_response(resp):
-    """A response is an error if it is not a dict, lacks ok, or ok is falsey
-    with an error field. Used to reject malformed/timeout without fabricating
-    progress."""
+    """Contract: a response is valid ONLY if it is a dict with an explicit
+    ``ok`` key equal to True. Any other value — non-dict, empty dict, arbitrary
+    dict without ok, or ok set to a falsey/truthy-non-True value — is an error.
+    Used to reject malformed/timeout without fabricating progress.
+    """
     if not isinstance(resp, dict):
         return True
-    if resp.get("ok") is False:
-        return True
-    if "error" in resp and resp.get("ok") is not True:
-        return True
-    return False
+    return resp.get("ok") is not True
 
 
 def classify_terminal(hit_names, target_order=None):
@@ -168,31 +166,56 @@ class MempoolProbe:
 
     # ── evidence capture (read-only) ───────────────────────────────────────
     def _read_regs(self, core=0):
+        """Read a fixed register set. Any response that is not a plain integer
+        (e.g. an error dict) is recorded as an error and stored as None — never
+        stored as a genuine register value."""
         regs = {}
         for n in (0, 4, 7, 13, 14, 15):
-            regs[f"r{n}"] = self.client.reg(core=core, n=n)
+            try:
+                val = self.client.reg(core=core, n=n)
+            except Exception as exc:
+                self.errors.append(f"reg r{n}: {exc}")
+                regs[f"r{n}"] = None
+                continue
+            if isinstance(val, bool) or not isinstance(val, int):
+                self.errors.append(f"reg r{n}: invalid response {val!r}")
+                regs[f"r{n}"] = None
+            else:
+                regs[f"r{n}"] = val & 0xffffffff
         return regs
 
     def _read_utcb_mrs(self, core=0):
         """Capture UTCB MR0..MR7 and the L4_MapControl phys_desc/fpage pair as
-        raw bytes + decoded words. Purely read-only via read_mem."""
+        raw bytes + decoded words. Purely read-only via read_mem.
+
+        A short/invalid/zero UTCB-pointer read does NOT silently fall back to a
+        default UTCB: doing so would report arbitrary bytes as genuine MR
+        evidence. Instead an explicit error is recorded and MR evidence is left
+        null."""
         out = {"utcb": None, "mrs": None, "mr_bytes": None,
                "phys_desc": None, "fpage": None}
         try:
             ptr_raw = self.client.read_mem(core=core, addr=UTCB_PTR_ADDR, length=4)
-            utcb = struct.unpack("<I", ptr_raw)[0] if len(ptr_raw) == 4 else DEFAULT_UTCB
+            if not isinstance(ptr_raw, (bytes, bytearray)) or len(ptr_raw) != 4:
+                self.errors.append(
+                    f"utcb_ptr: short/invalid read ({ptr_raw!r}); no fallback")
+                return out
+            utcb = struct.unpack("<I", ptr_raw)[0]
             if utcb == 0:
-                utcb = DEFAULT_UTCB
+                self.errors.append("utcb_ptr: read 0 (unmapped); no fallback")
+                return out
             out["utcb"] = utcb
             mr_bytes = self.client.read_mem(core=core, addr=utcb + MR_BASE_OFF,
                                             length=MR_COUNT * 4)
-            if len(mr_bytes) == MR_COUNT * 4:
-                words = struct.unpack("<%dI" % MR_COUNT, mr_bytes)
-                out["mrs"] = list(words)
-                out["mr_bytes"] = mr_bytes.hex()
-                # L4_MapControl ABI: MR[0]=phys_desc (+0x40), MR[1]=fpage (+0x44)
-                out["phys_desc"] = words[0]
-                out["fpage"] = words[1]
+            if not isinstance(mr_bytes, (bytes, bytearray)) or len(mr_bytes) != MR_COUNT * 4:
+                self.errors.append("utcb_mrs: short/invalid read; no fabricated MRs")
+                return out
+            words = struct.unpack("<%dI" % MR_COUNT, mr_bytes)
+            out["mrs"] = list(words)
+            out["mr_bytes"] = bytes(mr_bytes).hex()
+            # L4_MapControl ABI: MR[0]=phys_desc (+0x40), MR[1]=fpage (+0x44)
+            out["phys_desc"] = words[0]
+            out["fpage"] = words[1]
         except Exception as exc:  # read failure must not fabricate evidence
             self.errors.append(f"utcb_read: {exc}")
         return out
@@ -223,28 +246,41 @@ class MempoolProbe:
     def run(self, core=0):
         """Arm breakpoints on every target, resume, and record each hit in
         order with register/UTCB evidence until the terminal loop is reached, a
-        timeout elapses, or max_hits is exceeded. Returns the full report."""
-        for _name, addr in self.targets:
-            self.client.bp(addr, core=core)
+        timeout elapses, or max_hits RAW breakpoint hits is exceeded. Every
+        armed breakpoint is cleared in a finally block on normal, timeout, or
+        error exit. Returns the full report."""
+        armed = []
+        raw_hits = 0
+        try:
+            for _name, addr in self.targets:
+                self.client.bp(addr, core=core)
+                armed.append(addr)
 
-        deadline = time.time() + self.timeout_s
-        loop_addr = self.targets[-1][1]
-        while time.time() < deadline and len(self.log.records) < self.max_hits:
-            self.client.cont()
-            paused_pc = self._wait_paused(core=core, deadline=deadline)
-            if paused_pc is None:
-                self.errors.append("timeout_waiting_pause")
-                break
-            name = self.addr_to_name.get(paused_pc)
-            if name is None:
-                # Paused somewhere unexpected (external break); record and stop.
-                self.errors.append(f"unexpected_pause@0x{paused_pc:08x}")
-                break
-            self.log.add(name, paused_pc, self.capture_record(core=core))
-            if paused_pc == loop_addr:
-                break
-            # step off the breakpoint before continuing
-            self.client.step(core=core, ticks=1)
+            deadline = time.time() + self.timeout_s
+            loop_addr = self.targets[-1][1]
+            while time.time() < deadline and raw_hits < self.max_hits:
+                self.client.cont()
+                paused_pc = self._wait_paused(core=core, deadline=deadline)
+                if paused_pc is None:
+                    self.errors.append("timeout_waiting_pause")
+                    break
+                name = self.addr_to_name.get(paused_pc)
+                if name is None:
+                    # Paused somewhere unexpected (external break); record & stop.
+                    self.errors.append(f"unexpected_pause@0x{paused_pc:08x}")
+                    break
+                raw_hits += 1
+                self.log.add(name, paused_pc, self.capture_record(core=core))
+                if paused_pc == loop_addr:
+                    break
+                # step off the breakpoint before continuing
+                self.client.step(core=core, ticks=1)
+        finally:
+            for addr in armed:
+                try:
+                    self.client.bpclear(addr, core=core)
+                except Exception as exc:
+                    self.errors.append(f"bpclear 0x{addr:08x}: {exc}")
         return self.build_report()
 
     def _wait_paused(self, core=0, deadline=None):
@@ -294,12 +330,25 @@ def _extract_probe_names(listing):
     return []
 
 
+def pick_free_port():
+    """Return an available TCP port on localhost by binding to port 0 and
+    letting the OS choose. Avoids collisions when QW12_PORT is unset."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def _live_main():
     import subprocess
     from zeebo_debug_scripting import ZeeboDebugClient
     from zeebo_trace_dedup import TraceDeduplicator
 
-    port = int(os.environ.get("QW12_PORT", "48993"))
+    env_port = os.environ.get("QW12_PORT")
+    port = int(env_port) if env_port else pick_free_port()
     proc = subprocess.Popen(
         [os.path.join(BASE_DIR, "zeebo_lle_main"), "--headless",
          f"--control-port={port}"],
