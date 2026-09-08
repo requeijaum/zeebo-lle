@@ -273,6 +273,17 @@ inline u32 read_mr(uc_engine* uc, u32 utcb_base, u32 index) {
     return v;
 }
 
+// Grava MR[index] cru no UTCB do thread corrente no espaço do Unicorn.
+// Contrapartida de read_mr(): os MRs de RETORNO da syscall vivem nos mesmos
+// offsets (utcb_base + UTCB_MR_BYTE_OFFSET + index*4). O guest do Iguana
+// (mempool_init @0xb000d864..) relê MR[0] (offset 0x40) e MR[1] (offset 0x44)
+// logo após o retorno de L4_MapControl para extrair o size_log2 do fpage
+// processado e avançar o ponteiro do pool; sem escrever de volta esses MRs,
+// r4<<0 não avança e o laço trava.
+inline void write_mr(uc_engine* uc, u32 utcb_base, u32 index, u32 val) {
+    uc_mem_write(uc, utcb_base + UTCB_MR_BYTE_OFFSET + index * 4u, &val, 4);
+}
+
 // Mapeia (ou re-protege) uma fpage no Unicorn. Alinha para 4KB, que é a
 // granularidade mínima do uc_mem_map. Idempotente: se a região já existe,
 // apenas ajusta a proteção via uc_mem_protect.
@@ -392,6 +403,18 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
         u32 mr_fpage = read_mr(uc, utcb_base, i * 2u + 1u);
         MapItem it = decode_item(mr_phys, mr_fpage);
         if (out_items) out_items->push_back(it);
+
+        // --- Registradores de RETORNO (MRs) ----------------------------------
+        // Em L4e/OKL4 2.1.1, MapControl devolve nos MRs a descrição das fpages
+        // efetivamente processadas: MR[i*2] = phys_desc resultante, MR[i*2+1] =
+        // fpage resultante. O mempool_init do Iguana (@0xb000d864..0xb000d89c)
+        // relê MR[1] (offset 0x44) para extrair size_log2 do fpage e avançar o
+        // ponteiro do pool (lsl r4,r4,r3), e MR[0] (offset 0x40) para compor o
+        // endereço base. Sem escrever de volta, o guest lê lixo/zero e o laço
+        // de mempool_init trava em 0xb000d860. Aqui ecoamos os descritores
+        // processados (shim neutro: o que foi pedido é o que foi mapeado).
+        write_mr(uc, utcb_base, i * 2u,      mr_phys);
+        write_mr(uc, utcb_base, i * 2u + 1u, mr_fpage);
 
         if (ctrl.is_query()) {
             // Query: apenas reporta, sem alterar o mapeamento.
