@@ -40,3 +40,5 @@ tools/cpp/test_l4_mmu
 .hermes/
 __pycache__/
 *.pyc
+tools/cpp/testkit/build/
+tools/cpp/zeebo_lle_txn_probe
