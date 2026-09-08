@@ -236,6 +236,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Criados `tools/cpp/zeebo_input_harness.cpp`, `zeebo_input_stub.s` e alvo `test-input` no `Makefile`.
   - Provado por execução real: 32 eventos de tecla despachados e 32 consumidos com `r0 = 1`. Suíte completa de 23/23 testes verdes.
 
+- [ ] **Passo 2: Parser C++ EFS2APPS (`zeebo_efs2_fs.h`) e Extração de Extents (Passo 2 / Fase 13 - Em Andamento)**:
+  - Mapeada a arquitetura interna do EFS2 no Qualcomm MSM7201A: o sistema utiliza blocos indiretos de ponteiros `u32` para clusters de 512 bytes (`offset = 0x3220000 + cluster * 512`).
+  - Identificada tabela de ponteiros em `0x3b1d400` que aponta para clusters de dados reais (ex: arquivos de script/configuração em `0x3fcb200` e dados de imagem/recursos).
+  - Necessário consolidar o leitor de nós/blocos indiretos em `tools/cpp/zeebo_efs2_fs.h` e validar o teste `test-efs2-fs`.
+
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
