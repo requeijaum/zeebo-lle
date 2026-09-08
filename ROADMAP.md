@@ -229,10 +229,12 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Implementado `Fpage::is_whole_space()` e tratamento limpo no dispatcher L4e em `tools/cpp/zeebo_l4_mmu.h`.
   - Cobertura em `tools/cpp/test_l4_mmu.cpp` com caso 8 validado (`ALL TESTS PASSED`). Core 0 agora avança sem crash na inicialização de pools de memória do Iguana.
 
-- [ ] **Passo 5: Mapeamento de Teclas Z-Pad/SDL2 e Despacho Contínuo de EVT_KEY_* (Passo 5 / Fase 13 - Em Finalização)**:
-  - Implementado `tools/cpp/zeebo_input_harness.cpp` com validação de `EVT_KEY_PRESS` (0x0100) e `EVT_KEY_RELEASE` (0x0101) para os opcodes AVK do Zeebo (AVK_UP, DOWN, LEFT, RIGHT, SELECT, CLR e numéricos).
-  - Alvo `test-input` criado no `Makefile` com teste determinístico passando (retorno `r0=1` consumido).
-  - Conexão do manipulador ativo no loop contínuo SDL2 de `zeebo_lle_main.cpp`.
+- [x] **Mapeamento de Teclas Z-Pad/SDL2 e Despacho Contínuo de EVT_KEY_* (Passo 5 / Fase 13 - Concluído `46e68a5`)**:
+  - Implementado em `tools/cpp/zeebo_brew_loader.h` o mapa de constantes de evento BREW (`EVT_KEY_PRESS = 0x0100`, `EVT_KEY_RELEASE = 0x0101`, `EVT_KEY = 0x0102`) e códigos AVK Zeebo (`AVK_UP = 0xFF52`, `AVK_DOWN = 0xFF54`, `AVK_LEFT = 0xFF51`, `AVK_RIGHT = 0xFF53`, `AVK_SELECT = 0xFF0D`, `AVK_CLR = 0xFF08`, etc.).
+  - Implementado `BrewLoader::dispatch_event` executando o `HandleEvent` Thumb do applet sob Unicorn com captura honesta de `r0`.
+  - Integrado no loop interativo de `tools/cpp/zeebo_lle_main.cpp`: encaminhamento contínuo de cada evento de teclado/joystick SDL2 para o manipulador do applet.
+  - Criados `tools/cpp/zeebo_input_harness.cpp`, `zeebo_input_stub.s` e alvo `test-input` no `Makefile`.
+  - Provado por execução real: 32 eventos de tecla despachados e 32 consumidos com `r0 = 1`. Suíte completa de 23/23 testes verdes.
 
 ---
 
@@ -244,12 +246,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - Implementar leitor C++ que correlaciona os dirents da Z-Wheel (`274755`, `tectoy.cfg`, `.qxt`, `.qxm`, `.qxa`) com a cadeia de extents no spare.
    - Adicionar alvo `test-efs2-fs` ao Makefile comprovando a extração dos arquivos com checksum real.
 
-2. **Passo 5 (Execução Contínua de Jogos Externos e Despacho de Applet via `AEECShell`)**:
-   - Conectar o manipulador do `BrewLoader` carregado via `--applet` ou `run <app.mod>` ao laço de eventos contínuo do SDL2.
-   - Fornecer mapeamento das teclas do Z-Pad (`INT_KEYSENSE #28`) para os eventos BREW (`EVT_KEY_PRESS`, `EVT_KEY_RELEASE`) permitindo que applets interativos executem draws contínuos além do primeiro frame de clear.
-   - Validar a telemetria com contadores contínuos de FPS e MIPS durante a execução interativa.
-
-3. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
+2. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
    - Com o `L4_MapControl` tratado (sem crash de 4GB), diagnosticar o wait do produtor L4e em `0xb000d4a8` (`l4e_min_pagesize`/mailbox).
    - Conectar a troca de IPC entre Iguana e o servidor de VFS nativo para alcançar o ponto de carga do executável do sistema.
 
