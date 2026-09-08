@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include "zeebo_efs2_fs.h"
 
 using namespace efs2;
@@ -89,6 +91,55 @@ int main(int argc, char** argv) {
               "chained payload == 65536 bytes (128 x 512B clusters)");
         check(Efs2Filesystem::checksum32(payload) == 0xd9339103u,
               "chained 64KiB payload FNV-1a checksum == 0xd9339103");
+    }
+
+    // --- Expanded applet catalog: additional proven indirect blocks ---------
+    // Each entry is byte-verified: exact payload length + FNV-1a checksum, plus
+    // an embedded ASCII signature confirming the applet/asset identity. These
+    // are the same anchors registered in zeebo_lle_main.cpp (efs2_extract).
+    auto has_sig = [](const std::vector<u8>& v, const char* s) -> bool {
+        std::string n(s);
+        return std::search(v.begin(), v.end(), n.begin(), n.end()) != v.end();
+    };
+
+    // 274755 — the Z-Wheel / ZeeboApp App ID (AEECLSID 0x01070798). The indirect
+    // block @0x3a92000 chains a 64 KiB payload carrying the literal "274755".
+    {
+        auto ptrs = fs.read_indirect_block_at(0x3a92000, /*stop_at_terminator=*/false);
+        check(ptrs.size() == 128, "Z-Wheel 274755 indirect block @0x3a92000 holds 128 ptrs");
+        check(!ptrs.empty() && ptrs[0] == 0x1dcau,
+              "274755 indirect block first cluster ptr == 0x1dca");
+        std::vector<u8> payload = fs.read_data_from_indirect(0x3a92000);
+        check(payload.size() == 65536, "274755 chained payload == 65536 bytes");
+        check(Efs2Filesystem::checksum32(payload) == 0x544a6f30u,
+              "274755 64KiB payload FNV-1a checksum == 0x544a6f30");
+        check(has_sig(payload, "274755"),
+              "274755 payload carries embedded App-ID signature \"274755\"");
+    }
+
+    // tectoy.mod — TecToy/Claro applet config (ZeeboApp branding). The indirect
+    // block @0x6026200 chains a 64 KiB payload carrying "tectoy.claro.com.br".
+    {
+        auto ptrs = fs.read_indirect_block_at(0x6026200, /*stop_at_terminator=*/false);
+        check(ptrs.size() == 128, "tectoy.mod indirect block @0x6026200 holds 128 ptrs");
+        check(!ptrs.empty() && ptrs[0] == 0x1243u,
+              "tectoy.mod indirect block first cluster ptr == 0x1243");
+        std::vector<u8> payload = fs.read_data_from_indirect(0x6026200);
+        check(payload.size() == 65536, "tectoy.mod chained payload == 65536 bytes");
+        check(Efs2Filesystem::checksum32(payload) == 0xf7c3c740u,
+              "tectoy.mod 64KiB payload FNV-1a checksum == 0xf7c3c740");
+        check(has_sig(payload, "tectoy.claro.com.br"),
+              "tectoy.mod payload carries embedded \"tectoy.claro.com.br\" signature");
+    }
+
+    // Dirent catalog: tectoy.mod is filiated under inode 0x1fae8 with inode 0x7ff13.
+    {
+        const Dirent* tc = fs.find_by_name("tectoy.mod");
+        check(tc != nullptr, "tectoy.mod dirent located by name");
+        if (tc) {
+            check(tc->inode == 0x7ff13u, "tectoy.mod inode == 0x7ff13");
+            check(tc->parent_inode() == 0x1fae8u, "tectoy.mod parent_inode == 0x1fae8");
+        }
     }
 
     printf("\npass=%d fail=%d\n", g_pass, g_fail);

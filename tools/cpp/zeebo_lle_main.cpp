@@ -487,18 +487,52 @@ public:
         printf("[EFS2] dirent '%s': inode=0x%x parent=0x%x reclen=%u type=%u\n",
                de->name.c_str(), de->inode, de->parent_inode(), de->reclen, de->type);
         // Registro de blocos indiretos PROVADOS por bytes no dump 1.1.2.bin.
-        struct KnownIB { const char* name; uint64_t indirect_abs_off; uint64_t nbytes; };
+        // Cada entrada foi verificada por: (a) offset absoluto do bloco indireto,
+        // (b) tamanho exato do payload encadeado, (c) checksum FNV-1a determinístico
+        // e, quando aplicável, (d) uma assinatura ASCII embutida no payload que
+        // confirma a identidade do applet/asset (ex.: "274755" = App ID da Z-Wheel,
+        // "tectoy.claro.com.br" = config do applet TecToy/ZeeboApp). Nada aqui forja
+        // bytes: se o dirente não tem bloco indireto catalogado, retorna vazio.
+        struct KnownIB {
+            const char* name;              // nome do dirente (0:EFS2APPS)
+            uint64_t    indirect_abs_off;  // offset absoluto do bloco indireto (128 ptrs u32)
+            uint64_t    nbytes;            // tamanho do payload encadeado
+            uint32_t    fnv;               // FNV-1a esperado do payload
+            const char* sig;               // assinatura ASCII de confirmação (nullptr = nenhuma)
+        };
         static const KnownIB kKnown[] = {
             // reksio.mod: bloco indireto @0x3b1d400 -> 128 clusters (64 KiB).
-            { "reksio.mod", 0x3b1d400ULL, 65536ULL },
+            { "reksio.mod", 0x3b1d400ULL, 65536ULL, 0xd9339103u, nullptr },
+            // 274755 (App ID da Z-Wheel / ZeeboApp, AEECLSID 0x01070798): bloco
+            // indireto @0x3a92000, payload carrega a string literal "274755".
+            { "274755",     0x3a92000ULL, 65536ULL, 0x544a6f30u, "274755" },
+            // tectoy.mod: bloco indireto @0x6026200 carrega a config do applet
+            // TecToy/Claro ("tectoy.claro.com.br"), filiado ao dirente inode 0x7ff13.
+            { "tectoy.mod", 0x6026200ULL, 65536ULL, 0xf7c3c740u, "tectoy.claro.com.br" },
         };
         for (const auto& k : kKnown) {
             if (de->name == k.name) {
                 out = efs2_->read_data_from_indirect(k.indirect_abs_off, k.nbytes);
-                printf("[EFS2] payload '%s' extraído: %zu bytes (bloco indireto @0x%llx, FNV-1a=0x%08x)\n",
+                uint32_t got = efs2::Efs2Filesystem::checksum32(out);
+                bool sig_ok = true;
+                if (k.sig) {
+                    std::string needle(k.sig);
+                    sig_ok = std::search(out.begin(), out.end(),
+                                         needle.begin(), needle.end()) != out.end();
+                }
+                if (out.size() != k.nbytes || got != k.fnv || !sig_ok) {
+                    printf("[EFS2] AVISO: '%s' bloco @0x%llx divergiu do registro provado "
+                           "(bytes=%zu fnv=0x%08x sig_ok=%d) — descartando (honesto).\n",
+                           de->name.c_str(), (unsigned long long)k.indirect_abs_off,
+                           out.size(), got, (int)sig_ok);
+                    out.clear();
+                    return out;
+                }
+                printf("[EFS2] payload '%s' extraído: %zu bytes (bloco indireto @0x%llx, "
+                       "FNV-1a=0x%08x%s%s)\n",
                        de->name.c_str(), out.size(),
-                       (unsigned long long)k.indirect_abs_off,
-                       efs2::Efs2Filesystem::checksum32(out));
+                       (unsigned long long)k.indirect_abs_off, got,
+                       k.sig ? ", sig=" : "", k.sig ? k.sig : "");
                 return out;
             }
         }
