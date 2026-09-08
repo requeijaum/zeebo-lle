@@ -374,15 +374,21 @@ public:
     // reads live subsystem state and returns a JSON fragment; none mutate the
     // guest. Exposed to agents via the `probe.list` / `probe.get` commands.
     void register_probes() {
-        probes_.Register("mmu", "APPS L4 MMU / min page-size state", [this] {
-            u32 min_page = 0;
-            uc_mem_read(core0_.uc, 0xb0041284, &min_page, 4); // l4e_min_pagesize result
+        probes_.Register("mmu", "APPS L4 MMU / KIP PageInfo state", [this] {
+            // Only expose fields backed by live guest state. KIP PageInfo lives
+            // at KIP_BASE+0xc8 and is genuinely written during KIP setup; the
+            // guest CTZ of that word yields log2(min page-size). No probe reads
+            // unbacked scratch addresses.
             u32 page_info = 0;
             uc_mem_read(core0_.uc, KIP_BASE + 0xc8, &page_info, 4);
+            // Derive min page-size log2 from the live PageInfo word (CTZ),
+            // mirroring the guest l4e_min_pagesize() bit-scan. 0 => unknown.
+            unsigned min_page_log2 =
+                page_info ? (unsigned)__builtin_ctz(page_info) : 0u;
             char b[160];
             snprintf(b, sizeof(b),
                      "{\"kip_base\":%u,\"page_info\":%u,\"min_page_log2\":%u}",
-                     (unsigned)KIP_BASE, page_info, min_page);
+                     (unsigned)KIP_BASE, page_info, min_page_log2);
             return std::string(b);
         });
         probes_.Register("bootinfo", "Iguana OKL4 BootInfo header @0xb0d00000", [this] {
@@ -410,11 +416,11 @@ public:
                      draws, dirty ? "true" : "false");
             return std::string(b);
         });
-        probes_.Register("mmio.unknown", "Recent unknown-MMIO accesses (structured)", [this] {
-            std::string js = mmio_unknown_.LatestJson();
+        probes_.Register("unmapped.unknown", "Recent unknown unmapped-memory accesses (structured; not proven MMIO)", [this] {
+            std::string js = unmapped_unknown_.LatestJson();
             char pre[64];
             snprintf(pre, sizeof(pre), "{\"seen\":%llu,\"events\":",
-                     (unsigned long long)mmio_unknown_.CountSeen());
+                     (unsigned long long)unmapped_unknown_.CountSeen());
             // Reuse the log's event array, wrap with total-seen counter.
             const std::string marker = "\"events\":";
             size_t p = js.find(marker);
@@ -2408,11 +2414,13 @@ private:
         }
         // Map dynamically to continue discovery
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
-        // QW8: structured record of a genuinely unknown MMIO access on Core 0.
+        // QW8: structured record of an unknown UNMAPPED access on Core 0.
+        // NOTE: an unmapped hook proves nothing about MMIO — it fires for any
+        // access to an unmapped page (stray pointer, undiscovered device, etc.).
         {
             ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
-            sys->mmio_unknown_.Record(zeebo_lle::MmioEvent{
+            sys->unmapped_unknown_.Record(zeebo_lle::UnmappedAccessEvent{
                 /*core=*/0, /*pc=*/pc, /*addr=*/(unsigned long)addr,
                 /*width=*/(unsigned)size, /*is_write=*/is_wr,
                 /*has_value=*/is_wr, /*value=*/(unsigned long long)value});
@@ -2423,13 +2431,14 @@ private:
     static bool c1_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         // Dynamically map unmapped page for Core 1 (e.g. MMIO / MSM peripheral discovery)
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
-        // QW8: structured record of a genuinely unknown MMIO access on Core 1.
+        // QW8: structured record of an unknown UNMAPPED access on Core 1.
+        // Same caveat: unmapped != proven MMIO; treat as discovery telemetry.
         {
             u32 pc = 0;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
             ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
-            sys->mmio_unknown_.Record(zeebo_lle::MmioEvent{
+            sys->unmapped_unknown_.Record(zeebo_lle::UnmappedAccessEvent{
                 /*core=*/1, /*pc=*/pc, /*addr=*/(unsigned long)addr,
                 /*width=*/(unsigned)size, /*is_write=*/is_wr,
                 /*has_value=*/is_wr, /*value=*/(unsigned long long)value});
@@ -2695,8 +2704,8 @@ private:
     std::unique_ptr<zeebo_lle::ControlServer> control_;
     // QW3: enumerable read-only diagnostic probes (probe.list / probe.get)
     zeebo_lle::ProbeRegistry probes_;
-    // QW8: bounded structured log of unknown-MMIO accesses (read-only diag)
-    zeebo_lle::MmioEventLog mmio_unknown_{128};
+    // QW8: bounded structured log of unknown UNMAPPED accesses (read-only diag)
+    zeebo_lle::UnmappedAccessLog unmapped_unknown_{128};
     bool paused_ = false;
     bool stepping_ = false;
     bool quit_requested_ = false;
