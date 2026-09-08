@@ -4,7 +4,7 @@ CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
 LIBS := -lunicorn -lcapstone
 CPP_HEADERS := $(wildcard *.h gpu/*.h qdsp5/*.h)
 
-all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink
+all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink zeebo_bootinfo_harness
 
 # Depend on every directly included subsystem header. The previous short list
 # left zeebo_lle_main stale after edits to MMU/control/audio/device headers.
@@ -40,16 +40,28 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	./test_l4_mmu_uc
 
 # QW1: harness isolado de BootInfo/fpage (host-only, sem Unicorn).
-# Exige a cópia de trabalho REAL da NAND (APPS). Se ausente, o harness FALHA
-# com exit não-zero — nunca faz SKIP silencioso (evita falso-verde no CI).
-# Prova (A) records/pools por bytes+mutação (firmware-derived) e rotula (B) a
-# geração de 96 fpages como hipótese explícita do mempool_init (NÃO derivada).
+#
+# A NAND real (nand/*.bin) é proprietária e gitignored, portanto NUNCA está
+# presente num clone limpo. Para preservar a semântica "sem falso-verde" sem
+# tornar o `check` agregado permanentemente vermelho, os alvos são SEPARADOS:
+#
+#   * zeebo_bootinfo_harness  — COMPILE-ONLY. Apenas prova que o harness
+#     compila. NÃO executa nada e NÃO afirma validação por bytes reais.
+#     Faz parte de `all` e `check` (build limpo, sem NAND).
+#
+#   * test-bootinfo-real      — GATE REAL. Exige a cópia de trabalho da NAND
+#     (BOOTINFO_APPS). Se ausente, o harness FALHA com exit não-zero — nunca
+#     SKIP-como-PASS. NÃO faz parte de `check`; rode-o explicitamente quando
+#     tiver os bytes reais. Prova (A) records/pools por bytes+mutação
+#     (firmware-derived) e rotula (B) as 96 fpages como hipótese explícita do
+#     mempool_init (NÃO derivada).
 BOOTINFO_APPS ?= ../../nand/1.1.2_APPS.bin
 zeebo_bootinfo_harness: zeebo_bootinfo_harness.cpp zeebo_bootinfo.h zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_bootinfo_harness.cpp
 
-# Alvo real: falha nonzero sem os bytes da NAND. Faz parte do `check`.
-test-bootinfo: zeebo_bootinfo_harness
+# Gate real por bytes da NAND. Exige BOOTINFO_APPS; falha nonzero se ausente.
+# Fora do `check` de propósito (a NAND é proprietária/gitignored).
+test-bootinfo-real: zeebo_bootinfo_harness
 	./zeebo_bootinfo_harness $(BOOTINFO_APPS)
 
 # GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
@@ -124,12 +136,19 @@ test-cli: zeebo_lle_main
 	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
 	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
 
+# NOTA: `check` inclui APENAS o build compile-only do harness de BootInfo
+# (zeebo_bootinfo_harness), que NÃO executa nem afirma validação por bytes
+# reais. O gate real que exige a NAND proprietária é `test-bootinfo-real` e
+# fica FORA do agregado de propósito, para que um clone limpo (sem NAND) rode
+# `check` verde sem jamais alegar validação real-byte que não ocorreu.
 check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc test-bootinfo test_audio_sink test_control_server test_save_state
+       test_l4_mmu test_l4_mmu_uc zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state
 	./test_audio_sink
 	./test_control_server
 	./test_save_state
+	@echo "[check] zeebo_bootinfo_harness compilou (compile-only; NAO valida bytes reais)."
+	@echo "[check] Para validacao real-byte da NAND rode: make test-bootinfo-real"
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
@@ -138,7 +157,7 @@ clean:
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
