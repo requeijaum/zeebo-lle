@@ -191,31 +191,39 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ### Fase 13: Bring-Up do Shell ZeeboApp / Z-Wheel e Integração EFS2APPS (Fase Atual)
 - [x] **Engenharia Reversa do Launcher ZeeboApp e Z-Wheel**:
-  - Ponto de entrada de eventos BREW do ZeeboApp localizado em `0x10532344` (Thumb): manipula `EVT_APP_START` (`0x10532394`), `EVT_APP_SUSPEND` (`0x1053235c`), `EVT_APP_START_BACKGROUND` (`0x10532360`).
-  - Despacho de interface `IShell` via chamadas de vtable do host (`0x10724104` e `0x105c2ef4`).
+  - Ponto de entrada de eventos BREW do ZeeboApp localizado em `0x10532344` (Thumb): decodifica eventos em relação à constante base `K = 0x1f92`.
+  - `EVT_APP_START = 0x1f96` (`K + 4`) desvia para `0x1053241e`, invocando o método da interface gráfica `[applet + 0x2c]->vtbl[0x28](1)` seguido da checagem de retorno BREW.
+  - Também identificados os ramos de `EVT_APP_SUSPEND` (`0x1053235c`) e `EVT_APP_START_BACKGROUND` (`0x10532360`).
+- [x] **Estrutura de Arquivos EFS2APPS Mapeada (76.731 Dirents)**:
+  - Formato binário comprovado contra o dump `nand/1.1.2.bin`: `0x69 [inode u32][reclen u8][type u8][parent_ref u32][pad 00][name (reclen-5)]`.
+  - Inode raiz `0x6064` indexa diretórios de primeiro nível (`"mod"`, `"mif"`, `".efs_private"`, `"err"`, etc.).
+  - Módulos de jogos agrupados por transação COW sob seus respectivos pais (ex: `reksio.mod` @`0x32606ef`, inode `0x265e4`, sob diretório pai `0x04abef64`).
+- [x] **Core 1 REX MMU Bring-Up (commit `d71d27d`)**:
+  - Diagnosticada a causa do congelamento de registradores em `0xf0017718`: instrução `mcr p15, c1, c0, 0` ativando `SCTLR.M=1` (MMU do ARM9).
+  - Em modo padrão `UC_TLB_CPU`, o Unicorn tentava consultar page tables não mapeadas, gerando 941 NOPs virtuais até cair nos zeros em `0xf00184cc`.
+  - Forçado `uc_ctl_tlb_mode(core1_.uc, UC_TLB_VIRTUAL)` (idêntico ao Core 0), mantendo a janela plana/espelhada e permitindo que o Core 1 execute normalmente além da barreira em `0xdf602d4c`.
 - [ ] **Integração de EFS2APPS no VFS Guest / IFILEMGR**:
-  - Expor as leituras de `0:EFS2APPS` resolvidas pelo `NandController`/`DMOVModel` para o subsistema IFILEMGR do ARM11, permitindo que a BREW leia os diretórios `fs:/mod/` e dirents de jogos.
+  - Implementar parser C++ das entradas `0x69` e expor aos despachos do subsistema `IFILEMGR` do ARM11, permitindo resolução de caminhos como `fs:/mod/reksio/reksio.mod`.
 - [ ] **Gatilho de Instanciação do ZeeboApp & Acoplamento IGL (Z-Wheel 3D)**:
-  - Interceptar a criação de applet (`AEEAppletNew` com `AEECLSID_ZEEBO_APP`) ou invocar `0x10532344` com `EVT_APP_START`.
-  - Conectar a vtable IGL (`resolve_from_object`) no instante da criação de instâncias 3D para renderizar o carrossel da Z-Wheel via `SoftRasterizer` -> MDDI -> SDL2 display sink.
-- [ ] **Core 1 REX Subsystem Task Loop / Idle Barrier**:
-  - Tratar o término da tabela de módulos de inicialização `0xf0019e78` para que o ARM9 estacione no laço de espera de eventos do REX (`rex_wait` / `0x16ef0b02`) sem saltar para zeros.
+  - Disparar `EVT_APP_START` (`0x1f96`) em `0x10532344`, fornecendo vtable gráfica conectada ao `IglGuestBridge` no offset `0x28` para capturar a emissão de comandos OpenGL ES 1.1 da Z-Wheel via `SoftRasterizer`.
+- [ ] **Core 1 REX Task Scheduler Loop**:
+  - Permitir avanço do agendador do modem até o repouso em `rex_wait` (`0x16ef0b02`) para recepção contínua de RPCs de áudio e rede.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação)
 
-1. **Passo 1 (Conexão do ZeeboApp com a vtable IGL para o carrossel 3D da Z-Wheel)**:
-   - Utilizar o ponto de despacho do ZeeboApp mapeado em `0x10532344` para disparar `EVT_APP_START`.
-   - Garantir que a requisição de contexto gráfico (`AEECLSID_IGL` / `AEECLSID_GRAPHICS`) resolva via `IglGuestBridge` e direcione os comandos OpenGL ES 1.1 para o `IglHook`/`SoftRasterizer`.
-   - Validar com geração do primeiro frame do menu renderizado na janela SDL2 / framebuffer PPM.
+1. **Passo 1 (Harness de Execução do ZeeboApp + Renderização Z-Wheel)**:
+   - Construir teste/harness em `tools/cpp/` que inicialize contexto Unicorn com os segmentos de `0:APPS`, configure a estrutura `applet` com ponteiro para a vtable IGL (`IglGuestBridge`) em `applet[0x2c]`, e invoque `0x10532344` com `r1 = 0x1f96` (`EVT_APP_START`).
+   - Capturar o primeiro frame 3D desenhado via `SoftRasterizer` e exportar como PPM.
 
-2. **Passo 2 (Mapeador de Arquivos EFS2APPS -> IFILEMGR do Guest)**:
-   - Conectar o parser de diretórios validado em `zeebo_efs2apps` às chamadas do subsistema de arquivos da BREW no ARM11.
-   - Permitir a listagem de módulos instalados em `fs:/mod/` (`reksio.mod`, `darkseal.mod`, etc.) para exibição na interface do launcher.
+2. **Passo 2 (Parser C++ EFS2APPS para IFILEMGR)**:
+   - Codificar `zeebo_efs2_fs.h` implementando o parser de registros `0x69` a partir da partição `0:EFS2APPS` (`0x3220000`).
+   - Oferecer métodos de lookup de path (`open("fs:/mod/reksio/reksio.mod")`) e listagem de diretório (`readdir("fs:/mod")`).
+   - Validar com teste automatizado (`make test-efs2-fs`).
 
-3. **Passo 3 (Finalização da Barreira de Init REX no Core 1)**:
-   - Semear o terminador ou tratar o callback em `0xf0019e78` para que o ARM9 finalize a inicialização e permaneça em `rex_wait` atendendo mensagens ONCRPC/SMD do Core 0.
+3. **Passo 3 (Loop de Agendamento do REX no Core 1)**:
+   - Acompanhar a execução do Core 1 a partir de `0xdf602d4c` até a entrada do despachante multitarefa REX (`0xf0013b84` / `rex_sched`), garantindo retorno limpo e repouso em `rex_wait`.
 
 ---
 
