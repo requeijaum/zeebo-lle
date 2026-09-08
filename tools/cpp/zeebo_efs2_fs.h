@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <limits>
 #include <unordered_map>
 
 namespace efs2 {
@@ -61,17 +62,34 @@ class Efs2Filesystem {
 public:
     // Open the NAND dump and cache the EFS2APPS partition region [off, end).
     bool open(const std::string& nand_path, u64 part_off = EFS2APPS_OFF) {
+        // A failed reopen must not expose the previous NAND/index.
+        buf_.clear();
+        dirents_.clear();
+        by_key_.clear();
+        by_inode_.clear();
+        part_len_ = 0;
         part_off_ = part_off;
         std::ifstream f(nand_path, std::ios::binary);
         if (!f) return false;
         f.seekg(0, std::ios::end);
-        u64 sz = (u64)f.tellg();
+        const std::streamoff end = f.tellg();
+        if (end < 0) return false;
+        const u64 sz = static_cast<u64>(end);
         if (part_off_ >= sz) return false;
         part_len_ = sz - part_off_;
-        buf_.resize(part_len_);
-        f.seekg((std::streamoff)part_off_, std::ios::beg);
-        f.read((char*)buf_.data(), (std::streamsize)part_len_);
-        return (u64)f.gcount() == part_len_;
+        if (part_len_ > static_cast<u64>(std::numeric_limits<size_t>::max())) {
+            part_len_ = 0;
+            return false;
+        }
+        buf_.resize(static_cast<size_t>(part_len_));
+        f.seekg(static_cast<std::streamoff>(part_off_), std::ios::beg);
+        f.read(reinterpret_cast<char*>(buf_.data()), static_cast<std::streamsize>(part_len_));
+        if (static_cast<u64>(f.gcount()) != part_len_) {
+            buf_.clear();
+            part_len_ = 0;
+            return false;
+        }
+        return true;
     }
 
     u64 partition_offset() const { return part_off_; }

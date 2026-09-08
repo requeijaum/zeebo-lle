@@ -83,10 +83,12 @@ inline u32 pm4_walk(const u32* dcb, size_t n_dwords, const Pm4Sink& sink) {
                 case Cp2xx::Nop: break;
                 case Cp2xx::Wait_For_Idle: if (sink.wait_idle) sink.wait_idle(); break;
                 case Cp2xx::DrawIndx:
-                    if (sink.draw) { sink.draw(true,  cnt>1?dcb[i+2]:0, Prim::Triangles); }
+                    if (sink.draw && cnt > 1 && i + 2 < n_dwords)
+                        sink.draw(true, dcb[i+2], Prim::Triangles);
                     break;
                 case Cp2xx::DrawIndx2:
-                    if (sink.draw) { sink.draw(false, cnt>0?dcb[i+1]:0, Prim::Triangles); }
+                    if (sink.draw && cnt > 0 && i + 1 < n_dwords)
+                        sink.draw(false, dcb[i+1], Prim::Triangles);
                     break;
                 case Cp2xx::Set_Constant: {
                     // Layout real (freedreno): DATA_1 = 0x00040000 | (BASE-0x2000),

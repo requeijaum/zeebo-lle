@@ -7,15 +7,20 @@
 #include <unicorn/unicorn.h>
 #include "zeebo_devices.h"
 
-static void expect(bool c,const char* what){ if(c) printf("  OK  %s\n",what); else { printf("  FAIL %s\n",what); } }
+static int failures=0;
+static void expect(bool c,const char* what){ if(c) printf("  OK  %s\n",what); else { printf("  FAIL %s\n",what); failures++; } }
 
-static const char* NDPATH="/home/rafaelfrequiao/projects/zeebo-lle/nand";
 static std::vector<u8> readfile(const char* p){ std::vector<u8> v; NandController::read_file(p,v); return v; }
 
-int main(){
-    std::string data=std::string(NDPATH)+"/1.1.2.bin";
-    std::string spare=std::string(NDPATH)+"/1.1.2_spare.bin";
+int main(int argc,char** argv){
+    const std::string nand_dir = argc > 1 ? argv[1] : "../../nand";
+    std::string data=nand_dir+"/1.1.2.bin";
+    std::string spare=nand_dir+"/1.1.2_spare.bin";
     auto ref=readfile(data.c_str());
+    if (ref.empty()) {
+        fprintf(stderr,"NAND ausente/vazia: %s\n",data.c_str());
+        return 1;
+    }
 
     // 1. standalone NandController tests
     {
@@ -66,10 +71,26 @@ int main(){
         // also check FULL 2048 page
         u8 gotfull[2048]; uc_mem_read(uc,DEST,gotfull,2048);
         expect(std::memcmp(gotfull,ref.data()+page*2048,2048)==0,"DMOV full 2048B page matches dump");
+
+        // Pointer-list com duas command-lists: a segunda entrada deve ser lida
+        // em PTR+4, não no alvo da primeira lista.
+        const u32 CL2=0x00403000, CL3=0x00403100, PTR2=0x00403200;
+        const u32 src_a=0x11223344, src_b=0x55667788;
+        w(IO+0x40,src_a); w(IO+0x44,src_b);
+        struct { u32 cmd,src,dst,len; } one_a={CMD_LC,IO+0x40,DEST+0x3000,4};
+        struct { u32 cmd,src,dst,len; } one_b={CMD_LC,IO+0x44,DEST+0x3004,4};
+        uc_mem_write(uc,CL2,&one_a,sizeof(one_a));
+        uc_mem_write(uc,CL3,&one_b,sizeof(one_b));
+        w(PTR2,CL2>>3); w(PTR2+4,(CL3>>3)|CMD_PTR_LP);
+        dm.exec_cmdptr(PTR2>>3);
+        u32 dst_a=0,dst_b=0;
+        uc_mem_read(uc,DEST+0x3000,&dst_a,4); uc_mem_read(uc,DEST+0x3004,&dst_b,4);
+        expect(dst_a==src_a && dst_b==src_b,"DMOV pointer-list avança para PTR+4");
+
         printf("  DMOV execs=%u  got[0..4]=%02x %02x %02x %02x\n",
                dm.exec_count(),got[0],got[1],got[2],got[3]);
         uc_close(uc);
     }
     printf("\nall device-model C++ tests done\n");
-    return 0;
+    return failures ? 1 : 0;
 }

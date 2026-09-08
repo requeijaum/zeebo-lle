@@ -140,6 +140,22 @@ int main() {
     if (!(okx && rx == 0)) { printf("    ✗ esperado r0=0 execução limpa\n"); fails++; }
     else printf("    ✓ r0=0 (não consumido, execução limpa)\n");
 
+    // Entry ELF só é válido dentro do módulo. A segunda injeção na mesma página
+    // também cobre o caminho de página já mapeada.
+    std::vector<u8> elf(0x100, 0);
+    elf[0]=0x7f; elf[1]='E'; elf[2]='L'; elf[3]='F';
+    auto put32 = [&](u32 off, u32 value) {
+        elf[off]=static_cast<u8>(value); elf[off+1]=static_cast<u8>(value>>8);
+        elf[off+2]=static_cast<u8>(value>>16); elf[off+3]=static_cast<u8>(value>>24);
+    };
+    constexpr u32 elf_va=0x21000000u;
+    put32(24,0x40u);
+    if (!loader.inject_bytes(elf,elf_va,0,"valid.mod") ||
+        loader.module().entry_va!=elf_va+0x40u) fails++;
+    put32(24,0xf0000000u);
+    if (!loader.inject_bytes(elf,elf_va,0,"invalid.mod") ||
+        loader.module().entry_va!=0u) fails++;
+
     uc_close(uc);
 
     printf("\n── Resultado ──────────────────────────────────────────────\n");

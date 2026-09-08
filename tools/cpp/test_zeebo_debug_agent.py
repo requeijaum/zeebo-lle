@@ -47,12 +47,12 @@ def test_primitives_live():
     """Sobe o emulador e exercita ping/state/vram/peek/poke/backtrace por TCP."""
     a = ZeeboAgent(port=agent_mod._pick_free_port(), verbose=False)
     try:
-        a.launch()
-        _check("ping responde", a.dbg.ping().get("ok") is True)
-        a.dbg.cont()
+        dbg = a.launch()
+        _check("ping responde", dbg.ping().get("ok") is True)
+        dbg.cont()
         time.sleep(0.4)
 
-        st = a.dbg.state()
+        st = dbg.state()
         _check("state ok", st.get("ok") is True and "c0_pc" in st)
 
         vram = a.vram()
@@ -76,6 +76,23 @@ def test_primitives_live():
                bt.get("ok") is True and isinstance(bt.get("frames"), list)
                and len(bt["frames"]) >= 1,
                f"{len(bt.get('frames', []))} frames")
+
+        # Regression: stepping an intentional ARM self-loop must not forge PC+4.
+        dbg.pause()
+        loop_addr = 0x00a1d000
+        a.poke(loop_addr, 0xeafffffe, size=4, core=1)  # b .
+        dbg.setreg(core=1, n=15, val=loop_addr)
+        step = dbg.step(core=1, ticks=1)
+        loop_pc = dbg.reg(core=1, n=15)
+        _check("step preserva self-loop real",
+               step.get("ok") is True and loop_pc == loop_addr,
+               hex(loop_pc))
+
+        bad_reg = a.dbg.rpc({"cmd": "reg", "core": 0, "n": 99})
+        bad_hex = a.dbg.rpc({"cmd": "write", "core": 0,
+                             "addr": 0x10000000, "hex": "xyz"})
+        _check("reg inválido rejeitado", bad_reg.get("ok") is False)
+        _check("hex inválido rejeitado", bad_hex.get("ok") is False)
     finally:
         a.shutdown()
 
@@ -92,8 +109,9 @@ def test_run_app_interleaved():
         {"id": "reksio.mod", "mode": "interleaved", "desc": "test"},
         steps=40, verbose=False)
     _check("reksio.mod carregado", rep["loaded"] is True)
-    _check("reksio.mod executou", rep["executed"] is True)
-    _check("reksio.mod status pass", rep["status"] == "pass", rep["status"])
+    _check("reksio.mod execução não é forjada", rep["executed"] is False)
+    _check("reksio.mod core progrediu", rep["core_progress"] is True)
+    _check("reksio.mod status loaded_only", rep["status"] == "loaded_only", rep["status"])
     _check("reksio.mod backtrace presente",
            rep["backtrace"] is not None and rep["backtrace"].get("ok") is True)
 
@@ -101,8 +119,9 @@ def test_run_app_interleaved():
 def test_catalog_report(tmp_report="/tmp/zeebo_agent_test_report.json"):
     summary = run_catalog(steps=40, report_path=tmp_report, verbose=False)
     _check("catálogo total=3", summary["total"] == 3, str(summary["total"]))
-    _check("catálogo todos pass", summary["passed"] == summary["total"],
-           f"{summary['passed']}/{summary['total']}")
+    _check("catálogo distingue execução de mera carga",
+           summary["passed"] == 1 and summary["loaded_only"] == 2,
+           f"pass={summary['passed']} loaded_only={summary['loaded_only']}")
     _check("relatório JSON gravado", os.path.exists(tmp_report))
     # Valida que o arquivo é JSON válido e reflete os resultados.
     with open(tmp_report) as f:

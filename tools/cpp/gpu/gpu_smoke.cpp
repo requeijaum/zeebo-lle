@@ -21,7 +21,8 @@ int main(){
     ras->clear(0);
     ras->end_frame();
     u16 c = px(*ras, 320,240);
-    printf("[T1 clear-red] center=0x%04X expect=0xF800 %s\n", c, c==0xF800?"PASS":"FAIL");
+    const bool t1 = c==0xF800;
+    printf("[T1 clear-red] center=0x%04X expect=0xF800 %s\n", c, t1?"PASS":"FAIL");
 
     // Test 2: draw a green triangle covering center -> center becomes green-ish.
     ras->begin_frame();
@@ -48,9 +49,23 @@ int main(){
     sink.write_reg=[&](u32,u32){ ++regs; };
     sink.draw=[&](bool,u32 n,Prim){ ++draws; printf("   [pm4] draw n=%u\n",n); };
     u32 pk = pm4_walk(ring.data(), ring.size(), sink);
+    const bool t3 = pk==2&&regs==2&&draws==1;
     printf("[T3 pm4-walk ] packets=%u regs=%d draws=%d %s\n",
-           pk, regs, draws, (pk==2&&regs==2&&draws==1)?"PASS":"FAIL");
+           pk, regs, draws, t3?"PASS":"FAIL");
+
+    // Test 4: strip de quatro vértices deve formar o quad inteiro, inclusive
+    // o canto superior direito que não pertence ao primeiro triângulo.
+    ras->clear_color(0,0,0,1); ras->clear(0);
+    std::vector<Vertex> strip(4);
+    for(auto&v:strip){ v.r=1;v.g=1;v.b=1; }
+    strip[0].x=-0.8f; strip[0].y=-0.8f;
+    strip[1].x= 0.8f; strip[1].y=-0.8f;
+    strip[2].x=-0.8f; strip[2].y= 0.8f;
+    strip[3].x= 0.8f; strip[3].y= 0.8f;
+    ras->draw(Prim::TriStrip, strip);
+    const bool t4 = px(*ras,480,120)!=0;
+    printf("[T4 tri-strip] top-right=%s\n", t4?"PASS":"FAIL");
 
     printf("DONE\n");
-    return 0;
+    return (t1 && green && t3 && t4) ? 0 : 1;
 }

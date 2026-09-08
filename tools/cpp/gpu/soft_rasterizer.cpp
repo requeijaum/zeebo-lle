@@ -14,7 +14,12 @@ public:
     bool init() override { fb_.assign(kFbWidth*kFbHeight, 0); return true; }
     void begin_frame() override {}
 
-    void set_viewport(int x,int y,int w,int h) override { vx_=x; vy_=y; vw_=w; vh_=h; }
+    void set_viewport(int x,int y,int w,int h) override {
+        vx_=std::clamp(x,-kFbWidth,kFbWidth);
+        vy_=std::clamp(y,-kFbHeight,kFbHeight);
+        vw_=std::clamp(w,0,kFbWidth*2);
+        vh_=std::clamp(h,0,kFbHeight*2);
+    }
     void clear_color(f32 r,f32 g,f32 b,f32 a) override { cr_=r; cg_=g; cb_=b; (void)a; }
     void clear(u32) override {
         u16 c = pack565(cr_,cg_,cb_);
@@ -28,15 +33,32 @@ public:
     void delete_texture(u32) override {}
 
     void draw(Prim p, const std::vector<Vertex>& v) override {
-        if (p!=Prim::Triangles && p!=Prim::TriStrip && p!=Prim::TriFan) return;
-        // Minimal: treat as independent triangles (strip/fan expansion TODO).
-        for (size_t i=0;i+2<v.size(); i+=3) fill_tri(v[i],v[i+1],v[i+2]);
+        if (p==Prim::Triangles) {
+            for (size_t i=0;i+2<v.size();i+=3) fill_tri(v[i],v[i+1],v[i+2]);
+        } else if (p==Prim::TriStrip) {
+            for (size_t i=0;i+2<v.size();++i)
+                if ((i&1u)==0) fill_tri(v[i],v[i+1],v[i+2]);
+                else            fill_tri(v[i+1],v[i],v[i+2]);
+        } else if (p==Prim::TriFan && v.size()>=3) {
+            for (size_t i=1;i+1<v.size();++i) fill_tri(v[0],v[i],v[i+1]);
+        }
     }
     void draw_indexed(Prim p, const std::vector<Vertex>& v,
                       const std::vector<u32>& idx) override {
-        if (p!=Prim::Triangles) return;
-        for (size_t i=0;i+2<idx.size(); i+=3)
-            fill_tri(v[idx[i]], v[idx[i+1]], v[idx[i+2]]);
+        auto valid=[&](size_t i){ return i<idx.size() && idx[i]<v.size(); };
+        if (p==Prim::Triangles) {
+            for (size_t i=0;i+2<idx.size();i+=3)
+                if(valid(i)&&valid(i+1)&&valid(i+2)) fill_tri(v[idx[i]],v[idx[i+1]],v[idx[i+2]]);
+        } else if (p==Prim::TriStrip) {
+            for (size_t i=0;i+2<idx.size();++i) {
+                if (!valid(i) || !valid(i+1) || !valid(i+2)) continue;
+                if ((i&1)==0) fill_tri(v[idx[i]],v[idx[i+1]],v[idx[i+2]]);
+                else fill_tri(v[idx[i+1]],v[idx[i]],v[idx[i+2]]);
+            }
+        } else if (p==Prim::TriFan && !idx.empty()) {
+            for (size_t i=1;i+1<idx.size();++i) if(valid(0)&&valid(i)&&valid(i+1))
+                fill_tri(v[idx[0]],v[idx[i]],v[idx[i+1]]);
+        }
     }
 
     void end_frame() override {}
@@ -49,16 +71,17 @@ private:
     }
     // Mapeia NDC [-1,1] para o viewport (vx,vy,vw,vh), y-flip p/ tela top-down.
     void fill_tri(const Vertex&a,const Vertex&b,const Vertex&c){
-        auto sx=[&](f32 x){ return vx_ + (int)((x*0.5f+0.5f)*vw_); };
-        auto sy=[&](f32 y){ return vy_ + (int)((1.f-(y*0.5f+0.5f))*vh_); };
+        auto finite_ndc=[](f32 v){ return std::isfinite(v) ? std::clamp(v,-4.0f,4.0f) : 0.0f; };
+        auto sx=[&](f32 x){ return vx_ + static_cast<int>((finite_ndc(x)*0.5f+0.5f)*static_cast<f32>(vw_)); };
+        auto sy=[&](f32 y){ return vy_ + static_cast<int>((1.f-(finite_ndc(y)*0.5f+0.5f))*static_cast<f32>(vh_)); };
         int x0=sx(a.x),y0=sy(a.y),x1=sx(b.x),y1=sy(b.y),x2=sx(c.x),y2=sy(c.y);
         int minx=std::max(0,std::min({x0,x1,x2})), maxx=std::min(kFbWidth-1,std::max({x0,x1,x2}));
         int miny=std::max(0,std::min({y0,y1,y2})), maxy=std::min(kFbHeight-1,std::max({y0,y1,y2}));
-        int area=(x1-x0)*(y2-y0)-(x2-x0)*(y1-y0); if(area==0) return;
+        const int64_t area=int64_t(x1-x0)*(y2-y0)-int64_t(x2-x0)*(y1-y0); if(area==0) return;
         for(int y=miny;y<=maxy;++y) for(int x=minx;x<=maxx;++x){
-            int w0=(x1-x)*(y2-y)-(x2-x)*(y1-y);
-            int w1=(x2-x)*(y0-y)-(x0-x)*(y2-y);
-            int w2=(x0-x)*(y1-y)-(x1-x)*(y0-y);
+            const int64_t w0=int64_t(x1-x)*(y2-y)-int64_t(x2-x)*(y1-y);
+            const int64_t w1=int64_t(x2-x)*(y0-y)-int64_t(x0-x)*(y2-y);
+            const int64_t w2=int64_t(x0-x)*(y1-y)-int64_t(x1-x)*(y0-y);
             if((w0>=0&&w1>=0&&w2>=0)||(w0<=0&&w1<=0&&w2<=0)){
                 f32 fa=(f32)w0/area, fb=(f32)w1/area, fc=(f32)w2/area;
                 fb_[y*kFbWidth+x]=pack565(fa*a.r+fb*b.r+fc*c.r,

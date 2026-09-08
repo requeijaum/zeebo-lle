@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <limits>
 #include <unicorn/unicorn.h>
 #include "zeebo_l4_mmu.h"
 
@@ -25,6 +26,7 @@ namespace zeebo::brew {
 
 using u8  = uint8_t;
 using u32 = uint32_t;
+using u64 = uint64_t;
 
 // ClassID BREW de um applet. 0 = "qualquer" (casa com o primeiro CreateInstance).
 struct AppletModule {
@@ -142,10 +144,23 @@ public:
                       const std::string& origin = "<bytes>") {
         if (!uc_) { printf("[BREW] inject_bytes: uc não vinculado\n"); return false; }
         if (d.empty()) { printf("[BREW] inject_bytes: payload vazio ('%s')\n", origin.c_str()); return false; }
-        u32 sz = (u32)d.size();
+        if (d.size() > std::numeric_limits<u32>::max() ||
+            static_cast<u64>(load_va) + d.size() > 0x100000000ULL) {
+            printf("[BREW] inject_bytes: payload/range excede VA de 32 bits\n");
+            return false;
+        }
+        u32 sz = static_cast<u32>(d.size());
 
-        u32 map_base = load_va & ~0x000FFFFFu;
-        uc_mem_map(uc_, map_base, 0x00800000, UC_PROT_ALL); // 8MB; ok se já mapeado
+        const u64 map_begin = static_cast<u64>(load_va) & ~0xfffULL;
+        const u64 map_end = (static_cast<u64>(load_va) + d.size() + 0xfffULL) & ~0xfffULL;
+        for (u64 page = map_begin; page < map_end; page += 0x1000) {
+            const uc_err map_err = uc_mem_map(uc_, page, 0x1000, UC_PROT_ALL);
+            if (map_err != UC_ERR_OK && map_err != UC_ERR_MAP) {
+                printf("[BREW] inject_bytes: uc_mem_map @0x%08llx falhou: %s\n",
+                       (unsigned long long)page, uc_strerror(map_err));
+                return false;
+            }
+        }
 
         uc_err e = uc_mem_write(uc_, load_va, d.data(), d.size());
         if (e != UC_ERR_OK) {
@@ -204,14 +219,15 @@ public:
         uc_err e = uc_emu_start(uc_, handler_va | 1u, ret_magic & ~1u, 0, 0);
         u32 ret  = reg(UC_ARM_REG_R0);
         u32 endp = reg(UC_ARM_REG_PC);
-        bool clean = (e == UC_ERR_OK) || ((endp & ~1u) == (ret_magic & ~1u));
+        const bool clean = e == UC_ERR_OK &&
+                           ((endp & ~1u) == (ret_magic & ~1u));
         const char* evname = (evt == 0x0100) ? "EVT_KEY_PRESS"
                            : (evt == 0x0101) ? "EVT_KEY_RELEASE"
                            : (evt == 0x0102) ? "EVT_KEY" : "EVT_?";
         printf("[BREW/Input] %s key=0x%04x → HandleEvent@0x%08x  ret r0=%u %s (uc=%s)\n",
                evname, keycode, handler_va, ret,
                ret == 1 ? "(consumido ✓)" : "(não tratado)",
-               clean ? uc_strerror(e) : uc_strerror(e));
+               clean ? "OK" : uc_strerror(e));
         if (ok) *ok = clean;
         return ret;
     }
@@ -232,11 +248,15 @@ private:
     static u32 resolve_mod_entry(const std::vector<u8>& d, u32 load_va) {
         if (d.size() < 0x20) return 0;
         if (!(d[0]==0x7f && d[1]=='E' && d[2]=='L' && d[3]=='F')) return 0; // não-ELF: MOD cru
-        u32 e_entry = rd32(d, 24);
-        // e_entry pode ser VA absoluto do link ou offset; heurística: se cair fora
-        // do intervalo do módulo, tratar como offset a partir de load_va.
-        if (e_entry >= load_va && e_entry < load_va + (u32)d.size()) return e_entry;
-        return load_va + e_entry;
+        const u32 e_entry = rd32(d, 24);
+        const u64 module_end = static_cast<u64>(load_va) + d.size();
+        if (e_entry >= load_va && static_cast<u64>(e_entry) < module_end) return e_entry;
+        if (static_cast<u64>(e_entry) < d.size()) {
+            const u64 relative = static_cast<u64>(load_va) + e_entry;
+            if (relative < module_end && relative <= std::numeric_limits<u32>::max())
+                return static_cast<u32>(relative);
+        }
+        return 0;
     }
 
     u32 reg(int r) const { u32 v = 0; if (uc_) uc_reg_read(uc_, r, &v); return v; }

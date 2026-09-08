@@ -2,10 +2,13 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
 LIBS := -lunicorn -lcapstone
+CPP_HEADERS := $(wildcard *.h gpu/*.h qdsp5/*.h)
 
 all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink
 
-zeebo_lle_main: zeebo_lle_main.cpp zeebo_brew_loader.h zeebo_efs2_fs.h gpu/igl_guest_bridge.h qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
+# Depend on every directly included subsystem header. The previous short list
+# left zeebo_lle_main stale after edits to MMU/control/audio/device headers.
+zeebo_lle_main: zeebo_lle_main.cpp $(CPP_HEADERS) qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_main.cpp qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp -lunicorn $(shell pkg-config --cflags --libs sdl2)
 
 zeebo_lle_mod_probe: zeebo_lle_mod_probe.cpp
@@ -101,10 +104,28 @@ test-efs2-zwheel-loop: zeebo_lle_main
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
 
-clean:
-	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
+test_control_server: test_control_server.cpp zeebo_control_server.h
+	$(CXX) $(CXXFLAGS) -o $@ test_control_server.cpp -pthread
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs
+test-cli: zeebo_lle_main
+	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
+	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
+
+check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
+       test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
+       test_l4_mmu test_l4_mmu_uc test_audio_sink test_control_server test_save_state
+	./test_audio_sink
+	./test_control_server
+	./test_save_state
+
+clean:
+	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
+	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc \
+	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
+	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot
+	$(MAKE) -C gpu -f Makefile.gpu clean
+
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

@@ -49,7 +49,7 @@ public:
         return true;
     }
 
-    u32 read(u32 off, int size){
+    u32 read(u32 off, int /*size*/){
         if(off==R_FLASH_STATUS||off==R_READ_STATUS) return status_;
         if(off==R_BUFFER_STATUS) return 0;
         if(off==R_READ_ID) return id_latched_;
@@ -84,7 +84,7 @@ private:
             u32 page = addr0>=0x10000 ? (addr0>>16)|((addr1&0xFF)<<8) : addr0;
             size_t npages = data_blob_.size()/PAGE_DATA;
             if(page<npages){
-                for(int i=0;i<PAGE_DATA;i++) buffer_[i]=data_blob_[page*PAGE_DATA+i];
+                for(u32 i=0;i<PAGE_DATA;i++) buffer_[i]=data_blob_[page*PAGE_DATA+i];
                 status_=FS_READY;
             } else status_=FS_OP_ERR;
             return;
@@ -105,7 +105,6 @@ enum {
     NAND_FLASH_BUFFER=NAND_BASE+0x100,
     DMOV_RSLT_DONE=0x80000002,
 };
-static u32 dmov_reg(u32 off,int ch){ return DMOV_SD1_BASE+off+(ch<<2); }
 
 class DMOVModel {
 public:
@@ -116,13 +115,13 @@ public:
         exec_count_++;
         u32 pptr=(regval&0x7FFFFFFF)<<3;
         for(int idx=0;idx<16;idx++){
-            u32 p=ram32(pptr);
-            u32 cmdlist=(p&0x7FFFFFFF)<<3;
-            bool plast=(p&CMD_PTR_LP)!=0;
+            const u32 p=ram32(pptr);
+            if(p==0) break;
+            const u32 cmdlist=(p&0x7FFFFFFF)<<3;
+            const bool plast=(p&CMD_PTR_LP)!=0;
             run_cmdlist(cmdlist);
             if(plast) break;
-            if(p==0) break;
-            pptr=cmdlist;
+            pptr += 4; // next encoded pointer-list entry, not the command-list target
         }
         last_chan_=DMOV_NAND_CHAN;
         return DMOV_RSLT_DONE;
@@ -141,22 +140,19 @@ private:
             if(cmd&CMD_LC) break;
         }
     }
-    void exec_descriptor(u32 cmd,u32 src,u32 dst,u32 ln){
+    void exec_descriptor(u32 /*cmd*/,u32 src,u32 dst,u32 ln){
         bool sn=is_nand(src), dn=is_nand(dst);
-        int length=std::min((int)ln,2048);
+        const u32 length=std::min<u32>(ln,PAGE_DATA);
         if(sn){
             u32 off=src-NAND_BASE;
             if(src==NAND_FLASH_BUFFER){
-                // drain-cursor window: each DMA reads the NEXT `len` bytes
-                for(int i=0;i<length;i+=4){
-                    u32 cur=buf_cursor_;
-                    u32 v=nand_.read(off+cur+i,4);
-                    u8 b[4]={(u8)v,(u8)(v>>8),(u8)(v>>16),(u8)(v>>24)};
-                    uc_mem_write(uc_,dst+i,b,4);
-                }
-                buf_cursor_=(buf_cursor_+length)%2048;
+                std::vector<u8> bytes(length);
+                for(u32 i=0;i<length;i++)
+                    bytes[i]=nand_.buffer_byte((buf_cursor_+i)%PAGE_DATA);
+                if(!bytes.empty()) uc_mem_write(uc_,dst,bytes.data(),bytes.size());
+                buf_cursor_=(buf_cursor_+length)%PAGE_DATA;
             } else {
-                u32 v=nand_.read(off,std::min((int)ln,4));
+                u32 v=nand_.read(off,static_cast<int>(std::min<u32>(ln,4)));
                 u8 b[4]={(u8)v,(u8)(v>>8),(u8)(v>>16),(u8)(v>>24)};
                 uc_mem_write(uc_,dst,b,4);
             }
@@ -165,7 +161,7 @@ private:
         if(dn){
             u32 off=dst-NAND_BASE;
             if(dst==NAND_FLASH_BUFFER){
-                for(int i=0;i<length;i+=4){ u32 v=ram32(src+i); nand_.write(off+i,v,4); }
+                for(u32 i=0;i<length;i+=4){ u32 v=ram32(src+i); nand_.write(off+i,v,4); }
             } else if(ln==16){
                 for(int i=0;i<16;i+=4){
                     if((dst&~0x3)!=dst) break; // unaligned guard
@@ -176,14 +172,14 @@ private:
             } else {
                 if(dst==NAND_BASE+0x10) buf_cursor_=0;  // EXEC resets cursor
                 u32 v=ram32(src);
-                nand_.write(off,v,std::min((int)ln,4));
+                nand_.write(off,v,static_cast<int>(std::min<u32>(ln,4)));
             }
             return;
         }
         // RAM->RAM copy
-        int n=std::min((int)ln,0x1000);
+        const u32 n=std::min<u32>(ln,0x1000);
         u8 buf[0x1000];
-        if(uc_mem_read(uc_,src,buf,n)==UC_ERR_OK) uc_mem_write(uc_,dst,buf,n);
+        if(n && uc_mem_read(uc_,src,buf,n)==UC_ERR_OK) uc_mem_write(uc_,dst,buf,n);
     }
     uc_engine* uc_; NandController& nand_;
     u32 exec_count_, buf_cursor_, last_chan_;

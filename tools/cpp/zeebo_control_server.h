@@ -107,6 +107,16 @@ public:
             ::close(listen_fd_);
             listen_fd_ = -1;
         }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            while (!queue_.empty()) {
+                try { queue_.front()->reply.set_value("{\"ok\":false,\"error\":\"shutdown\"}"); }
+                catch (const std::future_error&) {}
+                queue_.pop();
+            }
+        }
+        const int client_fd = client_fd_.load();
+        if (client_fd >= 0) ::shutdown(client_fd, SHUT_RDWR);
         if (accept_thread_.joinable()) accept_thread_.join();
     }
 
@@ -123,9 +133,11 @@ public:
     bool IsRunning() const { return running_.load(); }
 
 private:
-    void Enqueue(const std::shared_ptr<ControlRequest>& req) {
+    bool Enqueue(const std::shared_ptr<ControlRequest>& req) {
         std::lock_guard<std::mutex> lk(mu_);
+        if (!running_.load()) return false;
         queue_.push(req);
+        return true;
     }
 
     void AcceptLoop() {
@@ -139,7 +151,9 @@ private:
             }
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            client_fd_.store(fd);
             HandleConnection(fd);
+            client_fd_.store(-1);
             ::close(fd);
         }
     }
@@ -161,6 +175,10 @@ private:
             ssize_t n = ::recv(fd, chunk, sizeof(chunk), 0);
             if (n <= 0) return;
             buf.append(chunk, static_cast<size_t>(n));
+            if (buf.size() > 16384) {
+                WriteAll(fd, "{\"ok\":false,\"error\":\"request_too_large\"}\n");
+                return;
+            }
         }
     }
 
@@ -170,7 +188,7 @@ private:
             return "{\"ok\":false,\"error\":\"parse\"}";
         }
         std::future<std::string> fut = req->reply.get_future();
-        Enqueue(req);
+        if (!Enqueue(req)) return "{\"ok\":false,\"error\":\"shutdown\"}";
         if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
             return "{\"ok\":false,\"error\":\"timeout\"}";
         }
@@ -260,6 +278,7 @@ private:
     }
 
     int listen_fd_ = -1;
+    std::atomic<int> client_fd_{-1};
     std::atomic<bool> running_{false};
     std::thread accept_thread_;
     std::mutex mu_;

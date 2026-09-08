@@ -5,7 +5,7 @@
 #   make -f gpu/Makefile.gpu             -> headless (software only, no GL dep)
 #   make -f gpu/Makefile.gpu gpu_smoke_gl -> with GL host backend stub compiled in
 CXX ?= g++
-CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra -Ignu
+CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
 gpu_smoke: gpu_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h pm4_adreno.h
 	$(CXX) $(CXXFLAGS) gpu_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gpu_smoke
 
@@ -17,7 +17,8 @@ gpu_smoke_gl: gpu_smoke.cpp soft_rasterizer.cpp gl_host_rasterizer.cpp rasterize
 
 .PHONY: clean
 clean:
-	rm -f gpu_smoke gpu_smoke_gl igl_smoke
+	rm -f gpu_smoke gpu_smoke_gl igl_smoke gpu_display_integration \
+	      igl_transform_smoke igl_guest_bridge_test
 
 # IglHook (produtor CORRETO, FASE 1 real) — prova por framebuffer sem Unicorn.
 igl_smoke: igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h

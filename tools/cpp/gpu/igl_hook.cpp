@@ -131,8 +131,16 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
     if(slot==glLoadMatrixx){ Mat4 m; read_matrix(gm, gm.arg(0), m); cur_matrix()=m; return true; }
     if(slot==glMultMatrixx){ Mat4 m, t; read_matrix(gm, gm.arg(0), m);
         mat_mul(t, cur_matrix(), m); cur_matrix()=t; return true; } // cur = cur * m
-    if(slot==glPushMatrix){ if(stack_depth_<4){ stack_[stack_depth_++]=cur_matrix(); } return true; }
-    if(slot==glPopMatrix){ if(stack_depth_>0){ cur_matrix()=stack_[--stack_depth_]; } return true; }
+    if(slot==glPushMatrix){
+        int& depth = cur_stack_depth();
+        if(depth<4) cur_stack()[depth++]=cur_matrix();
+        return true;
+    }
+    if(slot==glPopMatrix){
+        int& depth = cur_stack_depth();
+        if(depth>0) cur_matrix()=cur_stack()[--depth];
+        return true;
+    }
     if(slot==glRotatex){ Mat4 r; mat_rotate(r,fixed_to_float(gm.arg(0)),
         fixed_to_float(gm.arg(1)),fixed_to_float(gm.arg(2)),fixed_to_float(gm.arg(3)));
         Mat4 t; mat_mul(t, cur_matrix(), r); cur_matrix()=t; return true; }
@@ -151,13 +159,23 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         fixed_to_float(gm.arg(4)),fixed_to_float(gm.arg(5)));
         Mat4 t; mat_mul(t, cur_matrix(), p); cur_matrix()=t; return true; }
     if(slot==glDrawArrays){                       // glDrawArrays(mode,first,count)
-        u32 mode=gm.arg(0); int first=int(gm.arg(1)), count=int(gm.arg(2));
+        const u32 mode=gm.arg(0), first_raw=gm.arg(1), count_raw=gm.arg(2);
+        if (count_raw > 1'000'000u || first_raw > 0x7fffffffu - count_raw) {
+            gm.set_ret(0);
+            return false;
+        }
+        const int first=static_cast<int>(first_raw), count=static_cast<int>(count_raw);
         rast_.set_mvp(mvp_); rast_.set_state(state_);
         rast_.draw(glenum::to_prim(mode), assemble(gm, first, count));
         return true;
     }
     if(slot==glDrawElements){                      // glDrawElements(mode,count,type,idx*)
-        u32 mode=gm.arg(0); int count=int(gm.arg(1)); u32 type=gm.arg(2), idx_va=gm.arg(3);
+        const u32 mode=gm.arg(0), count_raw=gm.arg(1), type=gm.arg(2), idx_va=gm.arg(3);
+        if (count_raw > 1'000'000u || (type != glenum::UBYTE && type != glenum::USHORT)) {
+            gm.set_ret(0);
+            return false;
+        }
+        const int count=static_cast<int>(count_raw);
         std::vector<u32> idx;
         auto verts=assemble_indexed(gm, idx_va, count, type, idx);
         rast_.set_mvp(mvp_); rast_.set_state(state_);

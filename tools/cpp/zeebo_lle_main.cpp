@@ -22,6 +22,9 @@
 #include <memory>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cerrno>
+#include <cmath>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <SDL2/SDL.h>
@@ -626,7 +629,7 @@ public:
 
         const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
         unsigned long long sum_before = 0;
-        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum_before += fb[i];
+        if (fb) for (size_t i = 0; i < static_cast<size_t>(FB_WIDTH) * FB_HEIGHT; i++) sum_before += fb[i];
 
         printf("[Z-Wheel/Life] despachando EVT_APP_START(0x%04x) → HandleEvent@0x%08x "
                "applet@0x%08x\n", EVT_APP_START, ZWHEEL_HANDLER_VA, APPLET);
@@ -637,7 +640,7 @@ public:
         s_zwheel_hook_sys_ = nullptr;
 
         unsigned long long sum_after = 0;
-        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum_after += fb[i];
+        if (fb) for (size_t i = 0; i < static_cast<size_t>(FB_WIDTH) * FB_HEIGHT; i++) sum_after += fb[i];
 
         bool ok = clean && r0 == 1 && zwheel_gfx_calls_ >= 1;
         printf("[Z-Wheel/Life] EVT_APP_START → r0=%u (uc=%s) | chamadas gráficas=%d | "
@@ -948,7 +951,7 @@ public:
 
         const u16* fb = rast_->framebuffer_rgb565();
         unsigned long long sum = 0;
-        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum += fb[i];
+        if (fb) for (size_t i = 0; i < static_cast<size_t>(FB_WIDTH) * FB_HEIGHT; i++) sum += fb[i];
         printf("[Z-Wheel] Frame RGB565 produzido: soma de pixels = %llu\n", sum);
 
         if (fb && sink_) sink_->update_frame(fb);
@@ -1009,7 +1012,7 @@ public:
         FILE* f = fopen(path.c_str(), "wb");
         if (!f) return false;
         fprintf(f, "P6\n%d %d\n255\n", FB_WIDTH, FB_HEIGHT);
-        for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+        for (size_t i = 0; i < static_cast<size_t>(FB_WIDTH) * FB_HEIGHT; i++) {
             u16 p = fb ? fb[i] : 0;
             u8 r = ((p >> 11) & 0x1f) * 255 / 31;
             u8 g = ((p >> 5) & 0x3f) * 255 / 63;
@@ -1095,8 +1098,8 @@ public:
                     }
                 } else {
                     // Fallback test pattern
-                    for (int y = 0; y < FB_HEIGHT; y++) {
-                        for (int x = 0; x < FB_WIDTH; x++) {
+                    for (u32 y = 0; y < FB_HEIGHT; y++) {
+                        for (u32 x = 0; x < FB_WIDTH; x++) {
                             u16 col = (u16)(((x >> 3) & 0x1F) << 11) | (u16)(((y >> 3) & 0x3F) << 5) | (u16)(c & 0x1F);
                             fb_buffer[y * FB_WIDTH + x] = col;
                         }
@@ -1198,6 +1201,10 @@ public:
             return;
         }
         if (req->cmd == "backtrace") {
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 pc = 0, lr = 0, sp = 0, r11 = 0;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
@@ -1205,36 +1212,42 @@ public:
             uc_reg_read(uc, UC_ARM_REG_SP, &sp);
             uc_reg_read(uc, UC_ARM_REG_R11, &r11);
 
-            char buf[1024];
-            int pos = snprintf(buf, sizeof(buf),
-                     "{\"ok\":true,\"core\":%ld,\"frames\":["
+            char frame[192];
+            snprintf(frame, sizeof(frame),
+                     "{\"ok\":true,\"core\":%lu,\"frames\":["
                      "{\"frame\":0,\"pc\":%u,\"lr\":%u,\"sp\":%u,\"fp\":%u}",
                      req->core, pc, lr, sp, r11);
-
-            // Tenta walk preliminar na pilha lendo palavras alinhadas a 4 bytes
+            std::string response(frame);
             int frame_idx = 1;
-            for (u32 cur_sp = sp; cur_sp < sp + 256 && frame_idx < 8; cur_sp += 4) {
+            const u64 stack_end = static_cast<u64>(sp) + 256;
+            for (u64 cur_sp = sp; cur_sp < stack_end && frame_idx < 8; cur_sp += 4) {
                 u32 val = 0;
-                if (uc_mem_read(uc, cur_sp, &val, 4) == UC_ERR_OK) {
-                    // Se o ponteiro cai em faixas de código executável conhecidas
-                    if ((val >= 0xb0000000 && val < 0xb0500000) ||
-                        (val >= 0x10000000 && val < 0x12000000) ||
-                        (val >= 0xf0000000 && val < 0xf0030000)) {
-                        pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                        ",{\"frame\":%d,\"pc\":%u,\"sp\":%u}",
-                                        frame_idx++, val, cur_sp);
-                    }
+                if (uc_mem_read(uc, cur_sp, &val, 4) == UC_ERR_OK &&
+                    ((val >= 0xb0000000 && val < 0xb0500000) ||
+                     (val >= 0x10000000 && val < 0x12000000) ||
+                     (val >= 0xf0000000 && val < 0xf0030000))) {
+                    snprintf(frame, sizeof(frame),
+                             ",{\"frame\":%d,\"pc\":%u,\"sp\":%llu}",
+                             frame_idx++, val, (unsigned long long)cur_sp);
+                    response += frame;
                 }
             }
-            snprintf(buf + pos, sizeof(buf) - pos, "]}");
-            req->reply.set_value(buf);
+            response += "]}";
+            req->reply.set_value(std::move(response));
             return;
         }
         if (req->cmd == "peek") {
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 addr = (u32)req->i0;
             size_t size = req->has_i1 ? (size_t)req->i1 : 4;
-            if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+            if (size != 1 && size != 2 && size != 4 && size != 8) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_length\"}");
+                return;
+            }
             u64 val = 0;
             uc_err err = uc_mem_read(uc, addr, &val, size);
             if (err != UC_ERR_OK) {
@@ -1250,10 +1263,17 @@ public:
             return;
         }
         if (req->cmd == "poke") {
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 addr = (u32)req->i0;
             size_t size = req->has_i1 ? (size_t)req->i1 : 4;
-            if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+            if (size != 1 && size != 2 && size != 4 && size != 8) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_length\"}");
+                return;
+            }
             u64 val = req->val;
             uc_err err = uc_mem_write(uc, addr, &val, size);
             if (err != UC_ERR_OK) {
@@ -1275,7 +1295,7 @@ public:
             u16 center = 0;
             const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
             if (fb) {
-                for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) psum += fb[i];
+                for (size_t i = 0; i < static_cast<size_t>(FB_WIDTH) * FB_HEIGHT; i++) psum += fb[i];
                 center = fb[(FB_HEIGHT / 2) * FB_WIDTH + (FB_WIDTH / 2)];
             }
             char resp[256];
@@ -1309,14 +1329,24 @@ public:
             // Se o Core estiver parado exatamente no breakpoint atual, avança 1 instrução antes de retomar o loop normal
             if (c0_breakpoints_.contains(core0_.entry)) {
                 uc_ctl_remove_cache(core0_.uc, core0_.entry, 16);
-                uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                const uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                if (err0 != UC_ERR_OK) {
+                    stepping_ = false;
+                    req->reply.set_value("{\"ok\":false,\"error\":\"core0_cont_step\"}");
+                    return;
+                }
                 u32 next_pc = 0;
                 uc_reg_read(core0_.uc, UC_ARM_REG_PC, &next_pc);
                 core0_.entry = next_pc;
             }
             if (c1_breakpoints_.contains(core1_.entry)) {
                 uc_ctl_remove_cache(core1_.uc, core1_.entry, 16);
-                uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
+                const uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
+                if (err1 != UC_ERR_OK) {
+                    stepping_ = false;
+                    req->reply.set_value("{\"ok\":false,\"error\":\"core1_cont_step\"}");
+                    return;
+                }
                 u32 next_pc = 0;
                 uc_reg_read(core1_.uc, UC_ARM_REG_PC, &next_pc);
                 core1_.entry = next_pc;
@@ -1326,40 +1356,28 @@ public:
             return;
         }
         if (req->cmd == "step") {
-            int ticks = req->has_i0 ? (int)req->i0 : 1;
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
+            const int ticks = std::clamp(req->has_i0 ? (int)req->i0 : 1, 1, 1000);
+            uc_engine* uc = req->core == 1 ? core1_.uc : core0_.uc;
+            u32& entry = req->core == 1 ? core1_.entry : core0_.entry;
             stepping_ = true;
-            if (req->core == 1) {
-                for (int t = 0; t < ticks; t++) {
-                    uc_ctl_remove_cache(core1_.uc, core1_.entry, 16);
-                    uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
-                    u32 next_pc = 0;
-                    uc_reg_read(core1_.uc, UC_ARM_REG_PC, &next_pc);
-                    if (next_pc == core1_.entry) {
-                        next_pc += 4;
-                        uc_reg_write(core1_.uc, UC_ARM_REG_PC, &next_pc);
-                    }
-                    core1_.entry = next_pc;
+            for (int t = 0; t < ticks; t++) {
+                // One Unicorn instruction is the source of truth. A legitimate
+                // self-loop must stay at the same PC; forcing PC+4 corrupts it.
+                const uc_err err = uc_emu_start(uc, entry, 0, 0, 1);
+                if (err != UC_ERR_OK) {
+                    stepping_ = false;
+                    char buf[192];
+                    snprintf(buf, sizeof(buf),
+                             "{\"ok\":false,\"error\":\"emu_step\",\"uc_err\":%u,\"message\":\"%s\"}",
+                             unsigned(err), uc_strerror(err));
+                    req->reply.set_value(buf);
+                    return;
                 }
-            } else {
-                for (int t = 0; t < ticks; t++) {
-                    u32 cur_cpsr = 0;
-                    uc_reg_read(core0_.uc, UC_ARM_REG_CPSR, &cur_cpsr);
-                    uc_ctl_flush_tb(core0_.uc);
-                    uc_ctl_flush_tlb(core0_.uc);
-                    uc_ctl_remove_cache(core0_.uc, core0_.entry, 16);
-                    uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
-                    if (err0 != UC_ERR_OK) {
-                        printf("[step err0] err=%d (%s) pc=0x%08x\n", (int)err0, uc_strerror(err0), core0_.entry);
-                        fflush(stdout);
-                    }
-                    u32 next_pc = 0;
-                    uc_reg_read(core0_.uc, UC_ARM_REG_PC, &next_pc);
-                    if (next_pc == core0_.entry) {
-                        next_pc += 4;
-                        uc_reg_write(core0_.uc, UC_ARM_REG_PC, &next_pc);
-                    }
-                    core0_.entry = next_pc;
-                }
+                uc_reg_read(uc, UC_ARM_REG_PC, &entry);
             }
             stepping_ = false;
             char buf[128];
@@ -1408,6 +1426,10 @@ public:
             return;
         }
         if (req->cmd == "reg") {
+            if ((req->core != 0 && req->core != 1) || req->i0 > 16) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_register\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             int r_idx = (int)req->i0;
             int reg_id = UC_ARM_REG_R0 + r_idx;
@@ -1423,6 +1445,10 @@ public:
             return;
         }
         if (req->cmd == "setreg") {
+            if ((req->core != 0 && req->core != 1) || req->i0 > 16) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_register\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             int r_idx = (int)req->i0;
             int reg_id = UC_ARM_REG_R0 + r_idx;
@@ -1431,15 +1457,22 @@ public:
             else if (r_idx == 15) reg_id = UC_ARM_REG_PC;
             else if (r_idx == 16) reg_id = UC_ARM_REG_CPSR;
             u32 val = (u32)req->val;
-            uc_reg_write(uc, reg_id, &val);
-            if (req->core == 0 && r_idx == 15) {
-                core0_.entry = val;
-                // Garante que o CPSR esteja limpo em ARM Mode (modo User 0x10 ou System 0x1f, T=0)
+            if (r_idx == 15) {
+                // Bit 0 selects Thumb on branch-like PC writes. Preserve the
+                // current privilege/interrupt flags instead of forcing User mode.
                 u32 cpsr = 0;
                 uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-                cpsr &= ~(1 << 5); // T bit = 0 (ARM mode)
-                cpsr = (cpsr & ~0x1f) | 0x10; // User mode (0x10)
+                if (val & 1u) cpsr |= (1u << 5); else cpsr &= ~(1u << 5);
                 uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+                val &= ~1u;
+            }
+            const uc_err write_err = uc_reg_write(uc, reg_id, &val);
+            if (write_err != UC_ERR_OK) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"reg_write\"}");
+                return;
+            }
+            if (req->core == 0 && r_idx == 15) {
+                core0_.entry = val;
                 uc_ctl_flush_tb(uc);
                 uc_ctl_flush_tlb(uc);
             } else if (req->core == 1 && r_idx == 15) {
@@ -1453,10 +1486,18 @@ public:
             return;
         }
         if (req->cmd == "read") {
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 addr = (u32)req->i0;
-            size_t len = req->has_i1 ? (size_t)req->i1 : 4;
-            if (len > 4096) len = 4096;
+            const int64_t requested_len = req->has_i1 ? req->i1 : 4;
+            if (requested_len < 1 || requested_len > 4096) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_length\"}");
+                return;
+            }
+            const size_t len = static_cast<size_t>(requested_len);
             std::vector<u8> buf(len);
             uc_err err = uc_mem_read(uc, addr, buf.data(), len);
             if (err != UC_ERR_OK) {
@@ -1472,13 +1513,25 @@ public:
                 snprintf(h, sizeof(h), "%02x", b);
                 hex += h;
             }
-            char resp[128 + len * 2];
-            snprintf(resp, sizeof(resp), "{\"ok\":true,\"core\":%ld,\"addr\":%u,\"len\":%zu,\"hex\":\"%s\"}",
-                     req->core, addr, len, hex.c_str());
-            req->reply.set_value(resp);
+            std::string resp = "{\"ok\":true,\"core\":" + std::to_string(req->core) +
+                               ",\"addr\":" + std::to_string(addr) +
+                               ",\"len\":" + std::to_string(len) +
+                               ",\"hex\":\"" + hex + "\"}";
+            req->reply.set_value(std::move(resp));
             return;
         }
         if (req->cmd == "write") {
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
+            if (req->str_hex.empty() || req->str_hex.size() > 8192 ||
+                (req->str_hex.size() & 1u) ||
+                !std::all_of(req->str_hex.begin(), req->str_hex.end(),
+                             [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_hex\"}");
+                return;
+            }
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 addr = (u32)req->i0;
             std::vector<u8> bytes;
@@ -1701,8 +1754,7 @@ private:
         if (magic == 0x464c457f) {
             printf("[APPSBL] Partition '0:APPS' opened successfully via DMA!\n");
             core0_.entry = rd32(elf_hdr, 24);
-            u32 phoff = rd32(elf_hdr, 28);
-            u16 phent = rd16(elf_hdr, 42), phnum = rd16(elf_hdr, 44);
+            u16 phnum = rd16(elf_hdr, 44);
             printf("[APPSBL] ELF Entrypoint resolved: 0x%08x, Segments: %u\n", core0_.entry, phnum);
             printf("[APPSBL] Performing handoff jump: bx r2 -> 0x%08x\n", core0_.entry);
             return load_apps(fallback_path); // Relay segments into target windows
@@ -2275,7 +2327,7 @@ private:
     }
 
 
-    static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t /*value*/, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
@@ -2297,7 +2349,7 @@ private:
         return true;
     }
 
-    static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int /*size*/, int64_t value, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         // Inter-core doorbell A2M
         if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440 && type == UC_MEM_WRITE) {
@@ -2669,6 +2721,26 @@ static void print_usage(const char* prog) {
     printf("  --help, -h                 Exibe este menu de ajuda e opções\n\n");
 }
 
+static bool parse_int_arg(const std::string& text, int min_value, int max_value, int& out) {
+    errno = 0;
+    char* end = nullptr;
+    const long value = std::strtol(text.c_str(), &end, 10);
+    if (errno || end == text.c_str() || *end != '\0' ||
+        value < min_value || value > max_value) return false;
+    out = static_cast<int>(value);
+    return true;
+}
+
+static bool parse_seconds_arg(const std::string& text, double& out) {
+    errno = 0;
+    char* end = nullptr;
+    const double value = std::strtod(text.c_str(), &end);
+    if (errno || end == text.c_str() || *end != '\0' || !std::isfinite(value) || value < 0.0)
+        return false;
+    out = value;
+    return true;
+}
+
 int main(int argc, char** argv) {
     const char* nand_path = "../../nand/1.1.2.bin";
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
@@ -2712,7 +2784,9 @@ int main(int argc, char** argv) {
             zwheel_preview = true;
             headless = true;  // valida o pipeline sem abrir janela (CI)
         } else if (arg.rfind("--control-port=", 0) == 0) {
-            control_port = std::stoi(arg.substr(15));
+            if (!parse_int_arg(arg.substr(15), 1, 65535, control_port)) {
+                fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
+            }
         } else if (arg.rfind("--applet=", 0) == 0) {
             applet_path = arg.substr(9);
         } else if (arg.rfind("--efs2-run=", 0) == 0) {
@@ -2725,11 +2799,17 @@ int main(int argc, char** argv) {
         } else if (arg.rfind("--dump-frames=", 0) == 0) {
             dump_frames_dir = arg.substr(14);
         } else if (arg.rfind("--cycles=", 0) == 0) {
-            cycles = std::stoi(arg.substr(9));
+            if (!parse_int_arg(arg.substr(9), 0, 1000000000, cycles)) {
+                fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
+            }
         } else if (arg.rfind("--slice=", 0) == 0) {
-            slice_insns = std::stoi(arg.substr(8));
+            if (!parse_int_arg(arg.substr(8), 1, 1000000000, slice_insns)) {
+                fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
+            }
         } else if (arg.rfind("--seconds=", 0) == 0) {
-            max_seconds = std::stod(arg.substr(10));
+            if (!parse_seconds_arg(arg.substr(10), max_seconds)) {
+                fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
+            }
         } else if (arg[0] != '-') {
             if (nand_path == nullptr || std::string(nand_path) == "../../nand/1.1.2.bin") {
                 nand_path = argv[i];

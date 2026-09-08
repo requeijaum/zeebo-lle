@@ -55,13 +55,15 @@ int main(){
     const u16* fb=rast->framebuffer_rgb565();
     u16 center=fb[240*640+320];
     // triângulo desenhado com cor default (branco, verts sem color array) -> != preto
+    const bool draw_ok = drew && center!=0x0000;
     printf("[igl draw  ] handled=%d center=0x%04X (!=0 dentro do tri) %s\n",
-           drew, center, (drew && center!=0x0000)?"PASS":"FAIL");
+           drew, center, draw_ok?"PASS":"FAIL");
 
     // Valida a conversão GLfixed->float (o ponto mais sutil da ABI real).
     // vert[0].x = 0.0 em NDC agora; testa o componente y[0] = -0.8.
     float fy = gm.read_component(VTX_VA+4, glenum::FIXED); // vert0.y = -0.8
-    printf("[igl fixed ] read_component=%.2f expect=-0.80 %s\n", fy, (fy>-0.81&&fy<-0.79)?"PASS":"FAIL");
+    const bool fixed_ok = fy>-0.81&&fy<-0.79;
+    printf("[igl fixed ] read_component=%.2f expect=-0.80 %s\n", fy, fixed_ok?"PASS":"FAIL");
 
     // Segundo frame: clear vermelho confirma pipeline vivo.
     rast->begin_frame();
@@ -69,7 +71,8 @@ int main(){
     regs={0x4000}; hook.dispatch_igl(igl_slot::glClear, gm);
     rast->end_frame();
     center=rast->framebuffer_rgb565()[240*640+320];
-    printf("[igl red   ] center=0x%04X expect=0xF800 %s\n", center, center==0xF800?"PASS":"FAIL");
+    const bool red_ok = center==0xF800;
+    printf("[igl red   ] center=0x%04X expect=0xF800 %s\n", center, red_ok?"PASS":"FAIL");
     printf("DONE\n");
-    return 0;
+    return (draw_ok && fixed_ok && red_ok) ? 0 : 1;
 }

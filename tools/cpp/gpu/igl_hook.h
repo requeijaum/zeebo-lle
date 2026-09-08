@@ -134,12 +134,16 @@ private:
     // aplicado por vértice em assemble() (obj -> clip -> NDC via w-divide).
     Mat4 modelview_{{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
     Mat4 projection_{{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
-    Mat4 stack_[4];              // pilha de matrizes corrente (depth<=2 tipico)
-    int  stack_depth_=0;
+    Mat4 modelview_stack_[4];
+    Mat4 projection_stack_[4];
+    int  modelview_depth_=0;
+    int  projection_depth_=0;
     u32  matrix_mode_=glenum2::MODELVIEW;
     u32  bound_tex_[2]{0,0};
 
     Mat4& cur_matrix(){ return matrix_mode_==glenum2::PROJECTION ? projection_ : modelview_; }
+    Mat4* cur_stack(){ return matrix_mode_==glenum2::PROJECTION ? projection_stack_ : modelview_stack_; }
+    int& cur_stack_depth(){ return matrix_mode_==glenum2::PROJECTION ? projection_depth_ : modelview_depth_; }
 
     // Aplica mvp=projection*modelview a um vértice obj -> NDC (clip/w).
     static void transform_vertex(const Mat4& mvp, Vertex& v);

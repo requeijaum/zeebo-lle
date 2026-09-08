@@ -26,8 +26,12 @@ int main(){
     gm.arg=[&](int n){ return n<(int)regs.size()?regs[n]:0u; };
     gm.set_ret=[](u32){};
     gm.read=[&](u32 va, void* d, u32 sz)->bool{
-        if(va<VTX_VA) return false; u32 off=va-VTX_VA;
-        if(off+sz>mem.size()*4) return false; std::memcpy(d,(uint8_t*)mem.data()+off,sz); return true; };
+        if(va<VTX_VA) return false;
+        const u32 off=va-VTX_VA;
+        if(off+sz>mem.size()*4) return false;
+        std::memcpy(d,(uint8_t*)mem.data()+off,sz);
+        return true;
+    };
 
     auto clear_black=[&](){
         regs={FX(0),FX(0),FX(0),FX(1)}; hook.dispatch_igl(igl_slot::glClearColorx, gm);

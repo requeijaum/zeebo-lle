@@ -142,6 +142,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Failed reopen clears cached bytes and indexes instead of exposing stale NAND.
+    check(!fs.open("/definitely/missing/zeebo-nand.bin"), "failed reopen reports false");
+    check(fs.partition_size() == 0 && fs.data().empty() && fs.dirents().empty(),
+          "failed reopen clears stale partition and dirent state");
+
     printf("\npass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

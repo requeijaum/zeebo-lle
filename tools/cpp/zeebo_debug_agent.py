@@ -170,10 +170,12 @@ class ZeeboAgent:
                 self.proc.terminate()
                 try:
                     self.proc.wait(timeout=2)
-                except Exception:
-                    self.proc.kill()
+                except subprocess.TimeoutExpired:
+                    # SIGTERM is the final escalation; do not SIGKILL because it
+                    # bypasses emulator cleanup and can leave output/state corrupt.
+                    self._log("[agent] emulator did not exit after SIGTERM")
         if self.collector:
-            self.collector.join()
+            self.collector.join(timeout=2)
 
     # ── Primitivas de diagnóstico ────────────────────────────────────────
     def vram(self):
@@ -218,6 +220,7 @@ def run_applet(entry, steps=200, verbose=True):
         "desc": entry.get("desc", ""),
         "loaded": False,
         "executed": False,
+        "core_progress": False,
         "vram": None,
         "vram_blank": None,
         "backtrace": None,
@@ -254,7 +257,7 @@ def run_applet(entry, steps=200, verbose=True):
         if life_pass:
             report["notes"].append("Z-Wheel/Life PASS (EVT_APP_START r0=1)")
         report["status"] = "pass" if (report["loaded"] and report["executed"]
-                                      and not report["vram_blank"]) else "fail"
+                                      and report["vram_blank"] is False) else "fail"
         return report
 
     # mode == "interleaved": injeta o applet e drena o ControlServer ao vivo.
@@ -291,7 +294,11 @@ def run_applet(entry, steps=200, verbose=True):
             agent.dbg.step(core=0, ticks=20)
         report["steps_advanced"] = max(1, steps // 20) * 20
         st1 = agent.dbg.state()
-        report["executed"] = (st1.get("c0_insns", 0) > st0.get("c0_insns", 0))
+        report["core_progress"] = (st1.get("c0_insns", 0) > st0.get("c0_insns", 0))
+        # Core 0 progressing only proves that Iguana/APPS ran. It does not prove
+        # that the injected module's entry point executed. Keep this false until
+        # an applet-specific PC/byte/pixel milestone is observed.
+        report["executed"] = False
 
         vram = agent.vram()
         report["vram"] = vram
@@ -299,14 +306,13 @@ def run_applet(entry, steps=200, verbose=True):
         report["backtrace"] = agent.trace(core=0)
         report["status_regs"] = agent.status_regs(core=0)
 
-        # Para applets injetados (reksio/tectoy) a renderização não é acionada,
-        # então blank=true é ESPERADO e honesto — a prova de boot é injeção +
-        # avanço real de instruções sem crash.
-        if report["loaded"] and report["executed"]:
-            report["status"] = "pass"
+        # Injection is a verified loading milestone, not applet execution.
+        if report["loaded"] and report["core_progress"]:
+            report["status"] = "loaded_only"
+            report["notes"].append(
+                "payload injected; applet entry execution not yet proven")
             if report["vram_blank"]:
-                report["notes"].append(
-                    "VRAM blank (esperado: applet injetado não aciona render)")
+                report["notes"].append("VRAM blank (no applet render milestone)")
         else:
             report["status"] = "fail"
         return report
@@ -325,6 +331,7 @@ def run_catalog(steps=200, report_path=None, verbose=True):
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "total": len(results),
         "passed": sum(1 for r in results if r["status"] == "pass"),
+        "loaded_only": sum(1 for r in results if r["status"] == "loaded_only"),
         "results": results,
     }
     if report_path:
