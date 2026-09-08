@@ -32,7 +32,9 @@ constexpr u32 VERTEX_ARRAY=0x8074, NORMAL_ARRAY=0x8075, COLOR_ARRAY=0x8076,
               TEXCOORD_ARRAY=0x8078;
 constexpr u32 POINTS=0x0000, LINES=0x0001, LINE_STRIP=0x0003,
               TRIANGLES=0x0004, TRI_STRIP=0x0005, TRI_FAN=0x0006;
-constexpr u32 RGB=0x1907, RGBA=0x1908;
+constexpr u32 RGB=0x1907, RGBA=0x1908, USHORT_565=0x8363;
+constexpr u32 TEXTURE_2D=0x0de1, DEPTH_TEST=0x0b71, BLEND=0x0be2,
+              ALPHA_TEST=0x0bc0, CULL_FACE=0x0b44, TEXTURE0=0x84c0;
 constexpr u32 ATITC_RGB=0x8C92, ATITC_RGBA=0x8C93;
 inline int type_size(u32 t){ switch(t){case BYTE:case UBYTE:return 1;
     case SHORT:case USHORT:return 2; case FLOAT:case FIXED:return 4; default:return 4;} }
@@ -140,6 +142,7 @@ private:
     int  projection_depth_=0;
     u32  matrix_mode_=glenum2::MODELVIEW;
     u32  bound_tex_[2]{0,0};
+    Vertex current_color_{};
 
     Mat4& cur_matrix(){ return matrix_mode_==glenum2::PROJECTION ? projection_ : modelview_; }
     Mat4* cur_stack(){ return matrix_mode_==glenum2::PROJECTION ? projection_stack_ : modelview_stack_; }
@@ -162,7 +165,8 @@ private:
 namespace igl_slot {
 constexpr int AddRef=0, Release=1, QueryInterface=2;
 constexpr int glActiveTexture=3, glAlphaFuncx=4, glBindTexture=5, glBlendFunc=6,
-              glClear=7, glClearColorx=8, glClearDepthx=9, glColor4x=12,
+              glClear=7, glClearColorx=8, glClearDepthx=9, glClientActiveTexture=11,
+              glColor4x=12,
               glColorPointer=14, glCompressedTexImage2D=15, glCullFace=19,
               glDeleteTextures=20, glDepthFunc=21, glDepthMask=22, glDisable=24,
               glDisableClientState=25, glDrawArrays=26, glDrawElements=27,
@@ -175,10 +179,18 @@ constexpr int glActiveTexture=3, glAlphaFuncx=4, glBindTexture=5, glBlendFunc=6,
 }
 namespace iegl_slot {
 constexpr int AddRef=0, Release=1, QueryInterface=2;
-// IEGL: 28 slots. Índices exatos dos egl* ainda a extrair do array IEGL do
-// gl_hle.cpp (não lido nesta rodada); marcados -1 até lá. eglSwapBuffers tratado
-// por nome quando o índice for fixado.
-constexpr int eglSwapBuffers=-1, eglMakeCurrent=-1, eglQueryString=-1;
+// IEGL legado (28 slots). Ordem usada pelo Zeebx e compatível com a tabela
+// pública EGL 1.0; o bridge ainda exige uma vtable viva validada no firmware.
+constexpr int eglGetError=3, eglGetDisplay=4, eglInitialize=5, eglTerminate=6,
+              eglQueryString=7, eglGetProcAddress=8, eglGetConfigs=9,
+              eglChooseConfig=10, eglGetConfigAttrib=11,
+              eglCreateWindowSurface=12, eglCreatePixmapSurface=13,
+              eglCreatePbufferSurface=14, eglDestroySurface=15,
+              eglQuerySurface=16, eglCreateContext=17, eglDestroyContext=18,
+              eglMakeCurrent=19, eglGetCurrentContext=20,
+              eglGetCurrentSurface=21, eglGetCurrentDisplay=22,
+              eglQueryContext=23, eglWaitGL=24, eglWaitNative=25,
+              eglSwapBuffers=26, eglCopyBuffers=27;
 }
 
 } // namespace zeebo::gpu

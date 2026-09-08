@@ -66,6 +66,60 @@ int main(){
     const bool t4 = px(*ras,480,120)!=0;
     printf("[T4 tri-strip] top-right=%s\n", t4?"PASS":"FAIL");
 
+    // Test 5: textura RGBA8 ligada à unidade 0 deve modular a cor branca.
+    ras->clear_color(0,0,0,1); ras->clear(0);
+    const u8 blue_rgba[16]={0,0,255,255, 0,0,255,255,
+                            0,0,255,255, 0,0,255,255};
+    ras->tex_image_2d(7,2,2,blue_rgba);
+    ras->bind_texture(0,7);
+    RenderState textured{}; textured.tex_enabled[0]=1; textured.active_unit=0;
+    ras->set_state(textured);
+    std::vector<Vertex> textri(3);
+    textri[0].x=-0.8f; textri[0].y=-0.8f; textri[0].u=0.25f; textri[0].v=0.25f;
+    textri[1].x= 0.8f; textri[1].y=-0.8f; textri[1].u=0.25f; textri[1].v=0.25f;
+    textri[2].x= 0.0f; textri[2].y= 0.8f; textri[2].u=0.25f; textri[2].v=0.25f;
+    ras->draw(Prim::Triangles,textri);
+    const bool t5 = px(*ras,320,240)==0x001f;
+    printf("[T5 texture  ] center=0x%04X expect=0x001F %s\n",
+           px(*ras,320,240),t5?"PASS":"FAIL");
+
+    // Test 6: depth LESS preserva o triângulo próximo contra desenho distante.
+    RenderState depth{}; depth.depth_test=true; depth.depth_func=0x0201; depth.depth_write=true;
+    ras->set_state(depth); ras->clear_color(0,0,0,1); ras->clear(0x4100);
+    std::vector<Vertex> near_tri=textri, far_tri=textri;
+    for(auto&v:near_tri){ v.z=-0.5f; v.r=0;v.g=1;v.b=0; }
+    for(auto&v:far_tri){ v.z=0.5f; v.r=1;v.g=0;v.b=0; }
+    ras->draw(Prim::Triangles,near_tri);
+    ras->draw(Prim::Triangles,far_tri);
+    const u16 depth_px=px(*ras,320,240);
+    const bool t6=((depth_px>>5)&0x3f)>0x30 && (depth_px>>11)==0;
+    printf("[T6 depth    ] center=0x%04X expect=green %s\n",depth_px,t6?"PASS":"FAIL");
+
+    // Test 7: SRC_ALPHA/ONE_MINUS_SRC_ALPHA compõe vermelho 50% sobre azul.
+    RenderState blend{}; blend.blend=true; blend.blend_src=0x0302; blend.blend_dst=0x0303;
+    ras->set_state(blend); ras->clear_color(0,0,1,1); ras->clear(0x4000);
+    std::vector<Vertex> alpha_tri=textri;
+    for(auto&v:alpha_tri){ v.r=1;v.g=0;v.b=0;v.a=0.5f; }
+    ras->draw(Prim::Triangles,alpha_tri);
+    const u16 blend_px=px(*ras,320,240);
+    const u32 br=blend_px>>11, bg=(blend_px>>5)&0x3f, bb=blend_px&0x1f;
+    const bool t7=br>=14&&br<=17&&bg==0&&bb>=14&&bb<=17;
+    printf("[T7 blend    ] center=0x%04X expect=purple %s\n",blend_px,t7?"PASS":"FAIL");
+
+    // Test 8: filtro linear padrão interpola os quatro texels no centro.
+    const u8 corners[16]={255,0,0,255, 0,255,0,255,
+                          0,0,255,255, 255,255,255,255};
+    ras->tex_image_2d(9,2,2,corners); ras->bind_texture(0,9);
+    RenderState linear{}; linear.tex_enabled[0]=1; ras->set_state(linear);
+    ras->clear_color(0,0,0,1); ras->clear(0x4000);
+    std::vector<Vertex> linear_tri=textri;
+    for(auto&v:linear_tri){ v.u=0.5f;v.v=0.5f;v.r=v.g=v.b=v.a=1; }
+    ras->draw(Prim::Triangles,linear_tri);
+    const u16 linear_px=px(*ras,320,240);
+    const u32 lr=linear_px>>11, lg=(linear_px>>5)&0x3f, lb=linear_px&0x1f;
+    const bool t8=lr>=14&&lr<=17&&lg>=30&&lg<=33&&lb>=14&&lb<=17;
+    printf("[T8 bilinear ] center=0x%04X expect=gray %s\n",linear_px,t8?"PASS":"FAIL");
+
     printf("DONE\n");
-    return (t1 && green && t3 && t4) ? 0 : 1;
+    return (t1 && green && t3 && t4 && t5 && t6 && t7 && t8) ? 0 : 1;
 }

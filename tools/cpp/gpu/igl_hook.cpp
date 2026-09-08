@@ -48,6 +48,8 @@ std::vector<Vertex> IglHook::assemble(GuestMachine& gm, int first, int count){
                      : a.size*glenum::type_size(a.type); };
     for(int e=first; e<first+count; ++e){
         Vertex vx{};
+        vx.r=current_color_.r; vx.g=current_color_.g;
+        vx.b=current_color_.b; vx.a=current_color_.a;
         if(vtx_.enabled){ u32 p=vtx_.va + e*stride(vtx_);
             vx.x=gm.read_component(p, vtx_.type);
             vx.y=gm.read_component(p+glenum::type_size(vtx_.type), vtx_.type);
@@ -102,18 +104,80 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
     if(slot==glClear){                           // glClear(mask)
         rast_.clear(gm.arg(0)); return true;
     }
+    if(slot==glColor4x){
+        current_color_.r=fixed_to_float(gm.arg(0));
+        current_color_.g=fixed_to_float(gm.arg(1));
+        current_color_.b=fixed_to_float(gm.arg(2));
+        current_color_.a=fixed_to_float(gm.arg(3));
+        return true;
+    }
+    if(slot==glActiveTexture || slot==igl_slot::glClientActiveTexture){
+        const u32 requested=gm.arg(0);
+        state_.active_unit=requested>=glenum::TEXTURE0 ?
+            std::min<u32>(requested-glenum::TEXTURE0,1) : 0;
+        return true;
+    }
+    if(slot==glDepthFunc){ state_.depth_func=gm.arg(0); return true; }
+    if(slot==glDepthMask){ state_.depth_write=gm.arg(0)!=0; return true; }
+    if(slot==glBlendFunc){ state_.blend_src=gm.arg(0); state_.blend_dst=gm.arg(1); return true; }
+    if(slot==glBindTexture){
+        const u32 unit=std::min<u32>(state_.active_unit,1);
+        bound_tex_[unit]=gm.arg(1);
+        rast_.bind_texture(unit,bound_tex_[unit]);
+        return true;
+    }
+    if(slot==glEnable || slot==glDisable){
+        const bool on=slot==glEnable;
+        switch(gm.arg(0)){
+            case glenum::TEXTURE_2D: state_.tex_enabled[std::min<u32>(state_.active_unit,1)]=on; break;
+            case glenum::DEPTH_TEST: state_.depth_test=on; break;
+            case glenum::BLEND: state_.blend=on; break;
+            case glenum::ALPHA_TEST: state_.alpha_test=on; break;
+            case glenum::CULL_FACE: state_.cull=on; break;
+        }
+        return true;
+    }
+    if(slot==glTexImage2D){
+        const u32 level=gm.arg(1), width=gm.arg(3), height=gm.arg(4);
+        const u32 format=gm.arg(6), type=gm.arg(7), pixels=gm.arg(8);
+        const bool rgba8=format==glenum::RGBA && type==glenum::UBYTE;
+        const bool rgb565=format==glenum::RGB && type==glenum::USHORT_565;
+        if(level!=0 || width==0 || height==0 || width>4096 || height>4096 ||
+           (!rgba8 && !rgb565) || pixels==0) return false;
+        const uint64_t texels=static_cast<uint64_t>(width)*height;
+        const uint64_t bytes=texels*(rgba8?4:2);
+        if(bytes>64*1024*1024) return false;
+        std::vector<u8> raw(static_cast<size_t>(bytes));
+        if(!gm.read(pixels,raw.data(),static_cast<u32>(bytes))) return false;
+        std::vector<u8> rgba;
+        if(rgba8){
+            rgba=std::move(raw);
+        } else {
+            rgba.resize(static_cast<size_t>(texels)*4);
+            for(size_t i=0;i<static_cast<size_t>(texels);++i){
+                const u16 p=static_cast<u16>(raw[i*2] | (static_cast<u16>(raw[i*2+1])<<8));
+                rgba[i*4]=static_cast<u8>(((p>>11)&31)*255/31);
+                rgba[i*4+1]=static_cast<u8>(((p>>5)&63)*255/63);
+                rgba[i*4+2]=static_cast<u8>((p&31)*255/31);
+                rgba[i*4+3]=255;
+            }
+        }
+        rast_.tex_image_2d(bound_tex_[std::min<u32>(state_.active_unit,1)],
+                           static_cast<int>(width),static_cast<int>(height),rgba.data());
+        return true;
+    }
     // --- gl*Pointer: guardam VA guest + formato; lidos SÓ no draw (assemble). ---
     // Assinatura real: gl{Vertex,TexCoord}Pointer(size,type,stride,ptr);
     //                  glColorPointer(size,type,stride,ptr) idem;
     //                  glNormalPointer(type,stride,ptr) — SEM size (sempre 3).
     if(slot==glVertexPointer){
-        vtx_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        vtx_={vtx_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glColorPointer){
-        col_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        col_={col_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glTexCoordPointer){
-        tex_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        tex_={tex_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glNormalPointer){
-        nrm_={true, gm.arg(2), 3, gm.arg(0), int(gm.arg(1))}; return true; }
+        nrm_={nrm_.enabled, gm.arg(2), 3, gm.arg(0), int(gm.arg(1))}; return true; }
     // --- glEnable/DisableClientState(array): liga/desliga o array correspondente. ---
     if(slot==glEnableClientState || slot==glDisableClientState){
         bool on = (slot==glEnableClientState);
@@ -194,7 +258,7 @@ bool IglHook::dispatch_iegl(int slot, GuestMachine& gm){
     if(slot==AddRef || slot==Release){ gm.set_ret(1); return true; }
     if(slot==QueryInterface){ gm.set_ret(0); return true; }
     // eglSwapBuffers -> apresenta o frame no fb_sink existente.
-    if(slot==eglSwapBuffers && eglSwapBuffers>=0){
+    if(slot==eglSwapBuffers){
         rast_.end_frame(); rast_.begin_frame(); gm.set_ret(1); return true;
     }
     gm.set_ret(1);   // EGL lifecycle: devolver sucesso é seguro (handles sentinela)

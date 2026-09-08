@@ -16,10 +16,21 @@ int main(){
     // --- "memória emulada" host: um array de 3 vértices XY em GLfixed (16.16) ----
     // Triângulo cobrindo o centro em NDC-ish (o soft rasterizer usa coords diretas).
     auto FX=[](float f)->u32{ return u32(int32_t(f*65536.0f)); };
-    std::vector<u32> mem; // VA base = 0x1000, cada vértice = 2 fixed (x,y)
+    std::vector<u32> mem(0x200/4,0); // VA base = 0x1000
     float verts[3][2]={{0.0f,-0.8f},{-0.8f,0.8f},{0.8f,0.8f}}; // NDC [-1,1]; ver GPU_TODO §15
-    for(auto&v:verts){ mem.push_back(FX(v[0])); mem.push_back(FX(v[1])); }
-    const u32 VTX_VA=0x1000;
+    size_t word=0;
+    for(auto&v:verts){ mem[word++]=FX(v[0]); mem[word++]=FX(v[1]); }
+    const u32 VTX_VA=0x1000, UV_VA=0x1080, TEX_VA=0x1100;
+    for(int i=0;i<3;i++){
+        mem[(UV_VA-VTX_VA)/4+i*2]=FX(0.25f);
+        mem[(UV_VA-VTX_VA)/4+i*2+1]=FX(0.25f);
+    }
+    const u8 blue_rgba[16]={0,0,255,255, 0,0,255,255,
+                            0,0,255,255, 0,0,255,255};
+    std::memcpy(reinterpret_cast<u8*>(mem.data())+(TEX_VA-VTX_VA),blue_rgba,sizeof(blue_rgba));
+    const u32 TEX565_VA=0x1120;
+    const u16 red565[4]={0xf800,0xf800,0xf800,0xf800};
+    std::memcpy(reinterpret_cast<u8*>(mem.data())+(TEX565_VA-VTX_VA),red565,sizeof(red565));
 
     // GuestMachine falso: args por vetor, read() mapeia VA->nosso vetor mem.
     std::vector<u32> regs; u32 ret=0;
@@ -73,6 +84,65 @@ int main(){
     center=rast->framebuffer_rgb565()[240*640+320];
     const bool red_ok = center==0xF800;
     printf("[igl red   ] center=0x%04X expect=0xF800 %s\n", center, red_ok?"PASS":"FAIL");
+
+    // Frontend IGL: upload RGBA8 + estado/array de textura devem chegar ao backend.
+    regs={0x0de1,7}; hook.dispatch_igl(igl_slot::glBindTexture,gm);
+    regs={0x0de1,0,glenum::RGBA,2,2,0,glenum::RGBA,glenum::UBYTE,TEX_VA};
+    hook.dispatch_igl(igl_slot::glTexImage2D,gm);
+    regs={0x0de1}; hook.dispatch_igl(igl_slot::glEnable,gm);
+    regs={2,glenum::FIXED,0,UV_VA}; hook.dispatch_igl(igl_slot::glTexCoordPointer,gm);
+    regs={glenum::TEXCOORD_ARRAY}; hook.dispatch_igl(igl_slot::glEnableClientState,gm);
+    regs={0,0,0,FX(1)}; hook.dispatch_igl(igl_slot::glClearColorx,gm);
+    regs={0x4000}; hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={glenum::TRIANGLES,0,3}; hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    center=rast->framebuffer_rgb565()[240*640+320];
+    const bool texture_ok=center==0x001f;
+    printf("[igl texture] center=0x%04X expect=0x001F %s\n",center,texture_ok?"PASS":"FAIL");
+
+    regs={0x0de1,8}; hook.dispatch_igl(igl_slot::glBindTexture,gm);
+    regs={0x0de1,0,glenum::RGB,2,2,0,glenum::RGB,0x8363,TEX565_VA};
+    const bool upload565=hook.dispatch_igl(igl_slot::glTexImage2D,gm);
+    regs={0,0,0,FX(1)}; hook.dispatch_igl(igl_slot::glClearColorx,gm);
+    regs={0x4000}; hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={glenum::TRIANGLES,0,3}; hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    center=rast->framebuffer_rgb565()[240*640+320];
+    const bool texture565_ok=upload565 && center==0xf800;
+    printf("[igl rgb565 ] center=0x%04X expect=0xF800 %s\n",center,texture565_ok?"PASS":"FAIL");
+
+    ret=0;
+    const bool swap_ok=hook.dispatch_iegl(26,gm) && ret==1;
+    printf("[iegl swap ] slot=26 handled=%d ret=%u %s\n",swap_ok,ret,swap_ok?"PASS":"FAIL");
+
+    regs={0x0201}; const bool depth_func_ok=hook.dispatch_igl(igl_slot::glDepthFunc,gm);
+    regs={1}; const bool depth_mask_ok=hook.dispatch_igl(igl_slot::glDepthMask,gm);
+    regs={glenum::DEPTH_TEST}; const bool depth_enable_ok=hook.dispatch_igl(igl_slot::glEnable,gm);
+    const bool depth_state_ok=depth_func_ok&&depth_mask_ok&&depth_enable_ok;
+    printf("[igl depth ] frontend state handled=%d %s\n",depth_state_ok,depth_state_ok?"PASS":"FAIL");
+    regs={0x0302,0x0303}; const bool blend_func_ok=hook.dispatch_igl(igl_slot::glBlendFunc,gm);
+    regs={glenum::BLEND}; const bool blend_enable_ok=hook.dispatch_igl(igl_slot::glEnable,gm);
+    const bool blend_state_ok=blend_func_ok&&blend_enable_ok;
+    printf("[igl blend ] frontend state handled=%d %s\n",blend_state_ok,blend_state_ok?"PASS":"FAIL");
+
+    regs={glenum::TEXTURE_2D}; hook.dispatch_igl(igl_slot::glDisable,gm);
+    regs={glenum::DEPTH_TEST}; hook.dispatch_igl(igl_slot::glDisable,gm);
+    regs={FX(1),0,0,FX(1)}; const bool color_call=hook.dispatch_igl(igl_slot::glColor4x,gm);
+    regs={0,0,0,FX(1)}; hook.dispatch_igl(igl_slot::glClearColorx,gm);
+    regs={0x4000}; hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={glenum::TRIANGLES,0,3}; hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    center=rast->framebuffer_rgb565()[240*640+320];
+    const bool current_color_ok=color_call&&center==0xf800;
+    printf("[igl color ] center=0x%04X expect=0xF800 %s\n",center,current_color_ok?"PASS":"FAIL");
+
+    IglHook strict_hook(*rast);
+    regs={0,0,0,FX(1)}; strict_hook.dispatch_igl(igl_slot::glClearColorx,gm);
+    regs={0x4000}; strict_hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={2,glenum::FIXED,0,VTX_VA}; strict_hook.dispatch_igl(igl_slot::glVertexPointer,gm);
+    regs={glenum::TRIANGLES,0,3}; strict_hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    center=rast->framebuffer_rgb565()[240*640+320];
+    const bool pointer_state_ok=center==0;
+    printf("[igl arrays] pointer sem Enable não desenha: %s\n",pointer_state_ok?"PASS":"FAIL");
+
     printf("DONE\n");
-    return (draw_ok && fixed_ok && red_ok) ? 0 : 1;
+    return (draw_ok && fixed_ok && red_ok && texture_ok && texture565_ok && swap_ok &&
+            depth_state_ok && blend_state_ok && current_color_ok && pointer_state_ok) ? 0 : 1;
 }
