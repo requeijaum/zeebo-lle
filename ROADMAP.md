@@ -247,11 +247,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Suporte a leitura de clusters de dados de 512B (`0x3220000 + cluster*512`) e resolução encadeada de blocos indiretos `u32` com terminador `0xFFFFFFFF`.
   - Criado harness `tools/cpp/test_efs2_fs.cpp` e alvo `test-efs2-fs` no Makefile.
   - Provado por bytes reais do dump: 69.634 dirents recuperados; dirent `reksio.mod` em `0x32606ef` validado (inode `0x265e4`, reclen 15, parent `0x4abef`); cluster `0x6d11` verificado com FNV-1a `0xa0f4d11f`; bloco indireto em `0x3b1d400` encadeado para 128 clusters (64 KiB) com FNV-1a `0xd9339103`. 18/18 testes PASS.
-- [x] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (Concluído `770eb1a`)**:
-  - Implementado `write_mr(uc, utcb_base, index, val)` em `tools/cpp/zeebo_l4_mmu.h`.
-  - Em `handle_map_control`, os descritores processados agora são gravados de volta no UTCB (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`), atendendo à convenção do Iguana OS/OKL4.
-  - O Core 0 agora avança além de `0xb000d860`: o laço `mempool_init` itera com múltiplos VAs (`0x00000000`, `0xb0d00000`, etc.), progredindo a execução interfolheada (60 ciclos completos sem travamento em `0xb000d860`).
-  - Suíte completa de testes verde (exit 0).
+- [ ] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (reaberto após QW12/QW13)**:
+  - O commit histórico `770eb1a` implementou `write_mr(uc, utcb_base, index, val)` e o echo dos descritores em `handle_map_control` (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`).
+  - A afirmação anterior de que esse echo atendia de forma load-bearing à convenção Iguana/OKL4 não é distinguível no teste black-box atual: entrada e saída são byte-idênticas mesmo sem `write_mr`. QW13 prova a transação de map no Unicorn, não o efeito do write-back sobre o guest.
+  - A observação histórica de 60 ciclos e múltiplos VAs não fecha progresso do boot. A sonda viva QW12 reproduz o estado vigente: descritor whole-space `fpage=0xb0d00206`, retorno sem avanço em `0xb000d6dc`, cursor `r4=0xb0d00000`; `bi_execute` e `0xb000aa94` não são alcançados.
+  - Gate pendente: harness com guest vivo que observe MRs efetivamente transformados e avanço por bytes/endereços até `bi_execute`; instruction-count não é critério de sucesso.
 - [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader e Catálogo de Applets (Concluído `f1b03fa` e `645f332`)**:
   - Integrado o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
   - Adicionado `BrewLoader::inject_bytes()` em `tools/cpp/zeebo_brew_loader.h` para injeção de payloads materializados direto da memória.
