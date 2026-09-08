@@ -201,6 +201,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Disparou `EVT_APP_START` (`0x1f96`) no manipulador Thumb `0x10532344`: retorno `r0 = 1`, retorno limpo ao sentinela `0x1000fffe`.
   - 1 chamada gráfica capturada no slot 10 (`0x28`) com `arg=1`.
   - Framebuffer RGB565: soma de pixels 0 → 2013081600, centro `0x1999` — **pixels reais gerados e validados por execução**.
+- [x] **Subagentes em Paralelo (`deleg_5e8643b1`) — Entrega do Core 1 e Auditoria EFS2**:
+  - **Passo 1 Concluído (commit `c1b4cb4`)**: Subagente `sa-0` implementou com sucesso o isolamento de RAM/heap do REX com arquitetura Split I/D (`zeebo_rex_harness.cpp`, `zeebo_lle_main.cpp`). O particionador `0xf0002cd4` executa 2.048 writes de heap no shadow sem corromper `.text` do AMSS; free-list preenchida em 2047/2047 blocos de 1KB; a re-entry em `0xf000e6d4` atravessa sem `UC_ERR_INSN_INVALID` e `rex_sched` `0xf0013b84` decodifica código pristino com sucesso (`make test-rex` exit 0).
+  - **Passo 2 Mapeado (Auditoria EFS2APPS)**: Subagente `sa-1` decodificou a hierarquia real dos dirents da Z-Wheel via hash `parent_ref = 0x6064` e confirmação dos nós filhos em `0x1fae8` (`language_spanish.bmp`, `opening_low.gif`, `rootca.cer`, etc.).
 - [x] **Arquitetura de Memória e Sistema de Arquivos Auditados via Corpus/Hardware Real**:
   - **Descoberta de MMU ARM9**: O dump de MMU L1 do hardware real comprova que `VA 0xf0000000 = PA 0x00a00000 (SECTION)` é SRAM física interna de dados. O código executável reside em seções físicas dedicadas (`0x16e00000..0x17b00000`). O heap em `0xf0000000` deve ter backing store de RAM física independente.
   - **Descoberta de Particionamento NAND vs eNAND (`/mmc4`)**: A NAND interna (128 MB) armazena exclusivamente o SO (BREW/Rex/L4) e o Z-Wheel (`274755`). Todos os jogos comerciais ficam na eNAND externa (`fs:/mmc4/`). O Z-Wheel é o aplicativo central autêntico presente no dump da NAND.
