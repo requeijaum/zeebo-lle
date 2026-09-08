@@ -102,14 +102,18 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// QW8: structured unknown-MMIO diagnostics.
+// QW8: partial structured unknown-unmapped-access diagnostics.
 //
-// When the guest touches an address with no registered handler (an "unknown"
-// MMIO access), the orchestrator records a structured event instead of relying
-// on ad-hoc printf trace blocks. Events are held in a bounded ring so an agent
-// can query the most recent ones (via a probe / pause-error payload) with full
-// context: core, PC, address, width, direction and — for writes — the value.
-struct MmioEvent {
+// When the guest touches an address with no mapped page, Unicorn's
+// UC_HOOK_MEM_*_UNMAPPED fires. This captures ANY unmapped access — it does
+// NOT prove the target is an MMIO peripheral register; it may be a stray
+// pointer, an unmapped RAM/stack region, or a not-yet-discovered device. So we
+// record it honestly as an "unknown unmapped access", not as "unknown MMIO".
+// Events are held in a bounded ring so an agent can query the most recent ones
+// with full context: core, PC, address, width, direction and — for writes —
+// the value. This is a passive, bounded diagnostic log: it does NOT pause the
+// machine, raise an error, or alter auto-map behavior.
+struct UnmappedAccessEvent {
     unsigned long core = 0;
     unsigned long pc = 0;
     unsigned long addr = 0;
@@ -119,12 +123,12 @@ struct MmioEvent {
     unsigned long long value = 0;
 };
 
-class MmioEventLog {
+class UnmappedAccessLog {
 public:
-    explicit MmioEventLog(size_t capacity = 64)
+    explicit UnmappedAccessLog(size_t capacity = 64)
         : capacity_(capacity ? capacity : 1) {}
 
-    void Record(const MmioEvent& ev) {
+    void Record(const UnmappedAccessEvent& ev) {
         ++seen_;
         if (ring_.size() < capacity_) {
             ring_.push_back(ev);
@@ -138,7 +142,7 @@ public:
     unsigned long long CountSeen() const { return seen_; }
 
     // Render one event as a JSON object.
-    static std::string EventJson(const MmioEvent& ev) {
+    static std::string EventJson(const UnmappedAccessEvent& ev) {
         char b[256];
         if (ev.has_value) {
             std::snprintf(b, sizeof(b),
@@ -173,7 +177,7 @@ private:
     size_t capacity_;
     size_t head_ = 0;
     unsigned long long seen_ = 0;
-    std::vector<MmioEvent> ring_;
+    std::vector<UnmappedAccessEvent> ring_;
 };
 
 } // namespace zeebo_lle
