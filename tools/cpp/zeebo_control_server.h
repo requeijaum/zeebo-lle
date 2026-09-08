@@ -48,6 +48,7 @@ struct ControlRequest {
     std::string str_hex;
     std::string str_mode;
     std::string str_action;
+    std::string str_probe;
     unsigned long core = 0;
     unsigned long i0 = 0;       // ticks / n / addr / lo
     unsigned long i1 = 0;       // len
@@ -203,6 +204,7 @@ private:
         req.str_hex = ExtractString(s, "hex");
         req.str_mode = ExtractString(s, "mode");
         req.str_action = ExtractString(s, "action");
+        req.str_probe = ExtractString(s, "probe");
 
         unsigned long c;
         if (ExtractInt(s, "core", &c)) {
