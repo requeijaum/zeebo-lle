@@ -39,6 +39,15 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
 	./test_l4_mmu_uc
 
+# QW13: regressão TRANSACIONAL de L4_MapControl sob Unicorn — fixa MRs iniciais,
+# entradas da syscall, transação de map (regiões criadas em ordem), bytes de
+# retorno phys_desc/fpage no UTCB, resultado r0 e o avanço do mempool_init.
+# Pega o bug do Passo 13 (mempool_init relê MR[1]) via mutação. Sem Unicorn não
+# roda; requer libunicorn.
+test_l4_mmu_txn: test_l4_mmu_txn.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_txn.cpp -lunicorn
+	./test_l4_mmu_txn
+
 # QW1: harness isolado de BootInfo/fpage (host-only, sem Unicorn).
 #
 # A NAND real (nand/*.bin) é proprietária e gitignored, portanto NUNCA está
@@ -155,7 +164,7 @@ test-cli: zeebo_lle_main
 # `check` verde sem jamais alegar validação real-byte que não ocorreu.
 check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
+       test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
        test_probe_registry test-txn
 	./test_audio_sink
 	./test_control_server
@@ -166,7 +175,7 @@ check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc \
+	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry
