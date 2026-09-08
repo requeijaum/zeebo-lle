@@ -204,6 +204,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Arquitetura de Memória e Sistema de Arquivos Auditados via Corpus/Hardware Real**:
   - **Descoberta de MMU ARM9**: O dump de MMU L1 do hardware real comprova que `VA 0xf0000000 = PA 0x00a00000 (SECTION)` é SRAM física interna de dados. O código executável reside em seções físicas dedicadas (`0x16e00000..0x17b00000`). O heap em `0xf0000000` deve ter backing store de RAM física independente.
   - **Descoberta de Particionamento NAND vs eNAND (`/mmc4`)**: A NAND interna (128 MB) armazena exclusivamente o SO (BREW/Rex/L4) e o Z-Wheel (`274755`). Todos os jogos comerciais ficam na eNAND externa (`fs:/mmc4/`). O Z-Wheel é o aplicativo central autêntico presente no dump da NAND.
+  - **Subsistema ZeeboNet e Schemas SQLite Mapeados (commits `0db8cfa`, `be2da3d`)**: Documentados em `notes/ZWHEEL_SQLITE_SCHEMAS.md` os schemas DDL de `tt_game_info` (`GAMEINFO`, `TITLETEXT`, `DBINFO`), `tt_prefs.db` (`PREFSINFO`), `tt_dlqueue.db` (`DLITEMINFO`) e cache DSL `ASSETS`. Mapeado o cliente embutido da loja na Z-Wheel, o destino direto em `fs:/mmc4/` e o daemon `ZeeboMCP` (`fs:/zmcp.dat`).
 - [x] **Estrutura de Arquivos EFS2APPS Mapeada (76.731 Dirents)**:
   - Formato binário comprovado contra o dump `nand/1.1.2.bin`: `0x69 [inode u32][reclen u8][type u8][parent_ref u32][pad 00][name (reclen-5)]`.
   - Semântica de hierarquia decodificada: `parent_ref = (parent_inode << 8) | tag`.
