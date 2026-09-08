@@ -491,9 +491,12 @@ public:
                 printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\n", c, (int)e0, uc_strerror(e0), core0_.entry);
             }
 
-            // Step Core 1 (ARM9)
-            uc_err e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
-            uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+            // Step Core 1 (ARM9) — pula se o slide-detector ja abortou o Core1
+            uc_err e1 = UC_ERR_OK;
+            if (!core1_.halted) {
+                e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
+                uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+            }
 
             if (c % 10 == 0 || c < 5) {
                 printf("  [Cycle %02d] Core0(ARM11): pc=0x%08x insns=%llu (%s) | Core1(ARM9): pc=0x%08x insns=%llu (%s)\n",
@@ -853,6 +856,13 @@ private:
         uc_mem_map(core1_.uc, 0x00a00000, 0x00600000, UC_PROT_ALL);
         uc_mem_map(core1_.uc, 0x16e00000, 0x17a60000-0x16e00000, UC_PROT_ALL);
         uc_mem_map(core1_.uc, 0x20000000, 0x01000000, UC_PROT_ALL);
+
+        // AMSS Virtual Windows (Core 1 / REX). O reset vector real fica no VA
+        // 0xf0000000 (kernel high VA) — o e_entry (PA 0xa00000) e traduzido para ca
+        // em load_amss. Sem esses mapeamentos os uc_mem_write dos segmentos falham
+        // silenciosamente e o Core1 pega UC_ERR_FETCH_UNMAPPED em 0xf0000000.
+        uc_mem_map(core1_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel/REX High VA
+        uc_mem_map(core1_.uc, 0xb0000000, 0x01000000, UC_PROT_ALL); // AMSS user/task VA
 
         // Peripherals on Core 0
         uc_mem_map(core0_.uc, MSM_MDDI_BASE, MDDI_SIZE, UC_PROT_ALL);
@@ -1509,6 +1519,50 @@ private:
     static void c1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
+
+        // ── Slide-detector (Item 1) ────────────────────────────────────────
+        // Se o PC avanca estritamente +4 (ARM) por N insns consecutivas sem
+        // nenhum branch tomado — ou entra em area zerada/NOP — o Core1 esta
+        // "escorregando" (NOP-slide): entry errado, sem preambulo de reset.
+        // Detectamos em milissegundos em vez de rodar 90s cegos ate crashar
+        // em pc=0x00fffffe (padrao de ouro do Rafael: bytes/branches reais).
+        {
+            CoreState& c = sys->core1_;
+            u32 pc = (u32)ad;
+            if (c.slide_last_pc != 0 && pc == c.slide_last_pc + 4) {
+                c.slide_run++;
+            } else {
+                c.slide_run = 0;  // branch tomado / PC nao-linear -> reset
+            }
+            c.slide_last_pc = pc;
+
+            // Detecta tambem area zerada/NOP: le a instrucao corrente.
+            bool blank = false;
+            {
+                u32 insn = 0;
+                if (uc_mem_read(uc, ad, &insn, 4) == UC_ERR_OK) {
+                    // 0x00000000 (andeq r0,r0,r0) e 0xe1a00000 (nop/mov r0,r0)
+                    // sao os padroes de "slide" tipicos.
+                    if (insn == 0x00000000 || insn == 0xe1a00000 || insn == 0xffffffff)
+                        blank = true;
+                }
+            }
+
+            const u32 SLIDE_LIMIT = 256;  // insns lineares consecutivas => derail
+            if (!c.slide_tripped && (c.slide_run >= SLIDE_LIMIT || blank)) {
+                c.slide_tripped = true;
+                printf("\n[Core1][SLIDE-DETECT] NOP-slide detectado @0x%08x "
+                       "(run=%u linear+4, blank=%d). Entry provavelmente errado — "
+                       "abortando execucao do Core1 em vez de rodar cego ate 0xfffffe.\n",
+                       pc, c.slide_run, (int)blank);
+                fflush(stdout);
+                sys->core1_.halted = true;
+                uc_emu_stop(uc);
+                return;
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
+
         if (!sys->c1_script_hooks_.empty()) {
             auto it = sys->c1_script_hooks_.find((u32)ad);
             if (it != sys->c1_script_hooks_.end()) {
