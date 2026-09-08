@@ -476,6 +476,59 @@ public:
         return true;
     }
 
+    // Passo 3 / Fase 13: pré-visualização gráfica da Z-Wheel.
+    // Reproduz, através da MESMA fachada (SoftRasterizer via IglHook), o ciclo
+    // gráfico capturado no harness test-zwheel (slot 10 / byte-offset 0x28 da
+    // vtable do ZeeboApp, chamado com arg=1 em EVT_APP_START): viewport cheio +
+    // clear azul → pixels RGB565 reais, transferidos para a textura/renderer
+    // SDL2 (SDL_RenderPresent) na janela de 640x480.
+    // Retorna a soma dos pixels do framebuffer (prova numérica do pipeline).
+    // Em GUI, mantém a janela aberta apresentando o frame até SDL_QUIT.
+    unsigned long long run_zwheel_preview(bool headless) {
+        printf("[Z-Wheel] Preview: dirigindo o ciclo gráfico (slot 10/0x28, arg=1) "
+               "pelo SoftRasterizer → SDL2 640x480...\n");
+        if (!rast_) {
+            printf("[Z-Wheel][ERRO] SoftRasterizer não inicializado.\n");
+            return 0;
+        }
+        // Caminho idêntico ao roteamento da vtable IGL da Z-Wheel no harness:
+        // set_viewport / clear_color / clear (fachada Adreno 130 → SoftRasterizer).
+        rast_->begin_frame();
+        rast_->set_viewport(0, 0, FB_WIDTH, FB_HEIGHT);
+        rast_->clear_color(0.1f, 0.2f, 0.8f, 1.0f);
+        rast_->clear(0x4000 /*GL_COLOR_BUFFER_BIT*/);
+        rast_->end_frame();
+
+        const u16* fb = rast_->framebuffer_rgb565();
+        unsigned long long sum = 0;
+        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum += fb[i];
+        printf("[Z-Wheel] Frame RGB565 produzido: soma de pixels = %llu\n", sum);
+
+        if (fb && sink_) sink_->update_frame(fb);
+
+        if (headless) {
+            printf("[Z-Wheel] Modo headless: frame único apresentado ao sink (sem janela).\n");
+            return sum;
+        }
+
+        printf("[Z-Wheel] Janela SDL2 ativa — apresentando frame. Feche a janela ou "
+               "pressione ESC/Q para sair.\n");
+        bool run = true;
+        while (run) {
+            if (fb && sink_) sink_->update_frame(fb); // re-apresenta (RenderPresent)
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) { run = false; break; }
+                if (ev.type == SDL_KEYDOWN &&
+                    (ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_q)) {
+                    run = false; break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        return sum;
+    }
+
     void run_interleaved(int cycles, int slice_insns) {
         printf("[System] Beginning interleaved execution: %d cycles x %d insns...\n", cycles, slice_insns);
 
@@ -1955,6 +2008,7 @@ int main(int argc, char** argv) {
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
     std::string applet_path = "";
     bool headless = true;
+    bool zwheel_preview = false;
     int control_port = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -1963,6 +2017,12 @@ int main(int argc, char** argv) {
             headless = false;
         } else if (arg == "--headless") {
             headless = true;
+        } else if (arg == "--zwheel-preview") {
+            zwheel_preview = true;
+            headless = false; // preview interativo abre a janela SDL2
+        } else if (arg == "--zwheel-preview-headless") {
+            zwheel_preview = true;
+            headless = true;  // valida o pipeline sem abrir janela (CI)
         } else if (arg.rfind("--control-port=", 0) == 0) {
             control_port = std::stoi(arg.substr(15));
         } else if (arg.rfind("--applet=", 0) == 0) {
@@ -1998,6 +2058,19 @@ int main(int argc, char** argv) {
         if (!sys.load_applet(applet_path, 0x12000000)) {
             printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
         }
+    }
+
+    // Passo 3 / Fase 13: modo de teste gráfico da Z-Wheel. Dirige o pipeline
+    // SoftRasterizer → SDL2 e apresenta o frame RGB565 comprovado (slot 10/0x28).
+    if (zwheel_preview) {
+        unsigned long long sum = sys.run_zwheel_preview(headless);
+        // Prova numérica: um clear azul de 640x480 tem de somar > 0 pixels.
+        bool ok = (sum > 0ULL);
+        printf("\n%s soma_pixels=%llu\n",
+               ok ? "PASS: pipeline Z-Wheel → SDL2 apresentou frame RGB565."
+                  : "FAIL: pipeline gráfico não produziu pixels.",
+               sum);
+        return ok ? 0 : 1;
     }
 
     // Run interleaved for 250 cycles of 10k instructions

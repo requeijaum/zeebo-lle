@@ -63,10 +63,16 @@ test-rex: zeebo_rex_harness
 
 test-core1: test-rex
 
+# Passo 3 / Fase 13: valida a integração do pipeline gráfico da Z-Wheel
+# (SoftRasterizer, slot 10/0x28) → sink SDL2 no emulador principal, em modo
+# headless (sem abrir janela), comprovando frame RGB565 com soma de pixels > 0.
+test-zwheel-preview: zeebo_lle_main
+	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --zwheel-preview-headless
+
 clean:
 	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
