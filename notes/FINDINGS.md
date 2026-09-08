@@ -1751,3 +1751,44 @@ f0017894  b  0xf0017894   <-- segundo self-loop (trap adjacente)
    table) que ainda não emulamos.
 2. Core0: identificar quem deveria escrever `KIP+0xc8` bit0 (rastrear no APPS.bin quem
    referencia 0xf0f000c8) — é estado do microkernel local, não do Core1.
+
+## 2026-09-08 — RESOLVIDO: KIP+0xc8 é PageInfo (page-size mask), NÃO um poll-bit
+
+### Diagnóstico correto (disassembly ARM de 0xb000d498, seg b0000000 foff 0x3d498)
+O commit anterior interpretou `[r0+0xc8] bit0` como um bit de handshake/poll que
+"ninguém escrevia". ERRADO. O disassembly ARM (não Thumb) mostra a rotina real:
+```
+b000d494  bl   0xb000c720        ; = L4_KernelInterface (svc#0x14, sp&0xff=0xb4) -> r0=KIP base
+b000d498  ldr  r3, [r0, #0xc8]    ; le KIP+0xc8 = PageInfo
+b000d49c  bic  r2, r3, #0x3fc     ; limpa bits[2:9]
+b000d4a0  bic  r2, r2, #3         ; limpa bits[0:1]  => r2 = page-size mask (bits[10:31])
+b000d4a4  b    0xb000d4b4
+b000d4a8  ldr  r3,[r4]; add r3,#1; str r3,[r4]   ; contador do bit-scan
+b000d4b4  tst  r2, #1
+b000d4b8  lsr  r2, r2, #1
+b000d4bc  beq  0xb000d4a8         ; procura o MENOR bit setado (= log2 do menor page size)
+```
+Isto é **exatamente** `l4e_min_pagesize()` (string vista na sessão 2e). O campo
+KIP+0xc8 é o **PageInfo** da L4 KernelInterfacePage:
+- bits[0:9] = page access-rights (rwx)
+- bits[10:31] = page-size mask (bit N setado => tamanho de página 2^N suportado)
+Com o campo = 0, nenhum bit existe -> o bit-scan (0xb000d4a8) nunca termina =
+loop infinito. **NÃO havia produtor faltando** — o KIP simplesmente estava mal
+inicializado por nós (campo 0x00000000). O produtor é o próprio microkernel/boot
+que constrói o KIP; nós o construímos em `build_kip()` e faltava esse campo.
+
+### Correção (legítima, spec OKL4)
+`tools/cpp/zeebo_lle_main.cpp::build_kip()`: `KIP[0xc8] = 0x01111006`
+= bits 12,16,20,24 (páginas 4K/64K/1M/16M do MMU ARMv6/ARM1136 do MSM7201A) | rwx=0x6.
+Menor page size = 4KB (bit 12), condizente com `l4e_min_pagesize()==0x1000`.
+
+### Resultado real (`./zeebo_lle_main --headless`, rodar de tools/cpp/)
+- Antes: Core0 preso PERMANENTEMENTE em 0xb000d4a8 (mask=0, bit-scan infinito).
+- Depois: o bit-scan TERMINA organicamente — telemetria mostra r2(mask) a deslizar
+  0x00888800 -> 0x00444400 -> 0x00111100 -> ... até achar o bit 12. Core0 sai do
+  loop e AVANÇA para 0xb000d6b8 (após `bl 0xb000d570`), uma NOVA fronteira
+  (caminho de mapping/MAP_CONTROL), independente e a jusante. Sem forçar bits.
+- Core1 permanece na barreira 0xf0017890 (REX MMU bring-up) — problema separado,
+  inalterado por esta correção.
+CONCLUSÃO: KIP+0xc8 destravado legitimamente via spec. Próxima fronteira Core0 =
+0xb000d6b8 / MAP_CONTROL mapping (já conhecido).

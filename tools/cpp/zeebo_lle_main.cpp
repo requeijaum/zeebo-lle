@@ -925,8 +925,17 @@ private:
         w32(0xb8, 0x10000000);             // KIP[0xb8] -> RAM base
         w32(0xbc, 0x1);                    // memdesc[0].type = conventional
         w32(0xc0, 0x0);                    // memdesc[0].virt
+        // KIP+0xc8 = PageInfo (L4 KernelInterfacePage.MemoryInfo/PageInfo word).
+        // Layout: bits[0:9] = page access-rights (rwx), bits[10:31] = page-size mask
+        // (bit N set => 2^N page size supported). O firmware executa l4e_min_pagesize()
+        // em 0xb000d498: ldr r3,[r0,#0xc8]; bic ~0x3ff (limpa rwx); depois faz bit-scan
+        // (tst #1; lsr #1; loop 0xb000d4a8) procurando o MENOR bit setado = log2 do menor
+        // tamanho de pagina. Com 0 nenhum bit existe -> loop infinito. O MMU ARM do
+        // MSM7201A (ARM1136/ARMv6) suporta paginas 4K/64K/1M/16M => bits 12,16,20,24.
+        // rwx = 0x6 (RW). Valor conforme okl4-2.1.1 ARM (min page = 4KB).
+        w32(0xc8, (1u<<12)|(1u<<16)|(1u<<20)|(1u<<24)|0x6); // PageInfo = 0x01111006
         uc_mem_write(core0_.uc, KIP_BASE, kip.data(), kip.size());
-        printf("[KIP] Kernel Interface Page @ 0x%08x (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000)\n", KIP_BASE);
+        printf("[KIP] Kernel Interface Page @ 0x%08x (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000, PageInfo[0xc8]=0x01111006 min-page=4K)\n", KIP_BASE);
     }
 
     // DMOV DMA-driven single page read through EBI2 command list
