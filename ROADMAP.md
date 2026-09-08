@@ -246,14 +246,18 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Em `handle_map_control`, os descritores processados agora são gravados de volta no UTCB (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`), atendendo à convenção do Iguana OS/OKL4.
   - O Core 0 agora avança além de `0xb000d860`: o laço `mempool_init` itera com múltiplos VAs (`0x00000000`, `0xb0d00000`, etc.), progredindo a execução interfolheada (60 ciclos completos sem travamento em `0xb000d860`).
   - Suíte completa de testes verde (exit 0).
-- [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader (Concluído `f1b03fa`)**:
+- [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader e Catálogo de Applets (Concluído `f1b03fa` e `645f332`)**:
   - Integrado o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
   - Adicionado `BrewLoader::inject_bytes()` em `tools/cpp/zeebo_brew_loader.h` para injeção de payloads materializados direto da memória.
   - Implementados métodos `ZeeboLLESystem::efs2_ls()`, `efs2_extract()` e `load_applet_from_efs2()`: varrem os 69.634 dirents da partição `0:EFS2APPS` (`0x3220000`), resolvem dirents por `(parent_inode, name)` e extraem a cadeia de clusters do bloco indireto, injetando via `BrewLoader`.
   - Adicionadas flags CLI `--efs2-ls[=filtro]` (lista dirents, ex: `.mod`) e `--efs2-run=<arquivo>` (extrai e injeta em Core 0).
-  - Extração comprovada por bytes reais do dump: `reksio.mod` extraído (64 KiB, bloco indireto `0x3b1d400`, FNV-1a idêntico `0xd9339103`). Suíte verde.
-- [ ] **Passo 8: Handoff Iguana OS → Servidores de Usuário / AEECShell**:
-  - Investigar e implementar o progresso do Iguana OS após a inicialização de pools de memória até a instanciação dos servidores de arquivos e tarefas de usuário.
+  - Catálogo de blocos indiretos comprovados por bytes expandido:
+    - `reksio.mod`: bloco indireto `@0x3b1d400`, 64 KiB, FNV-1a `0xd9339103`.
+    - `274755` (Z-Wheel / ZeeboApp, CLSID `0x01070798`): bloco indireto `@0x3a92000`, 64 KiB, FNV-1a `0x544a6f30`, assinatura ASCII `"274755"`.
+    - `tectoy.mod`: bloco indireto `@0x6026200`, 64 KiB, FNV-1a `0xf7c3c740`, assinatura ASCII `"tectoy.claro.com.br"`, dirent `inode=0x7ff13, parent=0x1fae8`.
+  - Harness `test_efs2_fs.cpp` expandido de 18 para **31/31 testes PASS**. Suíte completa verde.
+- [ ] **Passo 8: Handoff Iguana OS → Servidores de Usuário / Diagnóstico de Granularidade de FPage**:
+  - Diagnóstico da Task 1/2: em `mempool_init`, a rotina de decomposição de fpages (`0xb000d4dc` $\rightarrow$ `0xb000d464`) lê os descritores de memória e calculou um `size_log2` nulo para o granule de pool, impedindo o avanço de `r4` (`0xb000d6dc: add r4, r4, r0`). Necessário ajustar o retorno de `min_pagesize` / descritores KIP para que o split gere fpages válidas.
 
 ---
 
