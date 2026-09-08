@@ -1916,21 +1916,18 @@ private:
         // (Core1/REX ou resposta de IPC). PROIBIDO forçar r2=1 (fake progress 5a).
         // Esta sonda apenas OBSERVA: loga o valor de polling e conta iterações,
         // sem tocar r2 nem nenhum registrador/memória.
+        // Endereço 0xb000d4a8: rotina l4e_min_pagesize() / CTZ de PageInfo da KIP
+        // (Varre zeros a direita em KIP[0xc8] para extrair log2 do menor tamanho de pagina)
+        // Linhas de monitoramento mantidas de forma transparente:
         if (ad == 0xb000d4a8) {
-            u32 r0 = 0, r2 = 0, r4 = 0;
+            u32 r0 = 0, r2 = 0, r3 = 0;
             uc_reg_read(uc, UC_ARM_REG_R0, &r0);
             uc_reg_read(uc, UC_ARM_REG_R2, &r2);
-            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
-            u32 status = 0;
-            // LUT-first (VTLB direto O(1)); cai em uc_mem_read se não mapeado.
-            if (!sys->vtlb_.read_u32((uint64_t)r0 + 0xc8, &status))
-                uc_mem_read(uc, (uint64_t)r0 + 0xc8, &status, 4);
+            uc_reg_read(uc, UC_ARM_REG_R3, &r3);
             u64 n = ++sys->c0_poll_d4a8_iters_;
-            // Log esparso: 1ª, 2ª e depois a cada potência de 2 (evita flood/lentidão).
             if (n <= 2 || (n & (n - 1)) == 0) {
-                printf("[Core0/POLL] 0xb000d4a8 iter=%llu status[0x%08x+0xc8]=0x%08x "
-                       "r2(mask)=0x%08x bit0=%u (aguardando produtor; r2 NAO forcado)\n",
-                       (unsigned long long)n, r0, status, r2, (unsigned)(r2 & 1));
+                printf("[Core0/CTZ] 0xb000d4a8 iter=%llu r0(kip)=0x%08x r2(scan)=0x%08x r3(pageinfo)=0x%08x\n",
+                       (unsigned long long)n, r0, r2, r3);
             }
         }
         // Intercepta a trap SVC L4_KernelInterface diretamente no endereço real para garantia de desvio
