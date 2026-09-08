@@ -19,7 +19,7 @@ gpu_smoke_gl: gpu_smoke.cpp soft_rasterizer.cpp gl_host_rasterizer.cpp rasterize
 clean:
 	rm -f gpu_smoke gpu_smoke_gl igl_smoke gpu_display_integration \
 	      igl_transform_smoke igl_guest_bridge_test gl_quickwins_smoke \
-	      gl_alpha_sampler_smoke atitc_smoke
+	      gl_alpha_sampler_smoke atitc_smoke gl_clip_smoke
 
 # IglHook (produtor CORRETO, FASE 1 real) — prova por framebuffer sem Unicorn.
 igl_smoke: igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
@@ -63,3 +63,11 @@ atitc_smoke: atitc_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory
 
 test-atitc: atitc_smoke
 	./atitc_smoke
+
+# QW10 near-plane homogeneous clipping + QW11 perspective-correct interpolation.
+# Feeds the rasterizer CLIP-SPACE (x,y,z,w) vertices directly — strict pixel TDD.
+gl_clip_smoke: gl_clip_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h
+	$(CXX) $(CXXFLAGS) gl_clip_smoke.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o gl_clip_smoke
+
+test-clip: gl_clip_smoke
+	./gl_clip_smoke

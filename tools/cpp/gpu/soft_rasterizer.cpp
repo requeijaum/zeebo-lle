@@ -185,60 +185,130 @@ private:
         }
     }
 
-    // Mapeia NDC [-1,1] para o viewport (vx,vy,vw,vh), y-flip p/ tela top-down.
-    void fill_tri(const Vertex&a,const Vertex&b,const Vertex&c){
+    // ---- QW10/QW11 pipeline ------------------------------------------------
+    // Vertices arrive in CLIP SPACE (x,y,z,w). The rasterizer owns:
+    //   (1) QW10: homogeneous near-plane clipping z+w>=0 BEFORE the divide, then
+    //       polygon triangulation (fan) of the clipped result.
+    //   (2) the perspective divide (x,y,z)/w with finite/epsilon-w guards, and
+    //   (3) QW11: perspective-correct interpolation of color/texcoords via the
+    //       reciprocal-w denominator, but AFFINE (screen-linear) interpolation of
+    //       the per-vertex NDC depth z_i/w_i for the window depth (NOT the generic
+    //       denominator applied a second time -- see gl_clip_smoke.cpp QW11c audit).
+
+    // Linear interpolation of ALL vertex attributes at parameter t (clip space).
+    static Vertex lerp_vertex(const Vertex& a,const Vertex& b,f32 t){
+        Vertex o;
+        o.x=a.x+(b.x-a.x)*t; o.y=a.y+(b.y-a.y)*t; o.z=a.z+(b.z-a.z)*t; o.w=a.w+(b.w-a.w)*t;
+        o.r=a.r+(b.r-a.r)*t; o.g=a.g+(b.g-a.g)*t; o.b=a.b+(b.b-a.b)*t; o.a=a.a+(b.a-a.a)*t;
+        o.u=a.u+(b.u-a.u)*t; o.v=a.v+(b.v-a.v)*t;
+        o.u1=a.u1+(b.u1-a.u1)*t; o.v1=a.v1+(b.v1-a.v1)*t;
+        return o;
+    }
+    // Sutherland-Hodgman clip of a convex polygon against the near plane z+w>=0.
+    static std::vector<Vertex> clip_near(const std::vector<Vertex>& in){
+        std::vector<Vertex> out;
+        const size_t n=in.size(); if(n==0) return out;
+        auto dist=[](const Vertex& v){ return v.z+v.w; };   // >=0 keeps the vertex
+        for(size_t i=0;i<n;++i){
+            const Vertex& cur=in[i]; const Vertex& nxt=in[(i+1)%n];
+            const f32 dc=dist(cur), dn=dist(nxt);
+            const bool cin=dc>=0.0f, nin=dn>=0.0f;
+            if(cin) out.push_back(cur);
+            if(cin!=nin){
+                const f32 denom=dc-dn;
+                // crossing parameter; guard against a degenerate (both ~plane) edge.
+                if(std::fabs(denom)>1e-20f){
+                    const f32 t=dc/denom;
+                    out.push_back(lerp_vertex(cur,nxt,std::clamp(t,0.0f,1.0f)));
+                }
+            }
+        }
+        return out;
+    }
+
+    // Rasterize ONE post-clip triangle whose vertices are in clip space.
+    void raster_clipped_tri(const Vertex&a,const Vertex&b,const Vertex&c){
+        // Robust w guard: a vertex with non-finite or ~0 clip w has no well-defined
+        // projection (the perspective divide would explode). Rather than clamp it
+        // into a giant screen-filling triangle, we DROP the whole triangle. This
+        // keeps QW10f (w~0/nonfinite) bounded and crash-free without painting garbage.
+        auto bad_w=[](f32 w){ return !std::isfinite(w) || std::fabs(w)<1e-6f; };
+        if(bad_w(a.w)||bad_w(b.w)||bad_w(c.w)) return;
         auto finite_ndc=[](f32 v){ return std::isfinite(v) ? std::clamp(v,-4.0f,4.0f) : 0.0f; };
+        const f32 wa=a.w, wb=b.w, wc=c.w;
+        const f32 iwa=1.0f/wa, iwb=1.0f/wb, iwc=1.0f/wc;
+        // NDC coordinates (post divide).
+        const f32 nax=a.x*iwa, nay=a.y*iwa, naz=a.z*iwa;
+        const f32 nbx=b.x*iwb, nby=b.y*iwb, nbz=b.z*iwb;
+        const f32 ncx=c.x*iwc, ncy=c.y*iwc, ncz=c.z*iwc;
         auto sx=[&](f32 x){ return vx_ + static_cast<int>((finite_ndc(x)*0.5f+0.5f)*static_cast<f32>(vw_)); };
         auto sy=[&](f32 y){ return vy_ + static_cast<int>((1.f-(finite_ndc(y)*0.5f+0.5f))*static_cast<f32>(vh_)); };
-        int x0=sx(a.x),y0=sy(a.y),x1=sx(b.x),y1=sy(b.y),x2=sx(c.x),y2=sy(c.y);
-        int minx=std::max(0,std::min({x0,x1,x2})), maxx=std::min(kFbWidth-1,std::max({x0,x1,x2}));
-        int miny=std::max(0,std::min({y0,y1,y2})), maxy=std::min(kFbHeight-1,std::max({y0,y1,y2}));
+        const int x0=sx(nax),y0=sy(nay),x1=sx(nbx),y1=sy(nby),x2=sx(ncx),y2=sy(ncy);
+        const int minx=std::max(0,std::min({x0,x1,x2})), maxx=std::min(kFbWidth-1,std::max({x0,x1,x2}));
+        const int miny=std::max(0,std::min({y0,y1,y2})), maxy=std::min(kFbHeight-1,std::max({y0,y1,y2}));
         const int64_t area=int64_t(x1-x0)*(y2-y0)-int64_t(x2-x0)*(y1-y0); if(area==0) return;
         // Face culling (GLES): default front face = CCW. In screen space y is
         // flipped, so a CCW-in-NDC front face has NEGATIVE signed screen area.
         if(st_.cull){
-            const bool is_front = area<0;           // screen-space front (CCW in NDC)
-            const bool cull_back  = st_.cull_face==0x0405 || st_.cull_face==0x0408; // BACK/F&B
-            const bool cull_front = st_.cull_face==0x0404 || st_.cull_face==0x0408; // FRONT/F&B
+            const bool is_front = area<0;
+            const bool cull_back  = st_.cull_face==0x0405 || st_.cull_face==0x0408;
+            const bool cull_front = st_.cull_face==0x0404 || st_.cull_face==0x0408;
             if((is_front && cull_front) || (!is_front && cull_back)) return;
         }
+        const bool tex_on = st_.tex_enabled[std::min<u32>(st_.active_unit,1)] != 0;
         for(int y=miny;y<=maxy;++y) for(int x=minx;x<=maxx;++x){
             const int64_t w0=int64_t(x1-x)*(y2-y)-int64_t(x2-x)*(y1-y);
             const int64_t w1=int64_t(x2-x)*(y0-y)-int64_t(x0-x)*(y2-y);
             const int64_t w2=int64_t(x0-x)*(y1-y)-int64_t(x1-x)*(y0-y);
-            if((w0>=0&&w1>=0&&w2>=0)||(w0<=0&&w1<=0&&w2<=0)){
-                const f32 fa=(f32)w0/area, fb=(f32)w1/area, fc=(f32)w2/area;
-                const size_t pixel=static_cast<size_t>(y)*kFbWidth+x;
-                const f32 z=std::clamp((fa*a.z+fb*b.z+fc*c.z)*0.5f+0.5f,0.0f,1.0f);
-                if(st_.depth_test && !depth_pass(st_.depth_func,z,depth_[pixel])) continue;
-                f32 r=fa*a.r+fb*b.r+fc*c.r;
-                f32 g=fa*a.g+fb*b.g+fc*c.g;
-                f32 bl=fa*a.b+fb*b.b+fc*c.b;
-                f32 alpha=fa*a.a+fb*b.a+fc*c.a;
-                if(st_.tex_enabled[std::min<u32>(st_.active_unit,1)] != 0){
-                    const f32 u=fa*a.u+fb*b.u+fc*c.u;
-                    const f32 v=fa*a.v+fb*b.v+fc*c.v;
-                    const auto texel=sample_texture(u,v);
-                    r*=texel[0]; g*=texel[1]; bl*=texel[2]; alpha*=texel[3];
-                }
-                // Alpha test: discard fragment BEFORE depth write / blend.
-                if(st_.alpha_test && !alpha_pass(st_.alpha_func,alpha,st_.alpha_ref)) continue;
-                if(st_.depth_test && st_.depth_write) depth_[pixel]=z;
-                if(st_.blend){
-                    const u16 dst=fb_[pixel];
-                    const f32 dr=((dst>>11)&31)/31.f, dg=((dst>>5)&63)/63.f, db=(dst&31)/31.f, da=1.f;
-                    const f32 sr=std::clamp(r,0.f,1.f),sg=std::clamp(g,0.f,1.f),
-                              sb=std::clamp(bl,0.f,1.f),sa=std::clamp(alpha,0.f,1.f);
-                    r  = sr*blend_factor(st_.blend_src,0,sr,sg,sb,sa,dr,dg,db,da)
-                       + dr*blend_factor(st_.blend_dst,0,sr,sg,sb,sa,dr,dg,db,da);
-                    g  = sg*blend_factor(st_.blend_src,1,sr,sg,sb,sa,dr,dg,db,da)
-                       + dg*blend_factor(st_.blend_dst,1,sr,sg,sb,sa,dr,dg,db,da);
-                    bl = sb*blend_factor(st_.blend_src,2,sr,sg,sb,sa,dr,dg,db,da)
-                       + db*blend_factor(st_.blend_dst,2,sr,sg,sb,sa,dr,dg,db,da);
-                }
-                fb_[pixel]=pack565(r,g,bl);
+            if(!((w0>=0&&w1>=0&&w2>=0)||(w0<=0&&w1<=0&&w2<=0))) continue;
+            const f32 fa=(f32)w0/area, fb=(f32)w1/area, fc=(f32)w2/area;
+            const size_t pixel=static_cast<size_t>(y)*kFbWidth+x;
+            // WINDOW DEPTH: affine interpolation of per-vertex NDC z (screen-linear).
+            const f32 z=std::clamp((fa*naz+fb*nbz+fc*ncz)*0.5f+0.5f,0.0f,1.0f);
+            if(st_.depth_test && !depth_pass(st_.depth_func,z,depth_[pixel])) continue;
+            // COLOR/TEXCOORD: perspective-correct  a = (S l a/w)/(S l 1/w).
+            const f32 iw=fa*iwa+fb*iwb+fc*iwc;
+            const f32 inv_iw=(std::fabs(iw)>1e-20f)?1.0f/iw:0.0f;
+            auto persp=[&](f32 va,f32 vb,f32 vc){
+                return (fa*va*iwa+fb*vb*iwb+fc*vc*iwc)*inv_iw;
+            };
+            f32 r=persp(a.r,b.r,c.r);
+            f32 g=persp(a.g,b.g,c.g);
+            f32 bl=persp(a.b,b.b,c.b);
+            f32 alpha=persp(a.a,b.a,c.a);
+            if(tex_on){
+                const f32 u=persp(a.u,b.u,c.u);
+                const f32 v=persp(a.v,b.v,c.v);
+                const auto texel=sample_texture(u,v);
+                r*=texel[0]; g*=texel[1]; bl*=texel[2]; alpha*=texel[3];
             }
+            if(st_.alpha_test && !alpha_pass(st_.alpha_func,alpha,st_.alpha_ref)) continue;
+            if(st_.depth_test && st_.depth_write) depth_[pixel]=z;
+            if(st_.blend){
+                const u16 dst=fb_[pixel];
+                const f32 dr=((dst>>11)&31)/31.f, dg=((dst>>5)&63)/63.f, db=(dst&31)/31.f, da=1.f;
+                const f32 sr=std::clamp(r,0.f,1.f),sg=std::clamp(g,0.f,1.f),
+                          sb=std::clamp(bl,0.f,1.f),sa=std::clamp(alpha,0.f,1.f);
+                r  = sr*blend_factor(st_.blend_src,0,sr,sg,sb,sa,dr,dg,db,da)
+                   + dr*blend_factor(st_.blend_dst,0,sr,sg,sb,sa,dr,dg,db,da);
+                g  = sg*blend_factor(st_.blend_src,1,sr,sg,sb,sa,dr,dg,db,da)
+                   + dg*blend_factor(st_.blend_dst,1,sr,sg,sb,sa,dr,dg,db,da);
+                bl = sb*blend_factor(st_.blend_src,2,sr,sg,sb,sa,dr,dg,db,da)
+                   + db*blend_factor(st_.blend_dst,2,sr,sg,sb,sa,dr,dg,db,da);
+            }
+            fb_[pixel]=pack565(r,g,bl);
         }
+    }
+
+    // Entry point: near-clip the clip-space triangle, then fan-triangulate + raster.
+    void fill_tri(const Vertex&a,const Vertex&b,const Vertex&c){
+        // Reject triangles with any non-finite position component up front only for
+        // the CLIP test's sake; keep them for the divide guard otherwise. We still
+        // pass through so QW10f (w~0/nonfinite) exercises the epsilon path.
+        std::vector<Vertex> poly=clip_near({a,b,c});
+        if(poly.size()<3) return;                 // fully behind near plane -> nothing
+        for(size_t i=1;i+1<poly.size();++i)       // fan triangulation of convex polygon
+            raster_clipped_tri(poly[0],poly[i],poly[i+1]);
     }
     std::vector<u16> fb_;
     std::vector<f32> depth_;
