@@ -408,11 +408,19 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
         // Em L4e/OKL4 2.1.1, MapControl devolve nos MRs a descrição das fpages
         // efetivamente processadas: MR[i*2] = phys_desc resultante, MR[i*2+1] =
         // fpage resultante. O mempool_init do Iguana (@0xb000d864..0xb000d89c)
-        // relê MR[1] (offset 0x44) para extrair size_log2 do fpage e avançar o
-        // ponteiro do pool (lsl r4,r4,r3), e MR[0] (offset 0x40) para compor o
-        // endereço base. Sem escrever de volta, o guest lê lixo/zero e o laço
-        // de mempool_init trava em 0xb000d860. Aqui ecoamos os descritores
-        // processados (shim neutro: o que foi pedido é o que foi mapeado).
+        // relê MR[1] (offset 0x44) para extrair size_log2 e MR[0] (offset 0x40)
+        // para compor o endereço base. Ecoamos os descritores processados como
+        // shim neutro: aqui o que foi pedido é o que foi mapeado, então o
+        // resultado é byte-idêntico à entrada.
+        //
+        // ATENÇÃO — evidência não fechada: por ser um echo idêntico à entrada,
+        // NÃO é possível provar por black-box (fora de um guest vivo) que este
+        // write-back é load-bearing. Um guest real que escreve os MRs de entrada
+        // e depois relê os de saída só distinguiria a ausência do write-back se
+        // o kernel devolvesse descritores DIFERENTES dos de entrada — o que este
+        // shim neutro não faz. Mantido por segurança para o caminho de guest
+        // vivo (quando o UTCB de entrada puder diferir do de saída), mas o
+        // "fechamento do Passo 13" permanece BLOQUEADO até esse harness existir.
         write_mr(uc, utcb_base, i * 2u,      mr_phys);
         write_mr(uc, utcb_base, i * 2u + 1u, mr_fpage);
 

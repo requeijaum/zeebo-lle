@@ -1,26 +1,32 @@
-// test_l4_mmu_txn.cpp — QW13: regressão TRANSACIONAL de L4_MapControl sob Unicorn.
+// test_l4_mmu_txn.cpp — QW13: cobertura TRANSACIONAL de L4_MapControl sob Unicorn.
 // ---------------------------------------------------------------------------
-// Fixa a transação COMPLETA da syscall MapControl no espaço real do Unicorn,
-// não apenas a decodificação de bits (isso já é coberto por test_l4_mmu*):
+// Fixa a transação de map da syscall MapControl no espaço REAL do Unicorn
+// (não apenas a decodificação de bits, já coberta por test_l4_mmu*):
 //
 //   1. MRs INICIAIS do UTCB (bytes crus escritos em utcb_base+0x40, +0x44, ...).
 //   2. ENTRADAS da syscall (space_id em r0, control em r1).
-//   3. TRANSAÇÃO de map/callback: regiões efetivamente criadas no Unicorn,
-//      em ORDEM, com base/tamanho/proteção.
-//   4. MRs de RETORNO: bytes exatos de phys_desc/fpage reescritos no UTCB.
-//   5. Resultado r0 da syscall.
-//   6. Reexecução do mempool_init do Iguana: reler MR[1] (offset 0x44) para
-//      extrair size_log2 e AVANÇAR o ponteiro do pool (lsl r4,r4,size_log2).
+//   3. TRANSAÇÃO de map: regiões efetivamente criadas no Unicorn, em ORDEM,
+//      com base/tamanho/proteção, incluindo escrita real de página (não NOP).
+//   4. Resultado r0 da syscall.
+//   5. Comportamento de itens malformados e de fpage de espaço inteiro.
 //
-// Este é o exato mecanismo do bug do Passo 13: se o dispatcher não reescrever
-// os MRs de volta no UTCB, o mempool_init relê 0 em MR[1], size_log2=0, e o
-// avanço do pool colapsa (r4<<0), travando o laço em 0xb000d860. A regressão
-// aqui FALHA por esse mecanismo exato (ver test_l4_mmu_txn_mut.cpp / mutação).
+// LIMITE HONESTO DESTA REGRESSÃO (não é o que o header do commit original
+// afirmava): esta chamada black-box NÃO consegue distinguir a presença ou
+// ausência do write-back idêntico dos MRs (echo neutro). Como o dispatcher
+// relê os MRs que ele mesmo reescreveria com o MESMO valor, o UTCB fica
+// byte-idêntico ao estado de entrada nos dois cenários. Empiricamente: remover
+// o write_mr de produção NÃO faz nenhum CHECK abaixo falhar. Portanto NÃO
+// afirmamos que este teste detecta o write-back ausente do UTCB nem que fecha
+// o "Passo 13" (mempool_init relendo MR[1]). Provar esse mecanismo exige um
+// harness com GUEST VIVO onde a entrada/saída da syscall pode ALTERAR os MRs
+// (kernel escrevendo descritores efetivos diferentes dos de entrada), o que a
+// produção atual — um shim de echo — não faz. QW13 permanece BLOQUEADO para
+// esse escopo; o valor real desta regressão é a transação de map no Unicorn.
 //
 // Casos cobertos:
-//   A. fpage válida de 1MiB (size_log2=20): mapeamento real + MR round-trip.
+//   A. fpage válida de 1MiB (size_log2=20): mapeamento real + escrita de página.
 //   B. múltiplos itens com item malformado (nil) no meio: ordem, skip do
-//      malformado, avanço correto dos itens válidos.
+//      malformado, sem região espúria em 0.
 //   C. espaço inteiro (size_log2>=32): no-op de sucesso, SEM overflow 32-bit
 //      e SEM região criada no Unicorn (não repassa 2^32 ao uc_mem_map).
 //
@@ -70,19 +76,8 @@ static bool any_covers(const std::vector<Region>& v,u64 addr){
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Reexecução byte-exata do laço mempool_init (@0xb000d864..0xb000d89c):
-//   size_log2 = (MR[2*i+1] >> 4) & 0x3f;  pool_next = pool_cur << size_log2 ... 
-// Modelamos o avanço do ponteiro do pool virtual: r4 começa em 1 e é deslocado
-// (lsl r4, r4, size_log2). Se o MR não foi reescrito, size_log2=0 => sem avanço.
-static u64 mempool_advance_from_utcb(uc_engine* uc,u32 utcb,u32 item){
-    u32 fp = read_mr(uc, utcb, item*2u+1u);
-    u32 s  = (fp >> 4) & 0x3fu;
-    return (u64)1u << (s & 63);
-}
-
 int main(){
-    printf("== QW13 L4_MapControl transactional regression ==\n");
+    printf("== QW13 L4_MapControl transactional (map) regression ==\n");
     uc_engine* uc; CHECK(uc_open(UC_ARCH_ARM,UC_MODE_ARM,&uc)==UC_ERR_OK);
     // UTCB do thread corrente (1 página).
     CHECK(uc_mem_map(uc, UTCB_BASE, 0x1000, UC_PROT_READ|UC_PROT_WRITE)==UC_ERR_OK);
@@ -107,11 +102,11 @@ int main(){
         // (2) Entradas da syscall.
         const u32 space_id=0x1, control=make_control(1,true,false);
 
-        // (3)+(4)+(5) Dispatch: cria mapeamento real e reescreve MRs.
+        // (3)+(4) Dispatch: cria mapeamento real.
         std::vector<MapItem> items;
         u32 r0 = handle_map_control(uc, UTCB_BASE, space_id, control, &items);
 
-        // (5) resultado r0 não-nulo (sucesso).
+        // (4) resultado r0 não-nulo (sucesso).
         CHECK(r0==1);
         // itens decodificados na ordem.
         CHECK(items.size()==1);
@@ -123,13 +118,11 @@ int main(){
         auto regs = regions_of(uc);
         CHECK(has_region(regs, VA, 0x100000, UC_PROT_READ|UC_PROT_WRITE|UC_PROT_EXEC));
 
-        // (4) MRs de RETORNO: bytes exatos reescritos (round-trip).
+        // UTCB permanece byte-idêntico ao estado de entrada. NOTA: este CHECK
+        // NÃO distingue write-back de no-op (echo neutro idêntico à entrada);
+        // apenas garante que a transação não corrompeu os MRs.
         CHECK(read_mr(uc,UTCB_BASE,0)==mr_phys);
         CHECK(read_mr(uc,UTCB_BASE,1)==mr_fpage);
-
-        // (6) mempool_init relê MR[1] -> size_log2=20 -> avanço = 1<<20.
-        //     ESTE é o mecanismo do bug do Passo 13. Sem write-back, MR[1]=lixo.
-        CHECK(mempool_advance_from_utcb(uc,UTCB_BASE,0)==((u64)1<<20));
 
         // Prova de escrita real na página mapeada (não é NOP-slide).
         u32 wv=0xa5a5f00d, rv=0;
@@ -143,9 +136,9 @@ int main(){
     // =====================================================================
     // CASO B — múltiplos itens + item MALFORMADO (nil) no meio.
     //   item0: 1MiB válido @0xb0200000
-    //   item1: MALFORMADO (fpage nil raw=0) -> skip, sem região, MR ecoado
+    //   item1: MALFORMADO (fpage nil raw=0) -> skip, sem região
     //   item2:   4KiB válido @0xb0400000
-    // Fixa ORDEM, skip do malformado e AVANÇO de cada item válido.
+    // Fixa ORDEM e skip do malformado.
     // =====================================================================
     {
         printf("-- B: multi-item with malformed (nil) middle item --\n");
@@ -179,15 +172,6 @@ int main(){
         // ...item malformado NÃO cria região (nil raw=0 -> vaddr 0).
         CHECK(!any_covers(regs, 0x0));
 
-        // TODOS os MRs (inclusive o malformado) ecoados byte-a-byte, em ordem.
-        CHECK(read_mr(uc,UTCB_BASE,0)==mr_phys0); CHECK(read_mr(uc,UTCB_BASE,1)==mr_fp0);
-        CHECK(read_mr(uc,UTCB_BASE,2)==mr_phys1); CHECK(read_mr(uc,UTCB_BASE,3)==mr_fp1);
-        CHECK(read_mr(uc,UTCB_BASE,4)==mr_phys2); CHECK(read_mr(uc,UTCB_BASE,5)==mr_fp2);
-
-        // mempool advance por item: item0 -> 1<<20, item2 -> 1<<12.
-        CHECK(mempool_advance_from_utcb(uc,UTCB_BASE,0)==((u64)1<<20));
-        CHECK(mempool_advance_from_utcb(uc,UTCB_BASE,2)==((u64)1<<12));
-
         uc_mem_unmap(uc, VA0, 0x100000);
         uc_mem_unmap(uc, VA2, 0x1000);
     }
@@ -197,7 +181,7 @@ int main(){
     //   Reproduz o descritor que travava o Core 0 com UC_ERR_NOMEM:
     //   va=0xb0d00000, phys=0x100000000, size=2^32, rwx=6.
     //   Exige: (a) r0 sucesso, (b) NENHUMA região criada (não passa 2^32 ao
-    //   uc_mem_map), (c) MR ecoado.
+    //   uc_mem_map), (c) UTCB não corrompido.
     // =====================================================================
     {
         printf("-- C: whole-space fpage (size_log2>=32) no-op success --\n");
@@ -222,7 +206,7 @@ int main(){
         CHECK(after.size()==before.size());
         CHECK(!any_covers(after, 0xb0d00000)); // nada mapeado em 32-bit
 
-        // (c) MR ecoado.
+        // (c) UTCB não corrompido (não distingue echo de no-op — ver nota do topo).
         CHECK(read_mr(uc,UTCB_BASE,0)==mr_phys);
         CHECK(read_mr(uc,UTCB_BASE,1)==mr_fpage);
     }
