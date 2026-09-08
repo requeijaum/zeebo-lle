@@ -81,7 +81,7 @@ test-input: zeebo_input_harness
 clean:
 	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-input
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-input test-efs2-fs
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
@@ -90,6 +90,15 @@ zeebo_efs2apps: zeebo_efs2apps.cpp zeebo_devices.h
 
 test-efs2apps: zeebo_efs2apps
 	./zeebo_efs2apps
+
+# Passo 2 / Fase 13: parser C++ do 0:EFS2APPS (zeebo_efs2_fs.h) — varre dirents
+# (marcador 0x69), resolve (parent_inode,name) em O(1), lê clusters de 512B e
+# encadeia blocos indiretos u32; validado por bytes reais + checksum FNV-1a.
+test_efs2_fs: test_efs2_fs.cpp zeebo_efs2_fs.h
+	$(CXX) $(CXXFLAGS) -o $@ test_efs2_fs.cpp
+
+test-efs2-fs: test_efs2_fs
+	./test_efs2_fs ../../nand/1.1.2.bin
 
 zeebo_elf: zeebo_elf.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_elf.cpp -lunicorn -lcapstone
