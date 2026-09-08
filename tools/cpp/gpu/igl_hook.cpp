@@ -135,6 +135,15 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         return true;
     }
     if(slot==glDepthFunc){ state_.depth_func=gm.arg(0); return true; }
+    if(slot==glAlphaFuncx){ state_.alpha_func=gm.arg(0);
+        state_.alpha_ref=fixed_to_float(gm.arg(1)); return true; }
+    if(slot==glCullFace){ state_.cull_face=gm.arg(0); return true; }
+    if(slot==glTexParameterx){                   // glTexParameterx(target,pname,param)
+        if(gm.arg(0)!=glenum::TEXTURE_2D) return false;
+        const u32 unit=std::min<u32>(state_.active_unit,1);
+        rast_.tex_parameter(unit,gm.arg(1),gm.arg(2));
+        return true;
+    }
     if(slot==glDepthMask){ state_.depth_write=gm.arg(0)!=0; return true; }
     if(slot==glBlendFunc){ state_.blend_src=gm.arg(0); state_.blend_dst=gm.arg(1); return true; }
     if(slot==glBindTexture){

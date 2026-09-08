@@ -57,6 +57,7 @@ public:
     // Texture: id is the guest GL name; data already decoded to RGBA8 host-side
     // (ATITC etc. handled upstream — docs/file-formats.md).
     virtual void tex_image_2d(u32 id,int w,int h,const void* rgba8) = 0;
+    virtual void tex_parameter(u32 unit,u32 pname,u32 param) = 0;
     virtual void bind_texture(u32 unit,u32 id) = 0;
     virtual void delete_texture(u32 id) = 0;
 
