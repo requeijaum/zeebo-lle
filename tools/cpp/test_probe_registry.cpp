@@ -159,5 +159,90 @@ int main() {
         assert(js.find("\"pc\":3") != std::string::npos);
     }
 
+    // -----------------------------------------------------------------------
+    // QW14: OPT-IN strict-unmapped trap. Behavior specification, written RED
+    // before StrictUnmappedTrap exists in zeebo_probe_registry.h.
+    //
+    // Contract distilled from the required behavior:
+    //  - Default (disarmed): Consider() is a no-op, never trips, never records,
+    //    so the boot stays observable-equivalent to the base (22-of-22).
+    //  - Armed + a KNOWN/handled access (e.g. keypad): must NOT trip.
+    //  - Armed + an UNKNOWN fetch/read/write: records structured evidence
+    //    (core/PC/addr/width/direction/type and, for writes, value) and signals
+    //    a deterministic stop. The FIRST trip is latched (later accesses during
+    //    teardown cannot overwrite the captured first-fault evidence).
+    //  - State surface clearly distinguishes armed vs tripped and exposes the
+    //    full event via Json().
+    {
+        zeebo_lle::StrictUnmappedTrap trap;
+
+        // Default disarmed: clean, no trip even for an unknown access.
+        assert(!trap.armed());
+        assert(!trap.tripped());
+        assert(trap.Json() == "{\"armed\":false,\"tripped\":false,\"event\":null}");
+        bool trip0 = trap.Consider(0, 0xb0001234u, 0xa9000000u, 4,
+                                   zeebo_lle::UnmappedKind::kRead,
+                                   /*has_value=*/false, /*value=*/0,
+                                   /*known_handled=*/false);
+        assert(!trip0);
+        assert(!trap.tripped());
+
+        // Armed but a KNOWN/handled access (keypad) must never trip/record.
+        trap.Arm(true);
+        assert(trap.armed());
+        bool trip_known = trap.Consider(0, 0xb0002000u, 0xa9a00004u, 4,
+                                        zeebo_lle::UnmappedKind::kRead,
+                                        false, 0, /*known_handled=*/true);
+        assert(!trip_known);
+        assert(!trap.tripped());
+
+        // First unknown WRITE trips and latches full context incl. value/type.
+        bool trip_w = trap.Consider(1, 0xf0010000u, 0xc1000040u, 2,
+                                    zeebo_lle::UnmappedKind::kWrite,
+                                    /*has_value=*/true, /*value=*/0xdead,
+                                    /*known_handled=*/false);
+        assert(trip_w);
+        assert(trap.tripped());
+        const auto& r = trap.record();
+        assert(r.core == 1 && r.pc == 0xf0010000u && r.addr == 0xc1000040u);
+        assert(r.width == 2 && r.has_value && r.value == 0xdeadu);
+        assert(r.kind == zeebo_lle::UnmappedKind::kWrite);
+        {
+            const std::string js = trap.Json();
+            assert(js.find("\"armed\":true") != std::string::npos);
+            assert(js.find("\"tripped\":true") != std::string::npos);
+            assert(js.find("\"core\":1") != std::string::npos);
+            assert(js.find("\"pc\":4026597376") != std::string::npos);   // 0xf0010000
+            assert(js.find("\"addr\":3238002752") != std::string::npos); // 0xc1000040
+            assert(js.find("\"width\":2") != std::string::npos);
+            assert(js.find("\"dir\":\"write\"") != std::string::npos);
+            assert(js.find("\"type\":\"write\"") != std::string::npos);
+            assert(js.find("\"value\":57005") != std::string::npos);     // 0xdead
+        }
+
+        // A later access still reports a trip but must NOT overwrite the latched
+        // first-fault evidence (deterministic capture).
+        bool trip_again = trap.Consider(0, 0x1000, 0x2000, 1,
+                                        zeebo_lle::UnmappedKind::kFetch,
+                                        false, 0, false);
+        assert(trip_again);
+        assert(trap.record().pc == 0xf0010000u); // unchanged
+        assert(trap.record().kind == zeebo_lle::UnmappedKind::kWrite);
+
+        // A FETCH of unknown code (no value) records dir/type=fetch with no value.
+        zeebo_lle::StrictUnmappedTrap trap2;
+        trap2.Arm(true);
+        bool trip_f = trap2.Consider(0, 0xdf617750u, 0x00000000u, 4,
+                                     zeebo_lle::UnmappedKind::kFetch,
+                                     false, 0, false);
+        assert(trip_f && trap2.tripped());
+        {
+            const std::string js = trap2.Json();
+            assert(js.find("\"dir\":\"fetch\"") != std::string::npos);
+            assert(js.find("\"type\":\"fetch\"") != std::string::npos);
+            assert(js.find("\"value\"") == std::string::npos); // no value for a read/fetch
+        }
+    }
+
     return 0;
 }

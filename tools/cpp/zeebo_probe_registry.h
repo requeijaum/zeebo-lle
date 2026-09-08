@@ -202,6 +202,105 @@ private:
     std::vector<UnmappedAccessEvent> ring_;
 };
 
+// ---------------------------------------------------------------------------
+// QW14: OPT-IN strict-unmapped trap.
+//
+// The passive UnmappedAccessLog above records unknown unmapped accesses while
+// the default hooks auto-map the page and continue (byte/observable-equivalent
+// boot). QW14 adds an OPT-IN mode: when armed, the FIRST unknown unmapped
+// access — one NOT serviced by a known/handled range such as the keypad — is
+// captured with full context (core, PC, address, width, direction/type and,
+// for writes, the value) and the machine is stopped deterministically so a
+// ControlServer/CLI client can inspect the structured error/state.
+//
+// This proves only an unmapped access; it does NOT claim the target is MMIO.
+// When DISARMED (the default) Consider() is a no-op and behavior is unchanged.
+//
+// The C++-side stop policy (chosen from real Unicorn behavior probed in
+// probe_unmapped_behavior.cpp): the unmapped hook returns FALSE, which makes
+// uc_emu_start return UC_ERR_READ/WRITE/FETCH_UNMAPPED with PC left AT the
+// faulting instruction and the page NOT auto-mapped — so the captured PC/addr
+// reflect the true fault. (uc_emu_stop()+leave-unmapped yields UC_ERR_MAP;
+// auto-mapping the page destroys the evidence.) This class holds only the
+// armed/tripped state and latched evidence; the hook consults it.
+enum class UnmappedKind { kRead, kWrite, kFetch };
+
+inline const char* UnmappedKindStr(UnmappedKind k) {
+    switch (k) {
+        case UnmappedKind::kWrite: return "write";
+        case UnmappedKind::kFetch: return "fetch";
+        case UnmappedKind::kRead:  default: return "read";
+    }
+}
+
+struct StrictUnmappedRecord {
+    bool valid = false;
+    unsigned long core = 0;
+    unsigned long pc = 0;
+    unsigned long addr = 0;
+    unsigned width = 0;
+    UnmappedKind kind = UnmappedKind::kRead;
+    bool has_value = false;
+    unsigned long long value = 0;
+};
+
+class StrictUnmappedTrap {
+public:
+    void Arm(bool on) { armed_ = on; }
+    bool armed() const { return armed_; }
+    bool tripped() const { return rec_.valid; }
+    const StrictUnmappedRecord& record() const { return rec_; }
+
+    // Decide whether an unmapped access must trip (stop). Returns true iff the
+    // caller should stop the CPU. Disarmed state and known/handled accesses
+    // never trip and are never recorded. The FIRST trip is latched so later
+    // accesses during teardown cannot overwrite the captured first-fault.
+    bool Consider(unsigned long core, unsigned long pc, unsigned long addr,
+                  unsigned width, UnmappedKind kind, bool has_value,
+                  unsigned long long value, bool known_handled) {
+        if (!armed_) return false;
+        if (known_handled) return false;
+        if (rec_.valid) return true; // already latched; still a trip
+        rec_ = StrictUnmappedRecord{true, core, pc, addr, width,
+                                    kind, has_value, value};
+        return true;
+    }
+
+    // {"armed":<bool>,"tripped":<bool>,"event":<obj|null>}
+    // The event object carries core/pc/addr/width/dir/type and (writes) value.
+    std::string Json() const {
+        std::string out = "{\"armed\":";
+        out += armed_ ? "true" : "false";
+        out += ",\"tripped\":";
+        out += rec_.valid ? "true" : "false";
+        out += ",\"event\":";
+        if (!rec_.valid) {
+            out += "null}";
+            return out;
+        }
+        char b[256];
+        const char* dir = UnmappedKindStr(rec_.kind);
+        if (rec_.has_value) {
+            std::snprintf(b, sizeof(b),
+                "{\"core\":%lu,\"pc\":%lu,\"addr\":%lu,\"width\":%u,"
+                "\"dir\":\"%s\",\"type\":\"%s\",\"value\":%llu}",
+                rec_.core, rec_.pc, rec_.addr, rec_.width, dir, dir, rec_.value);
+        } else {
+            std::snprintf(b, sizeof(b),
+                "{\"core\":%lu,\"pc\":%lu,\"addr\":%lu,\"width\":%u,"
+                "\"dir\":\"%s\",\"type\":\"%s\"}",
+                rec_.core, rec_.pc, rec_.addr, rec_.width, dir, dir);
+        }
+        out += b;
+        out += "}";
+        return out;
+    }
+
+private:
+    bool armed_ = false;
+    StrictUnmappedRecord rec_;
+};
+
 } // namespace zeebo_lle
 
 #endif // ZEEBO_LLE_PROBE_REGISTRY_H_
