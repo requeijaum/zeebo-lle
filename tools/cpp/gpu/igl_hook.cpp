@@ -5,6 +5,7 @@
 // Semântica de leitura de memória guest = ReadGlComponent do zeebulator (fixed/
 // byte/short -> float host), lida SÓ no draw (VAs guardados como VA guest).
 #include "igl_hook.h"
+#include "atitc_decode.h"
 #include <cstring>
 
 namespace zeebo::gpu {
@@ -161,6 +162,29 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
             case glenum::ALPHA_TEST: state_.alpha_test=on; break;
             case glenum::CULL_FACE: state_.cull=on; break;
         }
+        return true;
+    }
+    // glCompressedTexImage2D(target,level,internalformat,width,height,border,imageSize,data*)
+    // QW9: ATITC/ATC decoded host-side to RGBA8 (atitc_decode.h). Strict validation
+    // per Khronos: bad format/dims/imageSize/null data -> false with NO state change.
+    if(slot==glCompressedTexImage2D){
+        const u32 target=gm.arg(0), level=gm.arg(1), internalformat=gm.arg(2);
+        const u32 width=gm.arg(3), height=gm.arg(4), border=gm.arg(5);
+        const u32 imageSize=gm.arg(6), data_va=gm.arg(7);
+        if(target!=glenum::TEXTURE_2D || level!=0 || border!=0) return false;
+        if(width==0 || height==0 || width>4096 || height>4096 || data_va==0) return false;
+        const int bb=atitc_block_bytes(internalformat);
+        if(bb==0) return false; // unsupported compressed format
+        const size_t need=atitc_image_size(internalformat,
+            static_cast<int>(width),static_cast<int>(height));
+        if(need==0 || imageSize!=need) return false; // ATC spec: imageSize must match
+        std::vector<u8> raw(imageSize);
+        if(!gm.read(data_va,raw.data(),imageSize)) return false;
+        std::vector<u8> rgba;
+        if(!decode_atitc(internalformat,static_cast<int>(width),static_cast<int>(height),
+                         raw.data(),raw.size(),rgba)) return false;
+        rast_.tex_image_2d(bound_tex_[std::min<u32>(state_.active_unit,1)],
+                           static_cast<int>(width),static_cast<int>(height),rgba.data());
         return true;
     }
     if(slot==glTexImage2D){

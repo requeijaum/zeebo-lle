@@ -35,7 +35,8 @@ constexpr u32 POINTS=0x0000, LINES=0x0001, LINE_STRIP=0x0003,
 constexpr u32 RGB=0x1907, RGBA=0x1908, USHORT_565=0x8363;
 constexpr u32 TEXTURE_2D=0x0de1, DEPTH_TEST=0x0b71, BLEND=0x0be2,
               ALPHA_TEST=0x0bc0, CULL_FACE=0x0b44, TEXTURE0=0x84c0;
-constexpr u32 ATITC_RGB=0x8C92, ATITC_RGBA=0x8C93;
+constexpr u32 ATITC_RGB=0x8C92, ATITC_RGBA=0x8C93,
+              ATITC_RGBA_EXPLICIT=0x8C93, ATITC_RGBA_INTERP=0x87EE;
 inline int type_size(u32 t){ switch(t){case BYTE:case UBYTE:return 1;
     case SHORT:case USHORT:return 2; case FLOAT:case FIXED:return 4; default:return 4;} }
 inline Prim to_prim(u32 mode){ switch(mode){case POINTS:return Prim::Points;
