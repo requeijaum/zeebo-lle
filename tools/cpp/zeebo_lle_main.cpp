@@ -372,6 +372,7 @@ public:
             printf("[Fatal] Failed to init Core 0: %s\n", uc_strerror(err0));
             return false;
         }
+        uc_ctl_tlb_mode(core0_.uc, UC_TLB_VIRTUAL);
         uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1176);
         core0_.name = "ARM11-Apps";
 
@@ -518,24 +519,60 @@ public:
         }
         if (req->cmd == "cont") {
             paused_ = false;
+            stepping_ = true;
             // Se o Core estiver parado exatamente no breakpoint atual, avança 1 instrução antes de retomar o loop normal
             if (c0_breakpoints_.contains(core0_.entry)) {
-                uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
-                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                uc_ctl_remove_cache(core0_.uc, core0_.entry, 16);
+                uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                u32 next_pc = 0;
+                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &next_pc);
+                core0_.entry = next_pc;
             }
+            if (c1_breakpoints_.contains(core1_.entry)) {
+                uc_ctl_remove_cache(core1_.uc, core1_.entry, 16);
+                uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
+                u32 next_pc = 0;
+                uc_reg_read(core1_.uc, UC_ARM_REG_PC, &next_pc);
+                core1_.entry = next_pc;
+            }
+            stepping_ = false;
             req->reply.set_value("{\"ok\":true,\"running\":true}");
             return;
         }
         if (req->cmd == "step") {
             int ticks = req->has_i0 ? (int)req->i0 : 1;
             stepping_ = true;
-            for (int t = 0; t < ticks; t++) {
-                uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
-                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
-                uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
-                uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
-                if (err0 != UC_ERR_OK) {
-                    printf("[Step err0] err=%d (%s) pc=0x%08x\n", (int)err0, uc_strerror(err0), core0_.entry);
+            if (req->core == 1) {
+                for (int t = 0; t < ticks; t++) {
+                    uc_ctl_remove_cache(core1_.uc, core1_.entry, 16);
+                    uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
+                    u32 next_pc = 0;
+                    uc_reg_read(core1_.uc, UC_ARM_REG_PC, &next_pc);
+                    if (next_pc == core1_.entry) {
+                        next_pc += 4;
+                        uc_reg_write(core1_.uc, UC_ARM_REG_PC, &next_pc);
+                    }
+                    core1_.entry = next_pc;
+                }
+            } else {
+                for (int t = 0; t < ticks; t++) {
+                    u32 cur_cpsr = 0;
+                    uc_reg_read(core0_.uc, UC_ARM_REG_CPSR, &cur_cpsr);
+                    uc_ctl_flush_tb(core0_.uc);
+                    uc_ctl_flush_tlb(core0_.uc);
+                    uc_ctl_remove_cache(core0_.uc, core0_.entry, 16);
+                    uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                    if (err0 != UC_ERR_OK) {
+                        printf("[step err0] err=%d (%s) pc=0x%08x\n", (int)err0, uc_strerror(err0), core0_.entry);
+                        fflush(stdout);
+                    }
+                    u32 next_pc = 0;
+                    uc_reg_read(core0_.uc, UC_ARM_REG_PC, &next_pc);
+                    if (next_pc == core0_.entry) {
+                        next_pc += 4;
+                        uc_reg_write(core0_.uc, UC_ARM_REG_PC, &next_pc);
+                    }
+                    core0_.entry = next_pc;
                 }
             }
             stepping_ = false;
@@ -565,16 +602,22 @@ public:
         }
         if (req->cmd == "hook") {
             u32 addr = (u32)req->i0;
-            if (req->core == 0) {
+            if (req->core == 1) {
                 if (req->str_action.empty() || req->str_action == "clear") {
-                    c0_script_hooks_.erase(addr);
-                    req->reply.set_value("{\"ok\":true,\"hook\":\"cleared\"}");
+                    c1_script_hooks_.erase(addr);
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"cleared\",\"core\":1}");
                 } else {
-                    c0_script_hooks_[addr] = req->str_action;
-                    req->reply.set_value("{\"ok\":true,\"hook\":\"set\"}");
+                    c1_script_hooks_[addr] = req->str_action;
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"set\",\"core\":1}");
                 }
             } else {
-                req->reply.set_value("{\"ok\":false,\"error\":\"core1_not_supported\"}");
+                if (req->str_action.empty() || req->str_action == "clear") {
+                    c0_script_hooks_.erase(addr);
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"cleared\",\"core\":0}");
+                } else {
+                    c0_script_hooks_[addr] = req->str_action;
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"set\",\"core\":0}");
+                }
             }
             return;
         }
@@ -603,6 +646,21 @@ public:
             else if (r_idx == 16) reg_id = UC_ARM_REG_CPSR;
             u32 val = (u32)req->val;
             uc_reg_write(uc, reg_id, &val);
+            if (req->core == 0 && r_idx == 15) {
+                core0_.entry = val;
+                // Garante que o CPSR esteja limpo em ARM Mode (modo User 0x10 ou System 0x1f, T=0)
+                u32 cpsr = 0;
+                uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                cpsr &= ~(1 << 5); // T bit = 0 (ARM mode)
+                cpsr = (cpsr & ~0x1f) | 0x10; // User mode (0x10)
+                uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+                uc_ctl_flush_tb(uc);
+                uc_ctl_flush_tlb(uc);
+            } else if (req->core == 1 && r_idx == 15) {
+                core1_.entry = val;
+                uc_ctl_flush_tb(uc);
+                uc_ctl_flush_tlb(uc);
+            }
             char buf[128];
             snprintf(buf, sizeof(buf), "{\"ok\":true,\"core\":%ld,\"n\":%d,\"value\":%u}", req->core, r_idx, val);
             req->reply.set_value(buf);
@@ -962,10 +1020,39 @@ private:
         u32 kip_r1 = 0, kip_r2 = 0, kip_r3 = 0;
 
         switch (syscall) {
-            case 0x00: res_r0 = 0; break;                    // L4_Ipc
+            case 0x00: {                                     // L4_Ipc
+                res_r0 = 0;
+                // IPC de mensagem recebida: lê UTCB para inspecionar se há opcode/tag
+                u32 utcb_ptr = 0;
+                uc_mem_read(uc, 0xff000ff0, &utcb_ptr, 4);
+                if (utcb_ptr) {
+                    u32 mr0 = 0, mr1 = 0;
+                    uc_mem_read(uc, utcb_ptr + 0x40, &mr0, 4);
+                    uc_mem_read(uc, utcb_ptr + 0x44, &mr1, 4);
+                    // Se o servidor Iguana está fazendo wait de mensagem e mr1 está zerado,
+                    // injeta uma mensagem inicial de inicialização (opcode 0x16 ou sucesso):
+                    if (mr1 < 0x16) {
+                        mr0 = 0x00000001; // 1 typed/untyped word
+                        mr1 = 0x00000016; // opcode 0x16 (primeiro caso do switch)
+                        uc_mem_write(uc, utcb_ptr + 0x40, &mr0, 4);
+                        uc_mem_write(uc, utcb_ptr + 0x44, &mr1, 4);
+                    }
+                }
+                // Garante que o retorno do wrapper IPC em 0xb000c834 restaure r5 apontando para UTCB+0x44
+                break;
+            }
             case 0x04: break;                                // L4_ThreadSwitch (no-op)
             case 0x08: res_r0 = 1; break;                    // L4_ThreadControl
-            case 0x0c: res_r0 = 0; break;                    // L4_ExchangeRegisters
+            case 0x0c: {                                     // L4_ExchangeRegisters
+                u32 dest = 0, control = 0, new_sp = 0, new_ip = 0, flags = 0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &dest);
+                uc_reg_read(uc, UC_ARM_REG_R1, &control);
+                uc_reg_read(uc, UC_ARM_REG_R2, &new_sp);
+                uc_reg_read(uc, UC_ARM_REG_R3, &new_ip);
+                uc_reg_read(uc, UC_ARM_REG_R4, &flags);
+                res_r0 = dest; // L4_ExchangeRegisters retorna o dest ThreadId
+                break;
+            }
             case 0x10: break;                                // L4_Schedule
             case 0x14: {                                     // L4_MapControl
                 u32 sid = 0, control = 0;
@@ -1037,6 +1124,15 @@ private:
             // Invalida o TB de execução no Unicorn para que ele recompile o bloco seguinte
             uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
             uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
+        } else if (syscall == 0x00) {
+            target_pc = pc + 4; // avança após svc #0x1400 (ou seja, 0xb000c834: pop {r1, r2})
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
+        } else if (syscall == 0x0c) { // L4_ExchangeRegisters
+            target_pc = pc + 4;
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, pc, 16);
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
@@ -1050,6 +1146,10 @@ private:
         }
         if (target_pc) {
             sys->core0_.entry = target_pc;
+            uc_ctl_remove_cache(uc, target_pc, 16);
+            if (!sys->stepping_) {
+                uc_emu_stop(uc);
+            }
         }
     }
 
@@ -1062,11 +1162,26 @@ private:
             uc_reg_read(uc, UC_ARM_REG_R12, &ip);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             u32 kip_base = KIP_BASE;
-            u32 r1 = 0, r2 = 0, r3 = 0;
+            u32 r1 = 0x0000000c, r2 = 0x00000002, r3 = 0;
             uc_reg_write(uc, UC_ARM_REG_R0, &kip_base);
             uc_reg_write(uc, UC_ARM_REG_R1, &r1);
             uc_reg_write(uc, UC_ARM_REG_R2, &r2);
             uc_reg_write(uc, UC_ARM_REG_R3, &r3);
+
+            // Grava também nos ponteiros passados pelo Iguana em r4, r5, r6 e no stack
+            u32 r4 = 0, r5 = 0, r6 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+            uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+            if (r4) uc_mem_write(uc, r4, &r1, 4);
+            if (r5) uc_mem_write(uc, r5, &r2, 4);
+            if (r6) uc_mem_write(uc, r6, &r3, 4);
+            if (ip) {
+                uc_mem_write(uc, ip + 0, &r1, 4);
+                uc_mem_write(uc, ip + 4, &r2, 4);
+                uc_mem_write(uc, ip + 8, &r3, 4);
+            }
+
             u32 next_pc = (u32)ad + 4;
             uc_reg_write(uc, UC_ARM_REG_PC, &next_pc);
             sys->core0_.entry = next_pc;
@@ -1087,6 +1202,7 @@ private:
                 u32 jump_target = 0xb0000034;
                 uc_reg_write(uc, UC_ARM_REG_PC, &jump_target);
                 sys->core0_.entry = jump_target;
+                uc_ctl_remove_cache(uc, 0xb0000000, 0x100);
             }
         }
         if (!sys->c0_script_hooks_.empty()) {
@@ -1101,6 +1217,7 @@ private:
                     u32 target = lr & ~1;
                     uc_reg_write(uc, UC_ARM_REG_PC, &target);
                     sys->core0_.entry = target;
+                    uc_ctl_remove_cache(uc, target, 16);
                     uc_emu_stop(uc);
                     return;
                 } else if (action == "stub_r0_1") {
@@ -1111,12 +1228,21 @@ private:
                     u32 target = lr & ~1;
                     uc_reg_write(uc, UC_ARM_REG_PC, &target);
                     sys->core0_.entry = target;
+                    uc_ctl_remove_cache(uc, target, 16);
                     uc_emu_stop(uc);
                     return;
                 } else if (action == "step_pc_4") {
                     u32 next = (u32)ad + 4;
                     uc_reg_write(uc, UC_ARM_REG_PC, &next);
                     sys->core0_.entry = next;
+                    uc_ctl_remove_cache(uc, next, 16);
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action.starts_with("jump:")) {
+                    u32 dest = (u32)std::strtoul(action.c_str() + 5, nullptr, 0);
+                    uc_reg_write(uc, UC_ARM_REG_PC, &dest);
+                    sys->core0_.entry = dest;
+                    uc_ctl_remove_cache(uc, dest, 16);
                     uc_emu_stop(uc);
                     return;
                 } else if (action == "break") {
@@ -1135,24 +1261,20 @@ private:
         (void)size;
     }
 
-    static void c0_trace_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
-        static int n = 0;
-        if (n < 400) { printf("[TRACE] pc=0x%08x\n", (u32)ad); n++; }
-    }
 
-    static void c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-        printf("[UNMAPPED-CORE0] pc=0x%08x type=%d addr=0x%08lx size=%d\n", pc, (int)type, (unsigned long)addr, size);
         if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
             ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             u32 val = sys->input_->read((u32)(addr - KEYPAD_BASE));
             uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
             uc_mem_write(uc, addr, &val, size);
-            return;
+            return true;
         }
         // Map dynamically to continue discovery
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+        return true;
     }
 
     static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
@@ -1200,9 +1322,58 @@ private:
     static void c1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
-        if (!sys->c1_breakpoints_.empty() && sys->c1_breakpoints_.contains((u32)ad)) {
+        if (!sys->c1_script_hooks_.empty()) {
+            auto it = sys->c1_script_hooks_.find((u32)ad);
+            if (it != sys->c1_script_hooks_.end()) {
+                const std::string& action = it->second;
+                if (action == "stub_r0_0" || action == "stub") {
+                    u32 lr = 0;
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    u32 ret_val = 0;
+                    uc_reg_write(uc, UC_ARM_REG_R0, &ret_val);
+                    u32 target = lr & ~1;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &target);
+                    sys->core1_.entry = target;
+                    uc_ctl_remove_cache(uc, target, 16);
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "stub_r0_1") {
+                    u32 lr = 0;
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    u32 ret_val = 1;
+                    uc_reg_write(uc, UC_ARM_REG_R0, &ret_val);
+                    u32 target = lr & ~1;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &target);
+                    sys->core1_.entry = target;
+                    uc_ctl_remove_cache(uc, target, 16);
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "step_pc_4") {
+                    u32 next = (u32)ad + 4;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &next);
+                    sys->core1_.entry = next;
+                    uc_ctl_remove_cache(uc, next, 16);
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action.starts_with("jump:")) {
+                    u32 dest = (u32)std::strtoul(action.c_str() + 5, nullptr, 0);
+                    uc_reg_write(uc, UC_ARM_REG_PC, &dest);
+                    sys->core1_.entry = dest;
+                    uc_ctl_remove_cache(uc, dest, 16);
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "break") {
+                    sys->paused_ = true;
+                    uc_emu_stop(uc);
+                    return;
+                }
+            }
+        }
+        if (!sys->stepping_ && !sys->c1_breakpoints_.empty() && sys->c1_breakpoints_.contains((u32)ad)) {
             sys->paused_ = true;
+            sys->core1_.entry = (u32)ad;
             uc_emu_stop(uc);
+            return;
         }
         if (ad == 0x00d10588) { // Panic bypass
             u32 lr = 0; uc_reg_read(uc, UC_ARM_REG_LR, &lr);
@@ -1233,6 +1404,7 @@ private:
     std::set<u32> c0_breakpoints_;
     std::set<u32> c1_breakpoints_;
     std::map<u32, std::string> c0_script_hooks_;
+    std::map<u32, std::string> c1_script_hooks_;
 
     CoreState core0_;
     CoreState core1_;
