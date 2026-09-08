@@ -28,6 +28,10 @@
 #include "zeebo_l4_mmu.h"
 #include "zeebo_control_server.h"
 #include "qdsp5/qdsp5_capture_hook.h"
+#include "qdsp5/qdsp5_dispatcher.h"
+#include "zeebo_audio_sink.h"
+#include "gpu/igl_hook.h"
+#include "gpu/igpu_rasterizer.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -222,13 +226,13 @@ class UnifiedSMDBridge {
 public:
     UnifiedSMDBridge() : packets_injected_(0) {}
 
-    void inject_packet(uc_engine* uc, u32 proc_id, const std::vector<u8>& payload) {
+    void inject_packet(uc_engine* uc, u32 program, u32 proc_id, const std::vector<u8>& payload) {
         if (!uc) return;
         oncrpc_packet_header hdr{};
         hdr.xid = 0x12345678 + packets_injected_;
         hdr.msg_type = 0; // CALL
         hdr.rpc_version = 2;
-        hdr.program = 0x30000060; // MSM Audio/QDSP service
+        hdr.program = program; // Official MSM Audio/QDSP service (AUDMGR or ADSPRTOSATOM)
         hdr.version = 1;
         hdr.procedure = proc_id;
 
@@ -277,8 +281,8 @@ public:
         uc_mem_write(uc, AMSS_SMD_CHANNEL_ADDR, &ch, sizeof(ch));
 
         packets_injected_++;
-        printf("[SMD/ONCRPC] Injected packet #%u (Proc 0x%x) -> AMSS Queue (Total %u)\n",
-               packets_injected_, proc_id, count);
+        printf("[SMD/ONCRPC] Injected packet #%u (Prog 0x%08x, Proc 0x%x) -> AMSS Queue (Total %u)\n",
+               packets_injected_, program, proc_id, count);
     }
 
 private:
@@ -347,6 +351,35 @@ public:
         paused_ = p;
     }
 
+    // Direct Applet (.mod / .bar) Loader & Injection for Commercial Games / Homebrew
+    bool load_applet(const std::string& mod_path, u32 base_addr = 0x12000000) {
+        printf("[BREW/Applet] Loading applet module: %s into Core 0 @ 0x%08x...\n", mod_path.c_str(), base_addr);
+        std::ifstream f(mod_path, std::ios::binary | std::ios::ate);
+        if (!f) {
+            printf("[BREW/Applet] Failed to open applet file: %s\n", mod_path.c_str());
+            return false;
+        }
+        size_t sz = f.tellg();
+        f.seekg(0);
+        std::vector<u8> d(sz);
+        f.read((char*)d.data(), sz);
+
+        // Ensure target memory window is mapped (allocate 8MB window if needed)
+        u32 map_base = base_addr & ~0x000FFFFFu;
+        u32 map_size = 0x00800000; // 8MB
+        uc_mem_map(core0_.uc, map_base, map_size, UC_PROT_ALL);
+
+        // Inject binary data
+        uc_err err = uc_mem_write(core0_.uc, base_addr, d.data(), d.size());
+        if (err != UC_ERR_OK) {
+            printf("[BREW/Applet] Failed to write applet to guest memory: %s\n", uc_strerror(err));
+            return false;
+        }
+
+        printf("[BREW/Applet] Successfully loaded %zu bytes into guest space @ 0x%08x\n", sz, base_addr);
+        return true;
+    }
+
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
         printf("===================================================================\n");
         printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
@@ -364,6 +397,29 @@ public:
         smd_ = std::make_unique<UnifiedSMDBridge>();
         sink_ = std::make_unique<UnifiedDisplaySink>();
         sink_->init(headless);
+
+        // Initialize QDSP5 Dispatcher for Audio RPC & DSP Engine
+        qdsp_disp_ = std::make_unique<zeebo::qdsp5::Qdsp5Dispatcher>();
+        qdsp_disp_->on_completion = [this](u32 tcb, u32 sig) {
+            printf("[QDSP5/RPC] Completion callback fired: TCB=0x%08x, sig=0x%08x -> posting RPC Reply (Prog 0x31000013 / 0x3000000b)\n",
+                   tcb, sig);
+            if (core1_state_ && core1_state_->uc && smd_) {
+                // Post completion event to return channels (AUDMGR_CB / ADSPRTOSMTOA)
+                std::vector<u8> reply_payload(8, 0);
+                std::memcpy(reply_payload.data(), &sig, 4);
+                std::memcpy(reply_payload.data() + 4, &tcb, 4);
+                smd_->inject_packet(core1_state_->uc, 0x31000013, 0x01, reply_payload);
+                smd_->inject_packet(core1_state_->uc, 0x3000000b, 0x01, reply_payload);
+            }
+        };
+
+        // Initialize GPU Rasterizer and IGL/IEGL Hook
+        rast_ = zeebo::gpu::make_soft_rasterizer();
+        if (rast_) {
+            rast_->init();
+            igl_hook_ = std::make_unique<zeebo::gpu::IglHook>(*rast_);
+            printf("[System] Initialized SoftRasterizer and IglHook on Core 0 memory space.\n");
+        }
 
         // 3. Initialize Core 0 (ARM1176JZ-S — Applications Processor)
         printf("[System] Initializing Core 0 (ARM1176JZ-S Apps Processor)...\n");
@@ -449,14 +505,22 @@ public:
             // Update display sink if GPU or MDDI marked dirty / drawn
             if (gpu_ && gpu_->is_fb_dirty()) {
                 gpu_->clear_fb_dirty();
-                // Draw test pattern / render indicators
-                for (int y = 0; y < FB_HEIGHT; y++) {
-                    for (int x = 0; x < FB_WIDTH; x++) {
-                        u16 col = (u16)(((x >> 3) & 0x1F) << 11) | (u16)(((y >> 3) & 0x3F) << 5) | (u16)(c & 0x1F);
-                        fb_buffer[y * FB_WIDTH + x] = col;
+                if (rast_) {
+                    rast_->end_frame();
+                    const u16* rgb565_src = rast_->framebuffer_rgb565();
+                    if (rgb565_src) {
+                        sink_->update_frame(rgb565_src);
                     }
+                } else {
+                    // Fallback test pattern
+                    for (int y = 0; y < FB_HEIGHT; y++) {
+                        for (int x = 0; x < FB_WIDTH; x++) {
+                            u16 col = (u16)(((x >> 3) & 0x1F) << 11) | (u16)(((y >> 3) & 0x3F) << 5) | (u16)(c & 0x1F);
+                            fb_buffer[y * FB_WIDTH + x] = col;
+                        }
+                    }
+                    sink_->update_frame(fb_buffer.data());
                 }
-                sink_->update_frame(fb_buffer.data());
                 printf("[Display/Sink] Rendered active video frame %u (Adreno draws=%u)\n", c, gpu_->draws());
             }
 
@@ -487,6 +551,32 @@ public:
                         case SDLK_LEFT:                input_->release_key(ZEEBO_KEY_LEFT); break;
                         case SDLK_RIGHT:               input_->release_key(ZEEBO_KEY_RIGHT); break;
                         case SDLK_h:                   input_->release_key(ZEEBO_KEY_HOME); break;
+                    }
+                } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
+                    switch (ev.cbutton.button) {
+                        case SDL_CONTROLLER_BUTTON_A:          input_->press_key(ZEEBO_KEY_A, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_B:          input_->press_key(ZEEBO_KEY_B, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_X:          input_->press_key(ZEEBO_KEY_C, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_Y:          input_->press_key(ZEEBO_KEY_D, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->press_key(ZEEBO_KEY_UP, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_GUIDE:
+                        case SDL_CONTROLLER_BUTTON_START:      input_->press_key(ZEEBO_KEY_HOME, core0_.uc); break;
+                    }
+                } else if (ev.type == SDL_CONTROLLERBUTTONUP) {
+                    switch (ev.cbutton.button) {
+                        case SDL_CONTROLLER_BUTTON_A:          input_->release_key(ZEEBO_KEY_A); break;
+                        case SDL_CONTROLLER_BUTTON_B:          input_->release_key(ZEEBO_KEY_B); break;
+                        case SDL_CONTROLLER_BUTTON_X:          input_->release_key(ZEEBO_KEY_C); break;
+                        case SDL_CONTROLLER_BUTTON_Y:          input_->release_key(ZEEBO_KEY_D); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->release_key(ZEEBO_KEY_UP); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->release_key(ZEEBO_KEY_DOWN); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->release_key(ZEEBO_KEY_LEFT); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->release_key(ZEEBO_KEY_RIGHT); break;
+                        case SDL_CONTROLLER_BUTTON_GUIDE:
+                        case SDL_CONTROLLER_BUTTON_START:      input_->release_key(ZEEBO_KEY_HOME); break;
                     }
                 }
             }
@@ -1289,10 +1379,11 @@ private:
                 vic_status0 |= (1 << int_num);
                 uc_mem_write(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
 
-                // Inject synthetic RPC packet on doorbell trigger (e.g. procedure 0x1b59)
+                // Inject RPC packets on doorbell trigger using official IDs AUDMGR (0x30000013) / ADSPRTOSATOM (0x3000000a)
                 if (sys->smd_) {
                     std::vector<u8> dummy_payload(16, 0x42);
-                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x1b59, dummy_payload);
+                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x30000013, 0x1b59, dummy_payload);
+                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x3000000a, 0x02, dummy_payload);
                 }
             }
         }
@@ -1382,6 +1473,27 @@ private:
             if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
             uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
         }
+
+        // QDSP5 Dispatcher feed on AMSS consumer entry points
+        if ((ad == 0x16e8cb96 || ad == 0x16e8cba0) && sys->qdsp_disp_) {
+            u32 pkt_ptr = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &pkt_ptr);
+            if (pkt_ptr != 0) {
+                std::vector<u8> pkt_buf(512, 0);
+                if (uc_mem_read(uc, pkt_ptr, pkt_buf.data(), pkt_buf.size()) == UC_ERR_OK) {
+                    zeebo::qdsp5::QdspGuest guest;
+                    guest.ctx = sys->core0_.uc; // Core 0 context for shared memory reads
+                    guest.read = [](u32 va, void* dst, u32 sz, void* ctx) -> bool {
+                        if (!ctx) return false;
+                        uc_engine* uc0 = (uc_engine*)ctx;
+                        return uc_mem_read(uc0, va, dst, sz) == UC_ERR_OK;
+                    };
+                    u32 caller_tcb = 0;
+                    uc_reg_read(uc, UC_ARM_REG_R1, &caller_tcb);
+                    sys->qdsp_disp_->feed_raw(pkt_buf.data(), (u32)pkt_buf.size(), guest, caller_tcb);
+                }
+            }
+        }
     }
 
     static void c1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
@@ -1415,12 +1527,16 @@ private:
     std::unique_ptr<UnifiedInput> input_;
     std::unique_ptr<UnifiedSMDBridge> smd_;
     std::unique_ptr<UnifiedDisplaySink> sink_;
+    std::unique_ptr<zeebo::qdsp5::Qdsp5Dispatcher> qdsp_disp_;
+    std::unique_ptr<zeebo::gpu::IGpuRasterizer> rast_;
+    std::unique_ptr<zeebo::gpu::IglHook> igl_hook_;
 };
 
 int main(int argc, char** argv) {
     const char* nand_path = "../../nand/1.1.2.bin";
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
+    std::string applet_path = "";
     bool headless = true;
     int control_port = 0;
 
@@ -1432,6 +1548,8 @@ int main(int argc, char** argv) {
             headless = true;
         } else if (arg.rfind("--control-port=", 0) == 0) {
             control_port = std::stoi(arg.substr(15));
+        } else if (arg.rfind("--applet=", 0) == 0) {
+            applet_path = arg.substr(9);
         } else if (i == 1 && arg[0] != '-') {
             nand_path = argv[1];
         } else if (i == 2 && arg[0] != '-') {
@@ -1456,6 +1574,13 @@ int main(int argc, char** argv) {
     if (!sys.init(nand_path, apps_path, amss_path, headless)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
+    }
+
+    // Direct applet injection if requested
+    if (!applet_path.empty()) {
+        if (!sys.load_applet(applet_path, 0x12000000)) {
+            printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
+        }
     }
 
     // Run interleaved for 250 cycles of 10k instructions

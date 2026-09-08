@@ -5,8 +5,8 @@ LIBS := -lunicorn -lcapstone
 
 all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink
 
-zeebo_lle_main: zeebo_lle_main.cpp
-	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_main.cpp -lunicorn $(shell pkg-config --cflags --libs sdl2)
+zeebo_lle_main: zeebo_lle_main.cpp qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_main.cpp qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp -lunicorn $(shell pkg-config --cflags --libs sdl2)
 
 zeebo_lle_mod_probe: zeebo_lle_mod_probe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_mod_probe.cpp -lunicorn
