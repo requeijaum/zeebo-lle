@@ -1,0 +1,16 @@
+{
+  "test": "kernelinterface_saved_frame",
+  "abi": "ldmfd restores caller r4-r6; outputs go to [r4]/[r5]/[r6] not saved slots",
+  "entry": {
+    "r4": "0xb0057000",
+    "r5": "0xb0057000",
+    "r6": "0x00000000"
+  },
+  "epilogue": {
+    "r4": "0xb0046ff0",
+    "r5": "0xb0046fec",
+    "r6": "0xb0046fe8"
+  },
+  "live_c738": "ef000014e3540000",
+  "pass": false
+}

@@ -2354,11 +2354,12 @@ private:
             if (r4) uc_mem_write(uc, r4, &r1, 4);
             if (r5) uc_mem_write(uc, r5, &r2, 4);
             if (r6) uc_mem_write(uc, r6, &r3, 4);
-            if (ip) {
-                uc_mem_write(uc, ip + 0, &r1, 4);
-                uc_mem_write(uc, ip + 4, &r2, 4);
-                uc_mem_write(uc, ip + 8, &r3, 4);
-            }
+            // ABI (refs okl4-2.1.1-fix7 kernelinterface.spp): kernel outputs are
+            // stored ONLY through the caller pointers [r4]/[r5]/[r6] above. The
+            // saved-register slots at ip+0/4/8 (== sp+0/4/8) hold the caller's
+            // r4,r5,r6 and MUST survive untouched, so the epilogue
+            // `ldmfd sp!, {r4-r6, pc}` at 0xb000c754 restores them (r4 = page
+            // cache 0xb0041284). Writing kernel outputs there corrupts the frame.
 
             u32 next_pc = (u32)ad + 4;
             uc_reg_write(uc, UC_ARM_REG_PC, &next_pc);
