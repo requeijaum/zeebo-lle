@@ -147,15 +147,44 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Item 2 (MAP_CONTROL / Cópia prévia de páginas — commit `99399d3`)**:
   - `map_one` em `zeebo_l4_mmu.h` instrumentado com probe de conteúdo nas páginas com permissão de execução (`UC_PROT_EXEC`).
   - Alerta imediato e limpo (`[MMU/WARN]`) quando página mapeada está virgem (0x00/0xFF).
-- [x] **Item 3 (Core 0 loop de poll em 0xb000d4a8 — commit `99399d3`)**:
-  - Adicionada sonda de telemetria limpa em `c0_code_hook` observando `[r0 + 0xc8]` a cada potência de 2.
-  - Sem forçar registradores nem inventar valores (regras de ouro preservadas).
+- [x] **Item 3 (Core 0 loop de poll em 0xb000d4a8 — commit `99399d3`, resolução `47d6e6c`)**:
+  - Diagnóstico inicial: adicionada sonda em `c0_code_hook` observando `[r0 + 0xc8]`.
+  - Descoberta definitiva: loop em `0xb000d4a8` era o bit-scan de `l4e_min_pagesize()` sobre o campo `PageInfo` da KIP (`KIP[+0xc8]`), e não um poll inter-core.
+  - Resolução orgânica: `build_kip()` agora popula legitimamente `KIP[0xc8] = 0x01111006` (páginas 4K/64K/1M/16M ARMv6 | rwx). O bit-scan encerra organicamente e o Core 0 avança para `0xb000d6b8` rumo ao pipeline de `MAP_CONTROL`.
+
+### Fase 12: Arquitetura Avançada de Memória e Transição de Modos dos Núcleos
+- [x] **VTLB LUT & PhysPool Aliasing (commits `596cb30` e `feb5886`)**:
+  - Implementado `VtlbLut` (2^20 páginas, 8MB host) para tradução e acessos $O(1)$.
+  - `PhysPool` de 96MB backing-store host (`apps_pool_mem_`) integrado ao `ZeeboLLESystem` e mapeado via `uc_mem_map_ptr`.
+  - `handle_map_control` integrado com `map_one_aliased()` estilo PCSX2/Dolphin, permitindo mapeamento de múltiplos VAs para o mesmo espaço físico sem clonagem de páginas.
+  - `BrewLoader` acoplado com `bind_lut()` para injeção e leitura direta via VTLB.
+- [ ] **Core 1 REX Memory Bring-Up & MMU/Remap Transition**:
+  - Semeada tabela de regiões de RAM do AMSS em `0x00a1d73c` (`0x00a00000..0x00c00000`, flags=0x0f), garantindo retorno 0 (sucesso) na checagem `0xf0017448` e ultrapassando o panic-loop `0xf0017890`.
+  - Resolver a comutação de janelas virtuais/físicas pós-CP15 em `0xf0017718..0xf001774c` (`rsb r3, r3, #0xf0000000` / `mov pc, r0`).
+- [ ] **Core 0 Iguana User-space Pipeline**:
+  - Acompanhar execução pós-`0xb000d6b8`, validando emissão real das primeiras syscalls `L4_MapControl` sobre o caminho `[aliased]` da `PhysPool`.
 - [x] **Item 4 (Loader BREW / Dispatch de Applets — commit `da9d5f4`)**:
   - Criada classe modular `BrewLoader` (`tools/cpp/zeebo_brew_loader.h`), integrando injeção de `.mod` e resolução de `AEEMod_Load` via ELF `e_entry`.
   - Tratamento honesto de símbolos ausentes/não mapeados.
 - [x] **Item 5 (VTable IGL / Guest Machine — commit `da9d5f4`)**:
   - Implementado `tools/cpp/gpu/igl_guest_bridge.h` conectando chamadas de vtable `gpIGL`/`gpIEGL` do espaço virtual do guest à `GuestMachine`, despachando para `IglHook` e `SoftRasterizer`.
   - Atualização do display sink sincronizada com `mark_dirty()` nas chamadas gráficas.
+
+---
+
+## Próximos Passos Priorizados (Plano de Ação)
+
+1. **Passo 1 (Core 1 REX MMU Relocation)**:
+   - Sincronizar o mapeamento da memória física do Core 1 (`0x00a00000..0x00c00000`) para que a tabela de descritores em `0x00a1d73c` seja carregada nativamente no `load_amss` do `zeebo_lle_main.cpp`.
+   - Ajustar o loop de execução do Core 1 para processar a comutação de espaço de endereçamento efetuada pelas instruções em `0xf0017748..0xf001774c` (`mov pc, r0`), garantindo que o Unicorn continue executando após a transição de MMU do ARM9.
+
+2. **Passo 2 (Core 0 MAP_CONTROL End-to-End)**:
+   - Monitorar a execução do Iguana além de `0xb000d6b8`.
+   - Capturar as primeiras fpages enviadas via `L4_MapControl` e verificar o registro nos logs `[MMU] map_one: ... [aliased]` provando que as threads de usuário compartilham memória através da `PhysPool` / `VtlbLut`.
+
+3. **Passo 3 (BREW Símbolos Globais & Despacho Applet)**:
+   - Extrair os ponteiros globais `gpIGL`/`gpIEGL` e a vtable da BREW a partir do espaço do APPS (`0x10137000+`).
+   - Ligar os ponteiros reais no `IglGuestBridge` e validar a primeira chamada de desenho/clear via `BrewLoader` com `--applet`.
 
 ---
 
