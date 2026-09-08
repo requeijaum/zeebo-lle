@@ -203,8 +203,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Framebuffer RGB565: soma de pixels 0 → 2013081600, centro `0x1999` — **pixels reais gerados e validados por execução**.
 - [x] **Subagentes em Paralelo (`deleg_5e8643b1` e `deleg_1e6303ae`) — Core 1, EFS2 e Integração SDL2**:
   - **Passo 1 Concluído (commit `c1b4cb4`)**: Subagente `sa-0` implementou com sucesso o isolamento de RAM/heap do REX com arquitetura Split I/D (`zeebo_rex_harness.cpp`, `zeebo_lle_main.cpp`). O particionador `0xf0002cd4` executa 2.048 writes de heap no shadow sem corromper `.text` do AMSS; free-list preenchida em 2047/2047 blocos de 1KB; a re-entry em `0xf000e6d4` atravessa sem `UC_ERR_INSN_INVALID` e `rex_sched` `0xf0013b84` decodifica código pristino com sucesso (`make test-rex` exit 0).
-  - **Passo 3 Concluído (commit `5223647`)**: Subagente `sa-1` integrou com sucesso o pipeline gráfico da Z-Wheel (vtable slot 10 / `0x28` com `arg=1` → SoftRasterizer) na janela SDL2 (640x480) de `zeebo_lle_main.cpp`. Criadas flags `--zwheel-preview` (modo interativo) e `--zwheel-preview-headless` (modo CI/teste). Validação em `make test-zwheel-preview`: frame RGB565 apresentado ao display sink com soma de pixels **2013081600** (idêntica ao harness determinístico).
+  - **Passo 3 Concluído (commit `5223647`, `8bb4fb7`, `06b61e5`)**: Subagente `sa-1` e harness integraram o pipeline gráfico da Z-Wheel (vtable slot 10 / `0x28` com `arg=1` → SoftRasterizer) na janela SDL2 (640x480) de `zeebo_lle_main.cpp`. Criadas flags `--zwheel-preview` (modo interativo) e `--zwheel-preview-headless` (modo CI/teste). Validação em `make test-zwheel-preview`: frame RGB565 apresentado ao display sink com soma de pixels **2013081600** (idêntica ao harness determinístico) e dump comprovado `/tmp/zeebo_zwheel_rendered.ppm` (pixel `0x1999`).
   - **Passo 2 Mapeado (Auditoria EFS2 Data Extents e Spare OOB)**: Subagente `sa-0` da segunda rodada mapeou os nós de arquivos da Z-Wheel (`0x435`: `.qxt`, `.qxm`, `.qxa`) e identificou que o mapeamento de payload de dados `inode -> data page` do EFS2 reside nos 64 bytes de metadados OOB por página (`1.1.2_spare.bin`, 2112 bytes/página).
+  - **Interface CLI & Telemetria Concluídas (commit `06b61e5`)**: Implementado `--help` completo com paridade de opções aos emuladores HLE (Zeebx/Zeebulator), telemetria em tempo real `--fps` (MIPS de Core 0 e Core 1 + FPS de vídeo), controle de boot `--boot-appmgr` (FIRSTAPP:0, padrão jailbreak) e `--boot-zwheel` (FIRSTAPP:3, padrão fábrica), suporte a injeção externa (`--applet=<caminho.mod>` e `run <caminho.mod>`), dump contínuo de quadros em PPM (`--dump-frames=<DIR>`) e limite de tempo de execução real (`--seconds=<N>`).
 - [x] **Arquitetura de Memória e Sistema de Arquivos Auditados via Corpus/Hardware Real**:
   - **Descoberta de MMU ARM9**: O dump de MMU L1 do hardware real comprova que `VA 0xf0000000 = PA 0x00a00000 (SECTION)` é SRAM física interna de dados. O código executável reside em seções físicas dedicadas (`0x16e00000..0x17b00000`). O heap em `0xf0000000` deve ter backing store de RAM física independente.
   - **Descoberta de Particionamento NAND vs eNAND (`/mmc4`)**: A NAND interna (128 MB) armazena exclusivamente o SO (BREW/Rex/L4) e o Z-Wheel (`274755`). Todos os jogos comerciais ficam na eNAND externa (`fs:/mmc4/`). O Z-Wheel é o aplicativo central autêntico presente no dump da NAND.
@@ -217,28 +218,32 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Core 1 REX MMU & Clobber de Código Diagnosticado (commit `d71d27d` e lotes `deleg_4d905a0d`, `deleg_fb1369dd`)**:
   - Ativação de MMU (`mcr p15` com `SCTLR.M=1` em `0xf0017718`) estabilizada via `UC_TLB_VIRTUAL`.
   - Causa do `UC_ERR_INSN_INVALID` identificada: `0xf0002cd4` inicializa free-list de 2MB em `0xf0000000`. Em `0xdf613b20`, o código relocado faz re-entry em VA absoluto `0xf000e6d4`. O clobber de heap sobrescreve essas instruções se o backing store físico não for desacoplado.
-- [ ] **Isolamento de Memória do Heap REX no Core 1**:
-  - Prover backing store físico de RAM de dados para `0xf0000000..0xf0200000` separado do `.text` preservado do AMSS, permitindo que o particionador conclua e o ARM9 avance até `rex_sched` (`0xf0013b84`) e repouso em `rex_wait` (`0x16ef0b02`).
-- [ ] **Parser C++ EFS2APPS `zeebo_efs2_fs.h` Focado no Z-Wheel (274755)**:
-  - Implementar parser C++ indexado por tabela hash `(parent, name) → payload` sobre `nand/1.1.2.bin`, resolvendo os assets reais do Z-Wheel (`fs:/mif/274755.mif`, `fs:/mod/274755/*`) e validado por `make test-efs2-fs`.
-- [ ] **Acoplamento do ZeeboApp ao Loop Principal do Core 0**:
-  - Integrar o harness validado da Z-Wheel ao ciclo de execução do `zeebo_lle_main`, conectando o ponto de despacho de applets da BREW ao pipeline de display SDL2.
+- [x] **Isolamento de Memória do Heap REX no Core 1 (Passo 1 / Fase 13 - Concluído `c1b4cb4`)**:
+  - Provedor de backing store físico de RAM de dados para `0xf0000000..0xf0200000` separado do `.text` preservado do AMSS via Split I/D. O particionador conclui e o ARM9 avança até `rex_sched` (`0xf0013b84`) decodificando código pristino.
+- [ ] **Parser C++ EFS2APPS `zeebo_efs2_fs.h` Focado no Z-Wheel (274755) e AppMgr (Passo 2 / Fase 13 - Em Andamento)**:
+  - Implementar extrator de extents/payload lendo os 64 bytes de metadados OOB/spare de cada página em `nand/1.1.2_spare.bin` para recompor os arquivos de diretórios `0x435` e `0x6064` (`fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/*`, `fs:/mif/274755.mif`, `fs:/mod/274755/*`).
+- [x] **Acoplamento do ZeeboApp ao Loop Principal do Core 0 e Display SDL2 (Passo 3 / Fase 13 - Concluído `5223647`, `06b61e5`)**:
+  - Integrado o pipeline gráfico da Z-Wheel ao loop principal de `zeebo_lle_main`, conectando o ponto de despacho de applets da BREW ao pipeline de display SDL2 e criando a interface de controle CLI/telemetria.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 1 (Isolamento de RAM Física do Heap REX no Core 1)**:
-   - Configurar o mapeamento do Core 1 para emular a SRAM física `PA 0x00a00000` em `0xf0000000..0xf0200000` com backing store de dados dedicado, mantendo as páginas de código do AMSS preservadas para re-entries em VA absoluto (`0xf000e6d4`).
-   - Validar a passagem limpa pelo particionador `0xf0002cd4` e a chegada do ARM9 ao despachante do REX (`0xf0013b84`) e repouso em `rex_wait` (`0x16ef0b02`).
+1. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Extração via OOB Spare)**:
+   - Implementar leitor C++ que correlaciona os dirents de `nand/1.1.2.bin` com os blocos de dados indexados no arquivo de spare `nand/1.1.2_spare.bin` (2.112 B por página: 2.048 B dados + 64 B metadados/tags EFS2).
+   - Extrair e validar byte-a-byte os payloads essenciais para o boot dos applets:
+     - BREW Appmgr: `fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/appmgrls.bar`, `fs:/mod/brewappmgr/appmgrln.bar`.
+     - Z-Wheel (274755): `fs:/mif/274755.mif`, `fs:/mod/274755/tectoy.cfg`, `uiconfig.xml`, `.qxt`, `.qxm`, `.qxa`.
+   - Adicionar alvo `test-efs2-fs` ao Makefile comprovando a extração dos arquivos com checksum real.
 
-2. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Validação de Assets do Z-Wheel)**:
-   - Implementar em C++ a leitura direta dos registros `0x69` sobre o dump da NAND (`nand/1.1.2.bin`), criando índice hash de diretórios baseado na semântica `parent_ref = (parent_inode << 8) | tag`.
-   - Garantir a resolução correta de `fs:/mif/274755.mif` e arquivos de `fs:/mod/274755/` (`tectoy.cfg`, `uiconfig.xml`, assets JPEG), com suíte `make test-efs2-fs` 100% PASS.
+2. **Passo 4 (Destravar IPC do Iguana OS no Core 0 - Resolução de `L4_MapControl`)**:
+   - Diagnosticar o laço em que o Iguana OS solicita via UTCB (`0xdff00000`) o mapeamento de `va=0xb0d00000` / `va=0x00000000` com tamanho de 4GB (`phys=0x100000000 size=4294967296`), resultando em `UC_ERR_NOMEM`.
+   - Implementar o clamp/sanitização do tamanho de mapeamento virtual ou fornecer a resposta de space control esperada pelo L4e para permitir que o Iguana conclua a inicialização de seus servidores internos (VFS, naming, loader de ELF).
 
-3. **Passo 3 (Integração ZeeboApp / Z-Wheel no Emulador Integrado e SDL2)**:
-   - Transportar a sequência comprovada em `zeebo_zwheel_harness.cpp` (configuração do objeto applet com ClassID `0x01070798`, vtable slot 10 / `0x28` e injeção de `EVT_APP_START`) para o carregamento do `zeebo_lle_main`.
-   - Conectar o pipeline de display sink ao SDL2 interativo para exibição do carrossel real da Z-Wheel.
+3. **Passo 5 (Execução Contínua de Jogos Externos e Despacho de Applet via `AEECShell`)**:
+   - Conectar o manipulador do `BrewLoader` carregado via `--applet` ou `run <app.mod>` ao laço de eventos contínuo do SDL2.
+   - Fornecer mapeamento das teclas do Z-Pad (`INT_KEYSENSE #28`) para os eventos BREW (`EVT_KEY_PRESS`, `EVT_KEY_RELEASE`) permitindo que applets interativos executem draws contínuos além do primeiro frame de clear.
+   - Validar a telemetria com contadores contínuos de FPS e MIPS durante a execução interativa.
 
 ---
 
