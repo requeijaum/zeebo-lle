@@ -43,7 +43,7 @@ void IglHook::transform_vertex(const Mat4& mvp, Vertex& v){
 std::vector<Vertex> IglHook::assemble(GuestMachine& gm, int first, int count){
     std::vector<Vertex> v; v.reserve(count);
     // Composite mvp = projection * modelview (GL: clip = proj * (modelview * obj)).
-    Mat4 mvp_; mat_mul(mvp_, projection_, modelview_);
+    mat_mul(mvp_, projection_, modelview_);
     auto stride=[&](const GuestArray& a){ return a.stride? a.stride
                      : a.size*glenum::type_size(a.type); };
     for(int e=first; e<first+count; ++e){
@@ -73,16 +73,33 @@ std::vector<Vertex> IglHook::assemble(GuestMachine& gm, int first, int count){
 
 std::vector<Vertex> IglHook::assemble_indexed(GuestMachine& gm, u32 idx_va, int count,
         u32 idx_type, std::vector<u32>& out_idx){
-    // Lê índices da memória guest; monta o range max e reusa assemble por índice.
+    // Compacta apenas os vértices realmente referenciados. Um índice USHORT
+    // esparso não pode forçar leitura densa de todos os elementos anteriores.
     out_idx.clear(); out_idx.reserve(count);
-    u32 maxi=0;
+    std::vector<u32> guest_idx; guest_idx.reserve(count);
     for(int i=0;i<count;i++){
         u32 id=0;
-        if(idx_type==glenum::UBYTE){ uint8_t b=0; gm.read(idx_va+i,&b,1); id=b; }
-        else { uint16_t s=0; gm.read(idx_va+i*2,&s,2); id=s; }
-        out_idx.push_back(id); if(id>maxi) maxi=id;
+        const bool ok=idx_type==glenum::UBYTE
+            ? ([&]{ uint8_t b=0; const bool r=gm.read(idx_va+static_cast<u32>(i),&b,1); id=b; return r; })()
+            : ([&]{ uint16_t s=0; const bool r=gm.read(idx_va+static_cast<u32>(i)*2,&s,2); id=s; return r; })();
+        if(!ok){ out_idx.clear(); return {}; }
+        guest_idx.push_back(id);
     }
-    return assemble(gm, 0, int(maxi)+1);
+
+    const size_t domain=idx_type==glenum::UBYTE ? 256u : 65536u;
+    std::vector<int32_t> remap(domain,-1);
+    std::vector<Vertex> verts;
+    verts.reserve(std::min<size_t>(guest_idx.size(),domain));
+    for(const u32 id:guest_idx){
+        if(remap[id]<0){
+            auto one=assemble(gm,static_cast<int>(id),1);
+            if(one.size()!=1){ out_idx.clear(); return {}; }
+            remap[id]=static_cast<int32_t>(verts.size());
+            verts.push_back(one.front());
+        }
+        out_idx.push_back(static_cast<u32>(remap[id]));
+    }
+    return verts;
 }
 
 bool IglHook::dispatch_igl(int slot, GuestMachine& gm){

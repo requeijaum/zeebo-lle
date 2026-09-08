@@ -28,16 +28,19 @@ int main(){
     const u8 blue_rgba[16]={0,0,255,255, 0,0,255,255,
                             0,0,255,255, 0,0,255,255};
     std::memcpy(reinterpret_cast<u8*>(mem.data())+(TEX_VA-VTX_VA),blue_rgba,sizeof(blue_rgba));
-    const u32 TEX565_VA=0x1120;
+    const u32 TEX565_VA=0x1120, IDX_VA=0x1140;
     const u16 red565[4]={0xf800,0xf800,0xf800,0xf800};
     std::memcpy(reinterpret_cast<u8*>(mem.data())+(TEX565_VA-VTX_VA),red565,sizeof(red565));
+    const u16 sparse_indices[3]={50000,1,50000};
+    std::memcpy(reinterpret_cast<u8*>(mem.data())+(IDX_VA-VTX_VA),sparse_indices,sizeof(sparse_indices));
 
     // GuestMachine falso: args por vetor, read() mapeia VA->nosso vetor mem.
-    std::vector<u32> regs; u32 ret=0;
+    std::vector<u32> regs; u32 ret=0; size_t read_calls=0;
     GuestMachine gm;
     gm.arg=[&](int n){ return n<(int)regs.size()?regs[n]:0u; };
     gm.set_ret=[&](u32 r){ ret=r; };
     gm.read=[&](u32 va, void* dst, u32 size)->bool{
+        ++read_calls;
         if(va<VTX_VA) return false;
         u32 off=va-VTX_VA; if(off+size>mem.size()*4) return false;
         std::memcpy(dst, (uint8_t*)mem.data()+off, size); return true; };
@@ -142,7 +145,17 @@ int main(){
     const bool pointer_state_ok=center==0;
     printf("[igl arrays] pointer sem Enable não desenha: %s\n",pointer_state_ok?"PASS":"FAIL");
 
+    IglHook sparse_hook(*rast);
+    regs={2,glenum::FIXED,0,VTX_VA}; sparse_hook.dispatch_igl(igl_slot::glVertexPointer,gm);
+    regs={glenum::VERTEX_ARRAY}; sparse_hook.dispatch_igl(igl_slot::glEnableClientState,gm);
+    read_calls=0;
+    regs={glenum::TRIANGLES,3,glenum::USHORT,IDX_VA};
+    const bool sparse_draw_handled=sparse_hook.dispatch_igl(igl_slot::glDrawElements,gm);
+    const bool sparse_index_ok=sparse_draw_handled && read_calls<32;
+    printf("[igl sparse] reads=%zu expect<32 %s\n",read_calls,sparse_index_ok?"PASS":"FAIL");
+
     printf("DONE\n");
     return (draw_ok && fixed_ok && red_ok && texture_ok && texture565_ok && swap_ok &&
-            depth_state_ok && blend_state_ok && current_color_ok && pointer_state_ok) ? 0 : 1;
+            depth_state_ok && blend_state_ok && current_color_ok && pointer_state_ok &&
+            sparse_index_ok) ? 0 : 1;
 }
