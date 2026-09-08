@@ -139,6 +139,35 @@ def test_client_poke_triggers_invalidation():
     _check("poke invalidou 0x700", d.observe(0x700) is True)
 
 
+class _FakeSockFail:
+    """Socket falso: responde toda RPC com {ok:false} (poke rejeitado)."""
+    def __init__(self):
+        self._last = {}
+    def sendall(self, payload):
+        self._last = json.loads(payload.decode("utf-8").strip())
+    def recv(self, n):
+        resp = {"ok": False, "error": "rejected"}
+        return (json.dumps(resp) + "\n").encode("utf-8")
+    def close(self):
+        pass
+
+
+def test_client_poke_failed_does_not_invalidate():
+    """poke com ok=false NÃO deve invalidar: PC permanece suprimido."""
+    from zeebo_debug_scripting import ZeeboDebugClient
+    d = TraceDeduplicator(recent_depth=4)
+    cli = ZeeboDebugClient()
+    cli.sock = _FakeSockFail()
+    cli.attach_dedup(d)
+
+    d.observe(0x900)
+    _check("0x900 omitido (repeat) pré-poke", d.observe(0x900) is False)
+
+    resp = cli.poke(0x900, 0x1234, size=4)  # SMC rejeitado pelo servidor
+    _check("poke falho retorna ok=false", resp.get("ok") is False, str(resp))
+    _check("poke falho NÃO invalida 0x900", d.observe(0x900) is False)
+
+
 def test_client_without_dedup_is_noop():
     """Sem dedup anexado, poke funciona igual (compatibilidade)."""
     from zeebo_debug_scripting import ZeeboDebugClient
@@ -158,6 +187,7 @@ def main():
         test_invalidate_range_only_affects_overlap,
         test_stats_snapshot,
         test_client_poke_triggers_invalidation,
+        test_client_poke_failed_does_not_invalidate,
         test_client_without_dedup_is_noop,
     ]
     for t in tests:
