@@ -298,16 +298,17 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 13 (Execução do BootInfo `bi_execute` e Servidores Iguana)**:
-   - Configurar os limites de RAM e descritores no `__okl4_bootinfo` (`0xb0d00000`) para que a decomposição de fpages em `0xb0000184` cubra integralmente os pools de memória sem rejeição.
-   - Validar com `--cycles=150` o avanço de Core 0 além de `0xb000345c`, alcançando o ponto de entrada do servidor de nomes e paginação (`0xb000aa94`).
+1. **Passo 13 (Avanço Estrito no Mempool / `mempool_init` e Execução de `bi_execute`)**:
+   - **Diagnóstico da Causa Raiz**: O travamento ocorre em `0xb000d6dc: add r4, r4, r0` dentro de `mempool_init`. A rotina decompõe o intervalo em fpages de 4GB (`size_log2 = 32`), gerando deslocamento nulo (`1 << 32 = 0`) para `va = 0xb0d00000`, travando o cursor `r4` indefinidamente antes de alcançar `bi_execute` (`0xb00001fc`).
+   - **Ação**: Ajustar a especificação dos limites do pool de memória convencional no descritor KIP/BootInfo ou na rotina de fpage para garantir potências de 2 válidas (ex.: fpages de 1 MiB / `size_log2 = 20`), permitindo que `r4` alcance `r7 = 0xb6d00000`.
+   - **Alvo**: Passar por `bi_execute` (`0xb00001fc`) com `r0 = 0`, contornando o pânico de inicialização em `0xb0003450` e alcançando o loop de servidores em `0xb000aa94`.
 
 2. **Passo 14 (Syscalls OKL4 IPC/Threading e Vetor BREW)**:
-   - Implementar no dispatcher de SVC do `ZeeboLLESystem` (`case 0x00`, `case 0x0c`, `case 0x10`) o roteamento de IPC para permitir que o servidor Iguana responda requisições de mapeamento e criação de threads.
-   - Conectar o vetor de inicialização do BREW (`0x10137000`) ao loop de escalonamento.
+   - Implementar no dispatcher de SVC do `ZeeboLLESystem` (`case 0x00` L4_Ipc, `case 0x0c` L4_ThreadControl, `case 0x10` L4_ExchangeRegisters) o suporte neutro de microkernel para atender as threads de naming e pager criadas pelo Iguana OS.
+   - Conectar o vetor de inicialização do BREW (`0x10137000`) ao loop de escalonamento interfolheado.
 
-3. **Passo 15 (Suíte Autônoma de Execução de Apps)**:
-   - Utilizar a API de depuração estruturada (`zeebo_debug_scripting.py` / `zeebo_control_server.h`) para instrumentar e bootar cada app catalogado no EFS2, avaliando `vram_stat` e estabilidade de registradores.
+3. **Passo 15 (Expansão do Teste Autônomo de Apps via Agente de IA - Concluído `aa3fa5c` / Em Evolução)**:
+   - Utilizar o harness autônomo `tools/cpp/zeebo_debug_agent.py` para rodar diagnósticos programáticos contínuos de VRAM, backtrace e estabilidade de registradores para todos os applets presentes na NAND.
 
 ---
 
