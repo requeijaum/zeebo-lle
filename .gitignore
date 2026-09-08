@@ -28,6 +28,8 @@ tools/cpp/qdsp5/qdsp5_capture_test
 tools/cpp/qdsp5/qdsp5_fuzz
 tools/cpp/qdsp5/qdsp5_out.wav
 tools/cpp/qdsp5/fuzz_corpus/
+tools/cpp/zeebo_zwheel_harness
+tools/cpp/zeebo_efs2apps
 tools/cpp/test_l4_mmu
 
 # Estado local do agente e caches Python

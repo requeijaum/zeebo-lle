@@ -53,7 +53,7 @@ test-zwheel: zeebo_zwheel_harness
 	./zeebo_zwheel_harness ../../nand/1.1.2_APPS.bin
 
 clean:
-	rm -f zeebo_harness zeebo_devices_test zeebo_zwheel_harness
+	rm -f zeebo_zwheel_harness zeebo_efs2apps
 
 .PHONY: all test clean gpu test-gpu test-zwheel
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
