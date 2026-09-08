@@ -32,6 +32,8 @@
 #include "zeebo_audio_sink.h"
 #include "gpu/igl_hook.h"
 #include "gpu/igpu_rasterizer.h"
+#include "gpu/igl_guest_bridge.h"
+#include "zeebo_brew_loader.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -334,6 +336,10 @@ struct CoreState {
     u32 entry = 0;
     u64 insns = 0;
     bool halted = false;
+    // Slide-detector: rastreia avanco linear de PC (+4) sem branch tomado.
+    u32 slide_last_pc = 0;      // PC da insn anterior
+    u32 slide_run = 0;          // quantas insns consecutivas avancaram +4
+    bool slide_tripped = false; // ja disparou o aviso (evita spam)
 };
 
 class ZeeboLLESystem {
@@ -354,30 +360,20 @@ public:
     // Direct Applet (.mod / .bar) Loader & Injection for Commercial Games / Homebrew
     bool load_applet(const std::string& mod_path, u32 base_addr = 0x12000000) {
         printf("[BREW/Applet] Loading applet module: %s into Core 0 @ 0x%08x...\n", mod_path.c_str(), base_addr);
-        std::ifstream f(mod_path, std::ios::binary | std::ios::ate);
-        if (!f) {
-            printf("[BREW/Applet] Failed to open applet file: %s\n", mod_path.c_str());
-            return false;
+        // Item 4: delega ao BrewLoader (injeção + resolução do entry AEEMod_Load).
+        if (brew_) {
+            if (!brew_->inject_mod(mod_path, base_addr, /*clsid=*/0)) {
+                printf("[BREW/Applet] BrewLoader falhou ao injetar %s\n", mod_path.c_str());
+                return false;
+            }
+            // Habilita o gate da vtable IGL: um applet real está carregado.
+            if (igl_bridge_) igl_bridge_->set_guest_running(true);
+            printf("[BREW/Applet] Applet pronto; dispatch BREW armado (AEECShell@0x%08x).\n",
+                   brew_->symbols().aeecshell_dispatch_va);
+            return true;
         }
-        size_t sz = f.tellg();
-        f.seekg(0);
-        std::vector<u8> d(sz);
-        f.read((char*)d.data(), sz);
-
-        // Ensure target memory window is mapped (allocate 8MB window if needed)
-        u32 map_base = base_addr & ~0x000FFFFFu;
-        u32 map_size = 0x00800000; // 8MB
-        uc_mem_map(core0_.uc, map_base, map_size, UC_PROT_ALL);
-
-        // Inject binary data
-        uc_err err = uc_mem_write(core0_.uc, base_addr, d.data(), d.size());
-        if (err != UC_ERR_OK) {
-            printf("[BREW/Applet] Failed to write applet to guest memory: %s\n", uc_strerror(err));
-            return false;
-        }
-
-        printf("[BREW/Applet] Successfully loaded %zu bytes into guest space @ 0x%08x\n", sz, base_addr);
-        return true;
+        printf("[BREW/Applet] BrewLoader indisponível (init incompleto).\n");
+        return false;
     }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
@@ -418,8 +414,11 @@ public:
         if (rast_) {
             rast_->init();
             igl_hook_ = std::make_unique<zeebo::gpu::IglHook>(*rast_);
-            printf("[System] Initialized SoftRasterizer and IglHook on Core 0 memory space.\n");
+            igl_bridge_ = std::make_unique<zeebo::gpu::IglGuestBridge>(*igl_hook_);
+            printf("[System] Initialized SoftRasterizer, IglHook and IGL guest-vtable bridge on Core 0 memory space.\n");
         }
+        // Item 4: loader BREW (vinculado ao uc de Core 0 após uc_open, ver init).
+        brew_ = std::make_unique<zeebo::brew::BrewLoader>();
 
         // 3. Initialize Core 0 (ARM1176JZ-S — Applications Processor)
         printf("[System] Initializing Core 0 (ARM1176JZ-S Apps Processor)...\n");
@@ -431,6 +430,7 @@ public:
         uc_ctl_tlb_mode(core0_.uc, UC_TLB_VIRTUAL);
         uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1176);
         core0_.name = "ARM11-Apps";
+        if (brew_) brew_->bind_uc(core0_.uc);
 
         // 4. Initialize Core 1 (ARM926EJ-S — Modem Processor)
         printf("[System] Initializing Core 1 (ARM926EJ-S Modem Processor)...\n");
@@ -1044,26 +1044,73 @@ private:
         size_t sz = f.tellg(); f.seekg(0);
         std::vector<u8> d(sz); f.read((char*)d.data(), sz);
 
-        core1_.entry = rd32(d.data(), 24);
+        u32 e_entry = rd32(d.data(), 24);
         u32 phoff = rd32(d.data(), 28);
         u16 phent = rd16(d.data(), 42), phnum = rd16(d.data(), 44);
 
-        printf("[System] AMSS ELF Entrypoint: 0x%08x, Segments: %u\n", core1_.entry, phnum);
+        printf("[System] AMSS ELF Entrypoint (e_entry/PA): 0x%08x, Segments: %u\n", e_entry, phnum);
+        u32 entry_va = e_entry;  // fallback: usar e_entry cru se nao houver traducao
         for (int i = 0; i < phnum; i++) {
             size_t o = phoff + i * phent;
             if (rd32(d.data(), o) != 1) continue;
-            u32 va = rd32(d.data(), o+8), off = rd32(d.data(), o+4);
+            u32 va = rd32(d.data(), o+8), pa = rd32(d.data(), o+12), off = rd32(d.data(), o+4);
             u32 fs = rd32(d.data(), o+16), ms = rd32(d.data(), o+20);
             u32 nmem = ms ? ms : fs; if (!nmem) continue;
 
-            // Direct mapping
+            // Direct mapping: os segmentos sao gravados no VA (0xf0000000...).
             uc_mem_write(core1_.uc, va, d.data() + off, fs);
+
+            // Traducao PA->VA do reset vector: e_entry do super-ELF e um PA (0x00a00000),
+            // mas o codigo de reset esta mapeado no VA do seg (0xf0000000). Rodar a partir
+            // do PA cru cai em bytes zerados -> NOP-slide. Achamos o seg cujo PA contem
+            // e_entry e traduzimos para o VA correspondente (find_arm9_reset.py confirma:
+            //   VA 0xf0000000: b 0xf0000024; msr cpsr_fc,#0xd3; mcr p15 (MMU); ldr sp;
+            //   bl 0xf0017ccc (rex_init)).
+            if (pa && e_entry >= pa && e_entry < pa + nmem) {
+                entry_va = va + (e_entry - pa);
+            }
         }
+
+        core1_.entry = entry_va;
+        printf("[System][Core1] Reset vector real (VA) = 0x%08x  (e_entry PA 0x%08x traduzido)\n",
+               core1_.entry, e_entry);
+
+        // Preambulo de reset do ARM9/AMSS que o hardware faria e o ELF cru nao faz:
+        //  (a) CPSR em modo SVC (0xD3) com IRQ+FIQ mascarados — o codigo em 0xf0000024
+        //      executa 'msr cpsr_fc,#0xd3', mas garantimos o estado inicial correto.
+        //  (b) SP de supervisor/REX no topo de RAM de scratch do modem. O proprio reset
+        //      recomputa SP (=0x00a197f8) via literais; damos um SP valido inicial para o
+        //      caso de uma excecao antes desse ponto.
+        u32 cpsr_svc = 0x000000D3;  // M=SVC(10011), I=1, F=1, T=0
+        uc_reg_write(core1_.uc, UC_ARM_REG_CPSR, &cpsr_svc);
+        u32 sp_svc = 0x00A197F8;    // topo de stack SVC derivado pelo reset (find_arm9_reset.py)
+        uc_reg_write(core1_.uc, UC_ARM_REG_SP, &sp_svc);
+        printf("[System][Core1] Preambulo: CPSR=0x%02x (SVC,IRQ/FIQ off) SP=0x%08x\n",
+               cpsr_svc, sp_svc);
         return true;
     }
 
+    // Item 5: liga a vtable gpIGL/gpIEGL do guest ao IglGuestBridge. Idempotente.
+    // As VAs de vtable (igl_vtable_va_ / iegl_vtable_va_) devem ser resolvidas por
+    // RE do .mod ou pela leitura dos globais gpIGL/gpIEGL; enquanto 0, o bind é um
+    // no-op honesto (não inventa endereço). O gate guest_running já foi armado por
+    // load_applet, então o dispatch só ocorre com applet carregado.
+    void try_bind_igl_vtable(uc_engine* uc) {
+        if (igl_bound_ || !igl_bridge_) return;
+        if (!igl_vtable_va_ && !iegl_vtable_va_) return; // ainda não localizadas
+        if (igl_vtable_va_)  igl_bridge_->bind_igl_vtable(uc, igl_vtable_va_);
+        if (iegl_vtable_va_) igl_bridge_->bind_iegl_vtable(uc, iegl_vtable_va_);
+        igl_bound_ = igl_bridge_->bound();
+        if (igl_bound_)
+            printf("[System] vtable IGL/IEGL do guest ligada ao IglHook (Core 0).\n");
+    }
+
+    // Permite ao orquestrador/RE fixar as VAs das vtables quando descobertas.
+    void set_igl_vtables(u32 igl_va, u32 iegl_va) {
+        igl_vtable_va_ = igl_va; iegl_vtable_va_ = iegl_va;
+    }
+
     void setup_hooks() {
-        // Core 0 hooks
         uc_hook h_c0, h_m0, h_u0, h_i0;
         uc_hook_add(core0_.uc, &h_c0, UC_HOOK_CODE, (void*)c0_code_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)c0_mem_hook, this, 0, ~0ULL);
@@ -1246,6 +1293,31 @@ private:
     static void c0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
+
+        // Item 4: dispatch BREW (.mod / AEEMod_Load / AEECShell@0x10c874f4).
+        if (sys->brew_ && sys->brew_->on_code((u32)ad)) {
+            // Quando a AEECShell atinge o vetor de dispatch, é o gatilho para
+            // ligar a vtable IGL do guest (Item 5) — o applet vai emitir GL.
+            if ((u32)ad == sys->brew_->symbols().aeecshell_dispatch_va) {
+                sys->try_bind_igl_vtable(uc);
+            }
+        }
+        // Item 5: intercepta funções da vtable gpIGL/gpIEGL do guest e despacha
+        // para IglHook -> rasterizer. Se tratou, retorna da função (PC=LR).
+        if (sys->igl_bridge_ && sys->igl_bridge_->on_code(uc, (u32)ad)) {
+            u32 lr = 0; uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 target = lr & ~1u;
+            uc_reg_write(uc, UC_ARM_REG_PC, &target);
+            u32 cpsr = 0; uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+            uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+            sys->core0_.entry = target;
+            sys->gpu_->mark_dirty(); // sinaliza frame novo do rasterizer p/ o sink
+            uc_ctl_remove_cache(uc, target, 16);
+            uc_emu_stop(uc);
+            return;
+        }
+
 
         // --- Sonda de telemetria do loop de poll 0xb000d4a8 (Item 3) ----------
         // Loop de espera-ocupada do APPS.bin (ARM):
@@ -1555,6 +1627,15 @@ private:
     std::unique_ptr<zeebo::qdsp5::Qdsp5Dispatcher> qdsp_disp_;
     std::unique_ptr<zeebo::gpu::IGpuRasterizer> rast_;
     std::unique_ptr<zeebo::gpu::IglHook> igl_hook_;
+    // Item 5: cola uc<->IglHook para a vtable gpIGL/gpIEGL do guest.
+    std::unique_ptr<zeebo::gpu::IglGuestBridge> igl_bridge_;
+    u32 igl_vtable_va_ = 0;   // VA da vtable IGL no guest (0 = ainda não localizada)
+    u32 iegl_vtable_va_ = 0;  // VA da vtable IEGL no guest
+    bool igl_bound_ = false;
+    // Item 4: loader/dispatch de applet BREW (.mod).
+    std::unique_ptr<zeebo::brew::BrewLoader> brew_;
+public:
+    zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };
 
 int main(int argc, char** argv) {
