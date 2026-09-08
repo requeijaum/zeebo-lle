@@ -1,11 +1,9 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, quick wins integrados)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, investigação causal integrada)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão registra treze quick wins concluídos, dois parciais honestos e um bloqueado no guest vivo.
-O Passo 13 não foi promovido: o parser de BootInfo segue bytes reais, mas a sonda viva QW12
-observa `fpage=0xb0d00206` (`size_log2=32`) e cursor estacionado em `r4=0xb0d00000`; `bi_execute`
-continua não alcançado.
+Esta revisão consolida as quatro frentes da investigação causal do boot: saneamento do parser de argumentos CLI (`d137813`), correção da corrupção de pilha ABI no `L4_KernelInterface` (`4224919`), suíte de fuzzing diferencial (`318bf8d`) e captura forense corrigida provando que Core 0 executa ~1.47M de instruções reais do Iguana até o stall em `0xb000d708` (`size_log2=56` / avanço nulo).
+O Passo 13 permanece aberto: o parser de BootInfo segue bytes reais e os primeiros 96MB são mapeados, mas o laço de decomposição de fpages entra em novo stall (`size_log2=56` / descritores whole-space); `bi_execute` continua não alcançado.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -248,10 +246,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Suporte a leitura de clusters de dados de 512B (`0x3220000 + cluster*512`) e resolução encadeada de blocos indiretos `u32` com terminador `0xFFFFFFFF`.
   - Criado harness `tools/cpp/test_efs2_fs.cpp` e alvo `test-efs2-fs` no Makefile.
   - Provado por bytes reais do dump: 69.634 dirents recuperados; dirent `reksio.mod` em `0x32606ef` validado (inode `0x265e4`, reclen 15, parent `0x4abef`); cluster `0x6d11` verificado com FNV-1a `0xa0f4d11f`; bloco indireto em `0x3b1d400` encadeado para 128 clusters (64 KiB) com FNV-1a `0xd9339103`. 18/18 testes PASS.
-- [ ] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (reaberto após QW12/QW13)**:
+- [ ] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (reaberto após QW12/QW13, atualizado pós-investigação causal)**:
   - O commit histórico `770eb1a` implementou `write_mr(uc, utcb_base, index, val)` e o echo dos descritores em `handle_map_control` (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`).
   - A afirmação anterior de que esse echo atendia de forma load-bearing à convenção Iguana/OKL4 não é distinguível no teste black-box atual: entrada e saída são byte-idênticas mesmo sem `write_mr`. QW13 prova a transação de map no Unicorn, não o efeito do write-back sobre o guest.
-  - A observação histórica de 60 ciclos e múltiplos VAs não fecha progresso do boot. A sonda viva QW12 reproduz o estado vigente: descritor whole-space `fpage=0xb0d00206`, retorno sem avanço em `0xb000d6dc`, cursor `r4=0xb0d00000`; `bi_execute` e `0xb000aa94` não são alcançados.
+  - A investigação causal consolidou: o travamento inicial era mascarado pela corrupção de registradores salvos na pilha (`L4_KernelInterface`, corrigido em `4224919`) e pelo misload de firmware do CLI (`d137813`). Com isso saneado, o Core 0 executa ~1.47M de instruções reais do Iguana, processa 96 pools de 1MB e trava em `0xb000d708` (`size_log2=56` / descritores whole-space); `bi_execute` e `0xb000aa94` continuam não alcançados.
   - Gate pendente: harness com guest vivo que observe MRs efetivamente transformados e avanço por bytes/endereços até `bi_execute`; instruction-count não é critério de sucesso.
 - [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader e Catálogo de Applets (Concluído `f1b03fa` e `645f332`)**:
   - Integrado o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
@@ -297,10 +295,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
   - Parser host-only comprovado contra a cópia `1.1.2_APPS.bin`: BootInfo no offset `0x57000`, magic `0x1960021d`, 10 `BI_TAG_VIRT_POOLS` e 5 `BI_TAG_PHYS_POOLS`; mutações dos bytes alteram/rejeitam o parse como esperado.
-  - A faixa `0xb0d00000..0xb6d00000` não deriva desses records: nenhum pool a cobre e `0xb6d00000` não aparece como word no firmware. A enumeração de 96 fpages permanece hipótese separada.
-  - QW12 observou no boot vivo `mempool_init@0xb000d5b4`, MRs UTCB e o bloqueio: `phys_desc=0x10000000`, `fpage=0xb0d00206` (`size_log2=32`), `r4=0xb0d00000`, sem avanço em `0xb000d6dc`; `bi_execute` não foi atingido.
+  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`) e parser posicional CLI (`d137813`): Core 0 executa ~1.47M de instruções reais do Iguana e processa 96 mapeamentos legítimos de 1 MiB (`0xb0d00000..0xb6d00000`).
+  - Novo ponto de bloqueio isolado (captura forense corrigida Path C): a rotina de decomposição entra em laço de fpages inteiras / tamanho inválido em `0xb000d708` (`size_log2 = 56`), resultando em `1 << 56 == 0` (avanço nulo em ARM32 `add r4, r4, r0`) e gerando chamadas repetidas a descritores whole-space (`0xb000d6b8`); `bi_execute` e `0xb000aa94` continuam não alcançados.
   - QW13 (`7355364`, `a6c1967`) prova transação MapControl no Unicorn — regiões, ordem, permissões, escrita real, nil malformado e whole-space sem overflow — mas o echo idêntico dos MRs não prova writeback load-bearing.
-  - Próximo gate: harness guest vivo que produza retorno de MR observavelmente diferente e avance por bytes/endereços; depois exigir `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e loop `0xb000aa94`. Não forçar registradores nem usar instruction-count.
+  - Próximo gate: determinar o motivo do fallback de decomposição pós-96MB em `mempool_init`, corrigir o avanço para atingir `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e loop `0xb000aa94`. Não forçar registradores nem usar instruction-count.
 - [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
   - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
@@ -339,6 +337,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW14 | **concluído** | `--strict-unmapped` opt-in (`2781e18`) | baixo-médio | primeiro acesso desconhecido pausa com evento estruturado; keypad não dispara; default 22/22 |
 | QW15 | **concluído** | Gate transacional QW6 + crossing real de página (`ba3f534`) | baixo | dois vetores PASS; crossing word/half em `0x00102000`, SCTLR.A=0; CPU 12/12 |
 | QW16 | **concluído** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` para [0,1], validação de enum de alpha-func e de combinações `glTexParameterx` (pname/param) | baixo | `gl_alpha_sampler_smoke` 17/17 estado+pixel; ref>1/<0 clampado, func/pname/param inválidos não mutam estado e retornam false (caminho firmware); sem slot `glFrontFace` inventado; MIN_FILTER mipmap rejeitado (limitação LOD documentada) |
+| QW17 | **proposto** | Correção do PC-resume no `c0_intr_hook` (`target_pc = pc`, evitando pular 1 instrução) | baixo | microteste `intr_pc_witness.py` comprovou que `UC_HOOK_INTR` reporta PC em `svc+4`; retomar com `pc+4` pula instrução em syscalls 0xb4/0x00/0x0c |
+| QW18 | **proposto** | Eliminação de escritas legadas em `sp+0/4/8` no handler de interrupção 0xb4 de `zeebo_lle_main.cpp:2223` | baixo | espelhar a correção de pilha ABI feita no hook 0xb000c738 (`4224919`) para o caminho de interrupção case 0xb4 |
+| QW19 | **proposto** | Diagnóstico determinístico e guarda contra `size_log2 >= 32` no avanço do pool em `zeebo_l4_mmu.h` / `mempool_init` | baixo-médio | reprodução do stall `d708` (`lr=0x380` -> `size_log2=56`) sem permitir laço infinito em `0xb000d6dc` |
 
 ### P1 — Infraestrutura após o Passo 13
 
