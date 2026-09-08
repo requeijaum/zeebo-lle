@@ -158,11 +158,19 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - `PhysPool` de 96MB backing-store host (`apps_pool_mem_`) integrado ao `ZeeboLLESystem` e mapeado via `uc_mem_map_ptr`.
   - `handle_map_control` integrado com `map_one_aliased()` estilo PCSX2/Dolphin, permitindo mapeamento de múltiplos VAs para o mesmo espaço físico sem clonagem de páginas.
   - `BrewLoader` acoplado com `bind_lut()` para injeção e leitura direta via VTLB.
-- [ ] **Core 1 REX Memory Bring-Up & MMU/Remap Transition**:
-  - Semeada tabela de regiões de RAM do AMSS em `0x00a1d73c` (`0x00a00000..0x00c00000`, flags=0x0f), garantindo retorno 0 (sucesso) na checagem `0xf0017448` e ultrapassando o panic-loop `0xf0017890`.
-  - Resolver a comutação de janelas virtuais/físicas pós-CP15 em `0xf0017718..0xf001774c` (`rsb r3, r3, #0xf0000000` / `mov pc, r0`).
-- [ ] **Core 0 Iguana User-space Pipeline**:
-  - Acompanhar execução pós-`0xb000d6b8`, validando emissão real das primeiras syscalls `L4_MapControl` sobre o caminho `[aliased]` da `PhysPool`.
+- [x] **Core 1 REX Memory Bring-Up & MMU/Remap Transition (commit `a79af76`)**:
+  - Tabela de regiões de RAM do AMSS semeada em `0x00a1d73c` (`base=0x00a00000, teto=0x00c00000, attr=0x0f`), checagem `0xf0017448` retornando 0 (sucesso).
+  - Panic dead-loop `0xf0017890` eliminado (0 hits).
+  - Transição de relocação pós-CP15 diagnosticada e resolvida: mapeada janela `REX_RELOC_BASE=0xdf600000` (16MB) e espelhados os segmentos de código no delta `0xef600000`, permitindo que `mov pc, r0` em `0xf001774c` salte de `0xf0017750` para `0xdf617750` e avance até `0xf0017b04` (loop de configuração CP15).
+- [x] **Resolução Determinística de gpIGL/gpIEGL sem Símbolos Hardcoded (commit `3c0a6a2`)**:
+  - Constatado que `1.1.2_APPS.bin` é stripped (`e_shnum=0`) e as vtables são povoadas em runtime via `ISHELL_CreateInstance`.
+  - Implementado `IglGuestBridge::resolve_from_object(uc, obj_va, is_igl)` resolvendo diretamente de `obj[0]=&vtable`.
+  - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
+- [ ] **Core 0 Iguana User-space Pipeline & L4_MapControl fpage sizing**:
+  - Emissão real de syscalls `L4_MapControl` pelo Iguana OS confirmada (`sid=80000100`, `ctrl=80000000`, `modify count=1`).
+  - Corrigir o descritor de fpage/pool na KIP (`0xb0d00000` / `BootInfo`): fpage em `0xb0d00206` decodifica com `size_log2 = 32`, gerando `size=4GB` e `UC_ERR_NOMEM`. Ajustar para refletir a faixa válida da APPS_RAM (96MB).
+- [ ] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector**:
+  - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Refinar o slide-detector para diferenciar loops legítimos com instrução de salto condicional/call de slides lineares sem branch.
 - [x] **Item 4 (Loader BREW / Dispatch de Applets — commit `da9d5f4`)**:
   - Criada classe modular `BrewLoader` (`tools/cpp/zeebo_brew_loader.h`), integrando injeção de `.mod` e resolução de `AEEMod_Load` via ELF `e_entry`.
   - Tratamento honesto de símbolos ausentes/não mapeados.
@@ -174,17 +182,17 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Próximos Passos Priorizados (Plano de Ação)
 
-1. **Passo 1 (Core 1 REX MMU Relocation)**:
-   - Sincronizar o mapeamento da memória física do Core 1 (`0x00a00000..0x00c00000`) para que a tabela de descritores em `0x00a1d73c` seja carregada nativamente no `load_amss` do `zeebo_lle_main.cpp`.
-   - Ajustar o loop de execução do Core 1 para processar a comutação de espaço de endereçamento efetuada pelas instruções em `0xf0017748..0xf001774c` (`mov pc, r0`), garantindo que o Unicorn continue executando após a transição de MMU do ARM9.
+1. **Passo 1 (Core 0: Correção de Bounds/fpage no BootInfo e Conclusão do L4_MapControl)**:
+   - Investigar a construção do `__okl4_bootinfo` em `0xb0d00000` (segmento 5) referenciado por `KIP[0xb0]`.
+   - Ajustar as descrições de pool/memória no bootinfo para que o cálculo da fpage (`0xb000d660..0xb000d680`) produza `size_log2` condizente com as regiões da APPS_RAM (evitando `size_log2=32` / 4GB), permitindo que `map_one_aliased` conclua o mapeamento e o cursor `r4` alcance `r7`.
 
-2. **Passo 2 (Core 0 MAP_CONTROL End-to-End)**:
-   - Monitorar a execução do Iguana além de `0xb000d6b8`.
-   - Capturar as primeiras fpages enviadas via `L4_MapControl` e verificar o registro nos logs `[MMU] map_one: ... [aliased]` provando que as threads de usuário compartilham memória através da `PhysPool` / `VtlbLut`.
+2. **Passo 2 (Core 1: Refinamento do Slide-Detector no Loop de CP15)**:
+   - Em `c1_code_hook`, refinar o slide-detector para verificar se houve instruções de branch/call recentes (`bl 0xf0015d7c`, `ble`, etc.) ou contadores de loop que avançam.
+   - Permitir que o loop de inicialização do CP15 em `0xf0017b04` execute suas iterações completas até saltar para o agendador principal do REX (`rex_wait` / task init).
 
-3. **Passo 3 (BREW Símbolos Globais & Despacho Applet)**:
-   - Extrair os ponteiros globais `gpIGL`/`gpIEGL` e a vtable da BREW a partir do espaço do APPS (`0x10137000+`).
-   - Ligar os ponteiros reais no `IglGuestBridge` e validar a primeira chamada de desenho/clear via `BrewLoader` com `--applet`.
+3. **Passo 3 (Gatilho da Resolução IGL / BREW via ISHELL_CreateInstance)**:
+   - Conectar o interceptador na tabela de chamadas virtuais da BREW para acionar `resolve_from_object` no retorno de criação da interface gráfica (`AEECLSID_IGL`).
+   - Validar a execução ponta a ponta com injeção de applet real via `--applet`.
 
 ---
 
