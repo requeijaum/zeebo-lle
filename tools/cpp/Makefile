@@ -39,6 +39,15 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
 	./test_l4_mmu_uc
 
+# QW1: harness isolado de BootInfo/fpage (host-only, sem Unicorn).
+# Lê a cópia de trabalho da NAND (APPS). Se ausente, o harness faz SKIP (exit 0).
+BOOTINFO_APPS ?= ../../nand/1.1.2_APPS.bin
+zeebo_bootinfo_harness: zeebo_bootinfo_harness.cpp zeebo_bootinfo.h zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_bootinfo_harness.cpp
+
+test-bootinfo: zeebo_bootinfo_harness
+	./zeebo_bootinfo_harness $(BOOTINFO_APPS)
+
 # GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
 gpu:
 	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke igl_guest_bridge_test
@@ -113,7 +122,7 @@ test-cli: zeebo_lle_main
 
 check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc test_audio_sink test_control_server test_save_state
+       test_l4_mmu test_l4_mmu_uc test-bootinfo test_audio_sink test_control_server test_save_state
 	./test_audio_sink
 	./test_control_server
 	./test_save_state
@@ -122,10 +131,10 @@ clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
 	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
-	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot
+	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
