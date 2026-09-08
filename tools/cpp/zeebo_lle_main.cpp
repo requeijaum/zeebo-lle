@@ -368,6 +368,36 @@ public:
         paused_ = p;
     }
 
+    // ── Passo 5: entrada Z-Pad/SDL2 → despacho contínuo de EVT_KEY_* ao BREW ──
+    // Configura o manipulador de eventos do applet ativo (HandleEvent Thumb) e o
+    // ponteiro do objeto applet para que o laço SDL2 encaminhe cada tecla como
+    // EVT_KEY_PRESS / EVT_KEY_RELEASE. handler_va=0 desliga o encaminhamento
+    // (o keysense de hardware continua funcionando normalmente).
+    void set_brew_input_handler(u32 handler_va, u32 applet_va,
+                                u32 stack_top = 0x2f0f0000, u32 ret_magic = 0x2f0ffffe) {
+        brew_handler_va_ = handler_va;
+        brew_applet_va_  = applet_va;
+        brew_stack_top_  = stack_top;
+        brew_ret_magic_  = ret_magic;
+        brew_input_enabled_ = (handler_va != 0 && brew_ != nullptr);
+        if (brew_input_enabled_)
+            printf("[BREW/Input] Encaminhamento de teclas ARMADO: HandleEvent@0x%08x applet@0x%08x\n",
+                   handler_va, applet_va);
+    }
+
+    // Encaminha um botão lógico do Z-Pad ao manipulador BREW como EVT_KEY_PRESS
+    // (pressed=true) ou EVT_KEY_RELEASE. Retorna true se o applet consumiu (r0=1).
+    bool dispatch_zpad_to_brew(zeebo::brew::ZpadButton b, bool pressed) {
+        if (!brew_input_enabled_ || !brew_) return false;
+        u32 avk = zeebo::brew::avk_for_zpad(b);
+        if (!avk) return false;
+        u32 evt = pressed ? zeebo::brew::EVT_KEY_PRESS : zeebo::brew::EVT_KEY_RELEASE;
+        bool ok = false;
+        u32 r = brew_->dispatch_event(brew_handler_va_, brew_applet_va_, evt, avk,
+                                      brew_stack_top_, brew_ret_magic_, 0, &ok);
+        return ok && r == 1;
+    }
+
     // Direct Applet (.mod / .bar) Loader & Injection for Commercial Games / Homebrew
     bool load_applet(const std::string& mod_path, u32 base_addr = 0x12000000) {
         printf("[BREW/Applet] Loading applet module: %s into Core 0 @ 0x%08x...\n", mod_path.c_str(), base_addr);
@@ -690,27 +720,31 @@ public:
                 if (ev.type == SDL_QUIT) return;
                 if (ev.type == SDL_KEYDOWN) {
                     switch (ev.key.keysym.sym) {
-                        case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A, core0_.uc); break;
-                        case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B, core0_.uc); break;
-                        case SDLK_c:                   input_->press_key(ZEEBO_KEY_C, core0_.uc); break;
-                        case SDLK_v:                   input_->press_key(ZEEBO_KEY_D, core0_.uc); break;
-                        case SDLK_UP:                  input_->press_key(ZEEBO_KEY_UP, core0_.uc); break;
-                        case SDLK_DOWN:                input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); break;
-                        case SDLK_LEFT:                input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); break;
-                        case SDLK_RIGHT:               input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); break;
-                        case SDLK_h:                   input_->press_key(ZEEBO_KEY_HOME, core0_.uc); break;
+                        case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_A, true); break;
+                        case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_B, true); break;
+                        case SDLK_c:                   input_->press_key(ZEEBO_KEY_C, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_1, true); break;
+                        case SDLK_v:                   input_->press_key(ZEEBO_KEY_D, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_2, true); break;
+                        case SDLK_UP:                  input_->press_key(ZEEBO_KEY_UP, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_UP, true); break;
+                        case SDLK_DOWN:                input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_DOWN, true); break;
+                        case SDLK_LEFT:                input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_LEFT, true); break;
+                        case SDLK_RIGHT:               input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_RIGHT, true); break;
+                        case SDLK_h:                   input_->press_key(ZEEBO_KEY_HOME, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_HOME, true); break;
+                        case SDLK_SPACE:               dispatch_zpad_to_brew(zeebo::brew::ZP_3, true); break;
+                        case SDLK_LSHIFT:              dispatch_zpad_to_brew(zeebo::brew::ZP_4, true); break;
                     }
                 } else if (ev.type == SDL_KEYUP) {
                     switch (ev.key.keysym.sym) {
-                        case SDLK_z: case SDLK_RETURN: input_->release_key(ZEEBO_KEY_A); break;
-                        case SDLK_x: case SDLK_ESCAPE: input_->release_key(ZEEBO_KEY_B); break;
-                        case SDLK_c:                   input_->release_key(ZEEBO_KEY_C); break;
-                        case SDLK_v:                   input_->release_key(ZEEBO_KEY_D); break;
-                        case SDLK_UP:                  input_->release_key(ZEEBO_KEY_UP); break;
-                        case SDLK_DOWN:                input_->release_key(ZEEBO_KEY_DOWN); break;
-                        case SDLK_LEFT:                input_->release_key(ZEEBO_KEY_LEFT); break;
-                        case SDLK_RIGHT:               input_->release_key(ZEEBO_KEY_RIGHT); break;
-                        case SDLK_h:                   input_->release_key(ZEEBO_KEY_HOME); break;
+                        case SDLK_z: case SDLK_RETURN: input_->release_key(ZEEBO_KEY_A); dispatch_zpad_to_brew(zeebo::brew::ZP_A, false); break;
+                        case SDLK_x: case SDLK_ESCAPE: input_->release_key(ZEEBO_KEY_B); dispatch_zpad_to_brew(zeebo::brew::ZP_B, false); break;
+                        case SDLK_c:                   input_->release_key(ZEEBO_KEY_C); dispatch_zpad_to_brew(zeebo::brew::ZP_1, false); break;
+                        case SDLK_v:                   input_->release_key(ZEEBO_KEY_D); dispatch_zpad_to_brew(zeebo::brew::ZP_2, false); break;
+                        case SDLK_UP:                  input_->release_key(ZEEBO_KEY_UP); dispatch_zpad_to_brew(zeebo::brew::ZP_UP, false); break;
+                        case SDLK_DOWN:                input_->release_key(ZEEBO_KEY_DOWN); dispatch_zpad_to_brew(zeebo::brew::ZP_DOWN, false); break;
+                        case SDLK_LEFT:                input_->release_key(ZEEBO_KEY_LEFT); dispatch_zpad_to_brew(zeebo::brew::ZP_LEFT, false); break;
+                        case SDLK_RIGHT:               input_->release_key(ZEEBO_KEY_RIGHT); dispatch_zpad_to_brew(zeebo::brew::ZP_RIGHT, false); break;
+                        case SDLK_h:                   input_->release_key(ZEEBO_KEY_HOME); dispatch_zpad_to_brew(zeebo::brew::ZP_HOME, false); break;
+                        case SDLK_SPACE:               dispatch_zpad_to_brew(zeebo::brew::ZP_3, false); break;
+                        case SDLK_LSHIFT:              dispatch_zpad_to_brew(zeebo::brew::ZP_4, false); break;
                     }
                 } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                     switch (ev.cbutton.button) {
@@ -2080,6 +2114,12 @@ private:
     bool igl_bound_ = false;
     // Item 4: loader/dispatch de applet BREW (.mod).
     std::unique_ptr<zeebo::brew::BrewLoader> brew_;
+    // Passo 5: encaminhamento contínuo de EVT_KEY_* do Z-Pad/SDL2 ao HandleEvent.
+    u32  brew_handler_va_ = 0;
+    u32  brew_applet_va_  = 0;
+    u32  brew_stack_top_  = 0x2f0f0000;
+    u32  brew_ret_magic_  = 0x2f0ffffe;
+    bool brew_input_enabled_ = false;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };

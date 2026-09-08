@@ -31,6 +31,7 @@ tools/cpp/qdsp5/fuzz_corpus/
 tools/cpp/zeebo_zwheel_harness
 tools/cpp/zeebo_efs2apps
 tools/cpp/zeebo_rex_harness
+tools/cpp/zeebo_input_harness
 tools/cpp/test_l4_mmu
 
 # Estado local do agente e caches Python

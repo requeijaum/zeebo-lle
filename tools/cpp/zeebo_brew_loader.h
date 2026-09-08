@@ -49,6 +49,62 @@ struct BrewSymbols {
     u32 aeeclscreate_va    = 0;  // AEEClsCreateInstance(clsid, pShell, pModule, ppObj)
 };
 
+// ── Eventos e teclas BREW (AEEEvent / AVKType) ───────────────────────────────
+// Códigos de evento de tecla do BREW (AEE_events.h). O manipulador de eventos
+// do applet (HandleEvent) recebe (pApp, evt, wParam=keycode, dwParam).
+enum : u32 {
+    EVT_KEY_PRESS   = 0x0100, // 256
+    EVT_KEY_RELEASE = 0x0101, // 257
+    EVT_KEY         = 0x0102, // 258
+};
+
+// Códigos de tecla AVK do Zeebo / Z-Pad (subconjunto usado no console).
+enum : u32 {
+    AVK_LEFT   = 0xFF51,
+    AVK_UP     = 0xFF52,
+    AVK_RIGHT  = 0xFF53,
+    AVK_DOWN   = 0xFF54,
+    AVK_SELECT = 0xFF0D, // Enter / Botão A (confirmar)
+    AVK_CLR    = 0xFF08, // Backspace / Botão B (voltar/limpar)
+    AVK_0      = 0x30,   // '0'..'9' = 0x30..0x39
+    AVK_9      = 0x39,
+    // Botões de jogo do Z-Pad. [infer] AVK_SOFT1/2 e AVK_INFO/SPACE seguem a
+    // faixa AVK_* padrão do BREW SDK; usados p/ mapear C/V/Espaço/Esc do host.
+    AVK_SOFT1  = 0xFF57, // Z-Pad botão 1
+    AVK_SOFT2  = 0xFF58, // Z-Pad botão 2
+    AVK_INFO   = 0xFF59, // Z-Pad botão 3
+    AVK_SPACE  = 0x20,   // Z-Pad botão 4 (Espaço)
+    AVK_FUNC   = 0xFF1B, // Home / Escape (menu)
+};
+
+// Botões lógicos do Z-Pad (independente do backend de entrada). O mapa
+// SDL2→Z-Pad vive no orquestrador; a conversão Z-Pad→AVK é canônica aqui.
+enum ZpadButton {
+    ZP_NONE = 0, ZP_UP, ZP_DOWN, ZP_LEFT, ZP_RIGHT,
+    ZP_A, ZP_B, ZP_1, ZP_2, ZP_3, ZP_4, ZP_HOME,
+};
+
+// Z-Pad lógico → código AVK BREW.
+inline u32 avk_for_zpad(ZpadButton b) {
+    switch (b) {
+        case ZP_UP:    return AVK_UP;
+        case ZP_DOWN:  return AVK_DOWN;
+        case ZP_LEFT:  return AVK_LEFT;
+        case ZP_RIGHT: return AVK_RIGHT;
+        case ZP_A:     return AVK_SELECT;
+        case ZP_B:     return AVK_CLR;
+        case ZP_1:     return AVK_SOFT1;
+        case ZP_2:     return AVK_SOFT2;
+        case ZP_3:     return AVK_INFO;
+        case ZP_4:     return AVK_SPACE;
+        case ZP_HOME:  return AVK_FUNC;
+        default:       return 0;
+    }
+}
+
+// Dígito 0-9 → AVK ('0'..'9'). Retorna 0 se fora da faixa.
+inline u32 avk_for_digit(int d) { return (d >= 0 && d <= 9) ? (u32)(0x30 + d) : 0u; }
+
 // ABI [infer, AAPCS BREW]: ISHELL_CreateInstance(r0=pIShell, r1=ClassID, r2=ppobj).
 // AEEClsCreateInstance(r0=ClassID, r1=pIShell, r2=pIModule, r3=ppobj).
 class BrewLoader {
@@ -113,6 +169,39 @@ public:
         if (sym_.aeemod_load_va && pc == sym_.aeemod_load_va)       { on_aeemod_load();     return true; }
         if (sym_.aeeclscreate_va && pc == sym_.aeeclscreate_va)     { on_cls_create();      return true; }
         return false;
+    }
+
+    // (c) Despacha um evento BREW ao manipulador Thumb do applet, executando-o
+    // DE VERDADE sob Unicorn (não forja retorno). Convenção HandleEvent do BREW:
+    //   r0 = pApplet, r1 = evt (EVT_KEY_PRESS/RELEASE), r2 = wParam (keycode AVK),
+    //   r3 = dwParam. Retorno r0 = TRUE(1) se o applet consumiu o evento.
+    // `handler_va` é o VA Thumb do HandleEvent (bit 0 ignorado; forçamos Thumb).
+    // `applet_va` é o ponteiro do objeto applet (r0). `stack_top`/`ret_magic`
+    // definem a pilha de scratch e o LR sentinela onde a execução para.
+    // Retorna r0 do manipulador; `*ok` (opcional) indica execução limpa.
+    u32 dispatch_event(u32 handler_va, u32 applet_va, u32 evt, u32 keycode,
+                       u32 stack_top, u32 ret_magic, u32 dwparam = 0, bool* ok = nullptr) {
+        if (ok) *ok = false;
+        if (!uc_) { printf("[BREW/Input] dispatch_event: uc não vinculado\n"); return 0; }
+        if (!handler_va) { printf("[BREW/Input] dispatch_event: handler_va nulo\n"); return 0; }
+        u32 r0 = applet_va, r1 = evt, r2 = keycode, r3 = dwparam;
+        u32 sp = stack_top, lr = ret_magic | 1u; // LR Thumb → para no sentinela
+        set_reg(UC_ARM_REG_R0, r0); set_reg(UC_ARM_REG_R1, r1);
+        set_reg(UC_ARM_REG_R2, r2); set_reg(UC_ARM_REG_R3, r3);
+        set_reg(UC_ARM_REG_SP, sp); set_reg(UC_ARM_REG_LR, lr);
+        uc_err e = uc_emu_start(uc_, handler_va | 1u, ret_magic & ~1u, 0, 0);
+        u32 ret  = reg(UC_ARM_REG_R0);
+        u32 endp = reg(UC_ARM_REG_PC);
+        bool clean = (e == UC_ERR_OK) || ((endp & ~1u) == (ret_magic & ~1u));
+        const char* evname = (evt == 0x0100) ? "EVT_KEY_PRESS"
+                           : (evt == 0x0101) ? "EVT_KEY_RELEASE"
+                           : (evt == 0x0102) ? "EVT_KEY" : "EVT_?";
+        printf("[BREW/Input] %s key=0x%04x → HandleEvent@0x%08x  ret r0=%u %s (uc=%s)\n",
+               evname, keycode, handler_va, ret,
+               ret == 1 ? "(consumido ✓)" : "(não tratado)",
+               clean ? uc_strerror(e) : uc_strerror(e));
+        if (ok) *ok = clean;
+        return ret;
     }
 
 private:

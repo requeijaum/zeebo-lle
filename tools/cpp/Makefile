@@ -69,10 +69,19 @@ test-core1: test-rex
 test-zwheel-preview: zeebo_lle_main
 	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --zwheel-preview-headless
 
-clean:
-	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness
+# Passo 5: mapeamento Z-Pad/SDL2 → AVK e despacho contínuo de EVT_KEY_PRESS/
+# EVT_KEY_RELEASE ao manipulador BREW (HandleEvent), provado por execução real
+# sob Unicorn (applet stub que consome a tecla e retorna r0=1).
+zeebo_input_harness: zeebo_input_harness.cpp zeebo_brew_loader.h zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_input_harness.cpp -lunicorn
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview
+test-input: zeebo_input_harness
+	./zeebo_input_harness
+
+clean:
+	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
+
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-input
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
