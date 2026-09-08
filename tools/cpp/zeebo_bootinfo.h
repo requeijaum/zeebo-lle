@@ -116,9 +116,12 @@ inline bool locate(const u8* data, size_t size, BootInfo& out) {
 }
 
 // Decompõe [va_start, va_end) em fpages de 2^page_log2 bytes com perms rwx.
-// Reproduz mempool_init (@0xb000d5b4): min(virt,phys)=1MiB, incremento de
-// 0x100000 por página. Cada fpage usa a repr. bruta de zeebo_l4::Fpage:
-//   raw = base | (size_log2 << 4) | rwx.
+// HIPÓTESE (NÃO firmware-derived): reproduz o comportamento esperado de
+// mempool_init (@0xb000d5b4) — min(virt,phys)=1MiB, incremento de 0x100000 por
+// página. ATENÇÃO: os argumentos (va_start/va_end) são constantes fornecidas
+// pelo chamador; NÃO são lidos de nenhum record/descriptor/byte do firmware. O
+// range de 96 MiB 0xb0d00000..0xb6d00000 não aparece em nenhum BootInfo record.
+// Cada fpage usa a repr. bruta de zeebo_l4::Fpage: raw = base|(size_log2<<4)|rwx.
 inline std::vector<zeebo_l4::Fpage>
 enumerate_fpages(u32 va_start, u32 va_end, u32 page_log2, u32 rwx) {
     std::vector<zeebo_l4::Fpage> out;

@@ -40,11 +40,15 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	./test_l4_mmu_uc
 
 # QW1: harness isolado de BootInfo/fpage (host-only, sem Unicorn).
-# Lê a cópia de trabalho da NAND (APPS). Se ausente, o harness faz SKIP (exit 0).
+# Exige a cópia de trabalho REAL da NAND (APPS). Se ausente, o harness FALHA
+# com exit não-zero — nunca faz SKIP silencioso (evita falso-verde no CI).
+# Prova (A) records/pools por bytes+mutação (firmware-derived) e rotula (B) a
+# geração de 96 fpages como hipótese explícita do mempool_init (NÃO derivada).
 BOOTINFO_APPS ?= ../../nand/1.1.2_APPS.bin
 zeebo_bootinfo_harness: zeebo_bootinfo_harness.cpp zeebo_bootinfo.h zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_bootinfo_harness.cpp
 
+# Alvo real: falha nonzero sem os bytes da NAND. Faz parte do `check`.
 test-bootinfo: zeebo_bootinfo_harness
 	./zeebo_bootinfo_harness $(BOOTINFO_APPS)
 
