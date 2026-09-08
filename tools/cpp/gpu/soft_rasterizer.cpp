@@ -52,7 +52,7 @@ public:
         Texture& t=textures_[id]; // default-constructs an entry if absent (bind order)
         switch(pname){
             case 0x2800: t.mag_nearest=(param==0x2600); break; // MAG_FILTER
-            case 0x2801: t.min_nearest=(param==0x2600); break; // MIN_FILTER
+            case 0x2801: t.min_nearest=(param==0x2600); break; // MIN_FILTER (state-only: no minification/LOD path yet)
             case 0x2802: t.clamp_s=(param==0x812F); break;     // WRAP_S / CLAMP_TO_EDGE
             case 0x2803: t.clamp_t=(param==0x812F); break;     // WRAP_T
             default: break; // unknown pname: ignore safely

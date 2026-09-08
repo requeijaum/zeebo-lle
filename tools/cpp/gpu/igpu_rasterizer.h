@@ -29,7 +29,7 @@ struct RenderState {
     bool blend=false;   u32 blend_src=0, blend_dst=0;
     bool depth_test=false; u32 depth_func=0; bool depth_write=true;
     bool alpha_test=false; u32 alpha_func=0; f32 alpha_ref=0;
-    bool cull=false;    u32 cull_face=0;
+    bool cull=false;    u32 cull_face=0x0405; // GLES1 default GL_CULL_FACE_MODE = GL_BACK
     u32  shade_model=0; // flat/smooth
     std::array<u32,2> tex_enabled{0,0};
     u32  active_unit=0;
