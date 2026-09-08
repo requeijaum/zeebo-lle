@@ -194,36 +194,41 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Ponto de entrada de eventos BREW do ZeeboApp localizado em `0x10532344` (Thumb): decodifica eventos em relação à constante base `K = 0x1f92`.
   - `EVT_APP_START = 0x1f96` (`K + 4`) desvia para `0x1053241e`, invocando o método da interface gráfica `[applet + 0x2c]->vtbl[0x28](1)` seguido da checagem de retorno BREW.
   - Também identificados os ramos de `EVT_APP_SUSPEND` (`0x1053235c`) e `EVT_APP_START_BACKGROUND` (`0x10532360`).
+- [x] **Execução e Renderização Real da Z-Wheel sob Unicorn (commits `163a64a`, `d36d36d`)**:
+  - Implementado harness executável `tools/cpp/zeebo_zwheel_harness.cpp` (`make test-zwheel`).
+  - Carrega os segmentos de código de `0:APPS` (`1.1.2_APPS.bin`), monta a estrutura do applet com vtable gráfica em `[applet + 0x2c]` conectada ao `SoftRasterizer`/`IglHook`.
+  - Disparou `EVT_APP_START` (`0x1f96`) no manipulador Thumb `0x10532344`: retorno `r0 = 1`, retorno limpo ao sentinela `0x1000fffe`.
+  - 1 chamada gráfica capturada no slot 10 (`0x28`) com `arg=1`.
+  - Framebuffer RGB565: soma de pixels 0 → 2013081600, centro `0x1999` — **pixels reais gerados e validados por execução**.
 - [x] **Estrutura de Arquivos EFS2APPS Mapeada (76.731 Dirents)**:
   - Formato binário comprovado contra o dump `nand/1.1.2.bin`: `0x69 [inode u32][reclen u8][type u8][parent_ref u32][pad 00][name (reclen-5)]`.
   - Inode raiz `0x6064` indexa diretórios de primeiro nível (`"mod"`, `"mif"`, `".efs_private"`, `"err"`, etc.).
   - Módulos de jogos agrupados por transação COW sob seus respectivos pais (ex: `reksio.mod` @`0x32606ef`, inode `0x265e4`, sob diretório pai `0x04abef64`).
-- [x] **Core 1 REX MMU Bring-Up (commit `d71d27d`)**:
-  - Diagnosticada a causa do congelamento de registradores em `0xf0017718`: instrução `mcr p15, c1, c0, 0` ativando `SCTLR.M=1` (MMU do ARM9).
-  - Em modo padrão `UC_TLB_CPU`, o Unicorn tentava consultar page tables não mapeadas, gerando 941 NOPs virtuais até cair nos zeros em `0xf00184cc`.
-  - Forçado `uc_ctl_tlb_mode(core1_.uc, UC_TLB_VIRTUAL)` (idêntico ao Core 0), mantendo a janela plana/espelhada e permitindo que o Core 1 execute normalmente além da barreira em `0xdf602d4c`.
+- [x] **Core 1 REX MMU & Clobber de Código Diagnosticado (commit `d71d27d` e lote `deleg_4d905a0d`)**:
+  - Diagnosticada e corrigida a ativação de MMU (`mcr p15` com `SCTLR.M=1` em `0xf0017718`) via `UC_TLB_VIRTUAL`, evitando o NOP-slide padrão do Unicorn.
+  - Rastreada a causa exata do `UC_ERR_INSN_INVALID` em `0xf000a800`: a rotina `0xf0002cd4` inicializa a free-list do heap do REX de 2MB com base em `0xf0000000`. No modelo espelho plano, o particionador (`str r2, [r2, #-0x400]`) sobregrava o `.text` em `0xf000a800` com `0x00ac00f0` (ponteiro de dados do heap).
+- [ ] **Isolamento de Memória do Heap REX no Core 1**:
+  - Proteger a janela de `.text` do AMSS contra escritas da free-list do REX em `0xf0000000` (redirecionando a RAM de dados física para backing store independente), permitindo que o ARM9 prossiga até o agendador estável `rex_wait` (`0x16ef0b02`).
 - [ ] **Integração de EFS2APPS no VFS Guest / IFILEMGR**:
-  - Implementar parser C++ das entradas `0x69` e expor aos despachos do subsistema `IFILEMGR` do ARM11, permitindo resolução de caminhos como `fs:/mod/reksio/reksio.mod`.
-- [ ] **Gatilho de Instanciação do ZeeboApp & Acoplamento IGL (Z-Wheel 3D)**:
-  - Disparar `EVT_APP_START` (`0x1f96`) em `0x10532344`, fornecendo vtable gráfica conectada ao `IglGuestBridge` no offset `0x28` para capturar a emissão de comandos OpenGL ES 1.1 da Z-Wheel via `SoftRasterizer`.
-- [ ] **Core 1 REX Task Scheduler Loop**:
-  - Permitir avanço do agendador do modem até o repouso em `rex_wait` (`0x16ef0b02`) para recepção contínua de RPCs de áudio e rede.
+  - Implementar parser C++ indexado por tabela hash `(parent, name) → payload` em `tools/cpp/zeebo_efs2_fs.h` e expor aos despachos do subsistema `IFILEMGR` do ARM11, permitindo resolução de caminhos como `fs:/mod/reksio/reksio.mod`.
+- [ ] **Acoplamento do ZeeboApp ao Loop Principal do Core 0**:
+  - Integrar o harness validado da Z-Wheel ao ciclo de execução do `zeebo_lle_main`, conectando o ponto de despacho de applets da BREW ao pipeline de display SDL2.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação)
 
-1. **Passo 1 (Harness de Execução do ZeeboApp + Renderização Z-Wheel)**:
-   - Construir teste/harness em `tools/cpp/` que inicialize contexto Unicorn com os segmentos de `0:APPS`, configure a estrutura `applet` com ponteiro para a vtable IGL (`IglGuestBridge`) em `applet[0x2c]`, e invoque `0x10532344` com `r1 = 0x1f96` (`EVT_APP_START`).
-   - Capturar o primeiro frame 3D desenhado via `SoftRasterizer` e exportar como PPM.
+1. **Passo 1 (Isolamento de RAM/Heap do REX no Core 1)**:
+   - Configurar hook de escrita ou dissociar o backing store físico de dados de `0xf0000000` da memória de instrução do AMSS no Core 1.
+   - Permitir que a inicialização da free-list em `0xf0002cd4` grave livremente na RAM sem corromper as instruções em `0xf000a800`, validando a chegada do ARM9 em `rex_sched` (`0xf0013b84`) e `rex_wait` (`0x16ef0b02`).
 
-2. **Passo 2 (Parser C++ EFS2APPS para IFILEMGR)**:
-   - Codificar `zeebo_efs2_fs.h` implementando o parser de registros `0x69` a partir da partição `0:EFS2APPS` (`0x3220000`).
-   - Oferecer métodos de lookup de path (`open("fs:/mod/reksio/reksio.mod")`) e listagem de diretório (`readdir("fs:/mod")`).
-   - Validar com teste automatizado (`make test-efs2-fs`).
+2. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` para IFILEMGR)**:
+   - Implementar em C++ a leitura direta dos registros `0x69` sobre o dump da NAND (`nand/1.1.2.bin`), criando índice hash de diretórios (`fs:/mod/`, `fs:/mif/`).
+   - Fornecer API C++ limpa (`efs2_open`, `efs2_read`, `efs2_readdir`) e validar via `make test-efs2-fs`.
 
-3. **Passo 3 (Loop de Agendamento do REX no Core 1)**:
-   - Acompanhar a execução do Core 1 a partir de `0xdf602d4c` até a entrada do despachante multitarefa REX (`0xf0013b84` / `rex_sched`), garantindo retorno limpo e repouso em `rex_wait`.
+3. **Passo 3 (Integração ZeeboApp / Z-Wheel no Emulador Integrado)**:
+   - Transportar a sequência comprovada em `zeebo_zwheel_harness.cpp` (configuração do objeto applet em `[applet + 0x2c]`, vtable slot 10 / `0x28` e injeção de `EVT_APP_START`) para o carregamento do `zeebo_lle_main`.
+   - Exibir os frames do carrossel da Z-Wheel na janela interativa do SDL2.
 
 ---
 
