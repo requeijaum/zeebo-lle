@@ -95,6 +95,20 @@ int main() {
     CHECK(bridge.validate_vtable(uc, IEGL_VTBL, 28) == 28, "IEGL: 28/28 slots-código");
     CHECK(bridge.validate_vtable(uc, FAKE_VTBL, 80) == 0,  "FAKE: reprovada (0)");
 
+    printf("== Teste 6: dispatch usa PC alinhado do Unicorn e não engole slots reais ==\n");
+    bridge.set_guest_running(true);
+    const u32 IEGL_ADDREF_FN = (CODE_LO + 0x2000 + 0 * 0x30) & ~1u;
+    const u32 IEGL_QI_FN = (CODE_LO + 0x2000 + 2 * 0x30) & ~1u;
+    const u32 IEGL_QUERYSTRING_FN = (CODE_LO + 0x2000 + 7 * 0x30) & ~1u;
+    const u32 IEGL_SWAP_FN = (CODE_LO + 0x2000 + 26 * 0x30) & ~1u;
+    CHECK(bridge.on_code(uc, IEGL_ADDREF_FN), "PC Thumb alinhado encontra slot IEGL tratado");
+    u32 sentinel = 0xdeadbeef; uc_reg_write(uc, UC_ARM_REG_R0, &sentinel);
+    CHECK(!bridge.on_code(uc, IEGL_QI_FN), "QueryInterface não modelado continua no firmware real");
+    CHECK(!bridge.on_code(uc, IEGL_QUERYSTRING_FN), "slot IEGL não modelado continua no firmware real");
+    u32 after = 0; uc_reg_read(uc, UC_ARM_REG_R0, &after);
+    CHECK(after == sentinel, "slot não modelado não corrompe argumentos guest");
+    CHECK(bridge.on_code(uc, IEGL_SWAP_FN), "eglSwapBuffers legado slot 26 é interceptado");
+
     uc_close(uc);
     printf("\n%s (%d falhas)\n", g_fail ? "FALHOU" : "TODOS OS TESTES PASSARAM", g_fail);
     return g_fail ? 1 : 0;

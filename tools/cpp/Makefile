@@ -41,10 +41,10 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 
 # GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
 gpu:
-	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke
+	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke igl_guest_bridge_test
 
 test-gpu: gpu
-	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke
+	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke && ./igl_guest_bridge_test
 
 # Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
 # sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em

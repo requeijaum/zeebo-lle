@@ -116,7 +116,7 @@ public:
     // NÃO altera PC — devolve a decisão ao caller (desacoplamento).
     bool on_code(uc_engine* uc, u32 pc) {
         if (!guest_running_) return false;
-        auto it = fn_map_.find(pc);
+        auto it = fn_map_.find(pc & ~1u);
         if (it == fn_map_.end()) return false;
         const Target& t = it->second;
 
@@ -138,9 +138,8 @@ public:
         };
         gm.set_ret = [uc](u32 r0) { uc_reg_write(uc, UC_ARM_REG_R0, &r0); };
 
-        if (t.is_igl) hook_.dispatch_igl(t.slot, gm);
-        else          hook_.dispatch_iegl(t.slot, gm);
-        return true;
+        return t.is_igl ? hook_.dispatch_igl(t.slot, gm)
+                        : hook_.dispatch_iegl(t.slot, gm);
     }
 
 private:
@@ -158,7 +157,7 @@ private:
             u32 fn_va = 0;
             if (uc_mem_read(uc, vtable_va + (u32)s * 4, &fn_va, 4) != UC_ERR_OK) continue;
             if (fn_va == 0) continue; // slot nulo: função não implementada no wrapper
-            fn_map_[fn_va] = Target{is_igl, s};
+            fn_map_[fn_va & ~1u] = Target{is_igl, s};
         }
         printf("[IGL-bridge] vtable %s @0x%08x -> %d slots mapeados (%zu funções únicas)\n",
                is_igl ? "IGL" : "IEGL", vtable_va, slots, fn_map_.size());

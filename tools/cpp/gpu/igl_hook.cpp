@@ -106,7 +106,7 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
     using namespace igl_slot;
     // IBase herdado: po EM R0 (ABI sutileza 2). Refcount é no-op p/ o rasterizer.
     if(slot==AddRef || slot==Release){ gm.set_ret(1); return true; }
-    if(slot==QueryInterface){ gm.set_ret(0); return true; }
+    if(slot==QueryInterface) return false; // deixa o wrapper/firmware preencher ppOut real
 
     // Slots gl*: R0 = PRIMEIRO ARGUMENTO REAL (não po).
     if(slot==glViewport){                       // glViewport(x,y,w,h)
@@ -263,22 +263,20 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         rast_.draw_indexed(glenum::to_prim(mode), verts, idx);
         return true;
     }
-    // slot placeholder (-1) ou não traduzido: stub HONESTO — não finge sucesso de
-    // desenho, apenas devolve 0 e sinaliza "não tratado plenamente" via return true
-    // (consumido, mas sem efeito). Marcado p/ implementar quando AEEGL.h fixar índices.
-    gm.set_ret(0);
-    return false;   // false = slot reconhecido como IGL mas ainda não modelado
+    // Slot não modelado: não altere registradores. O bridge devolve false e
+    // permite que o wrapper/firmware real execute em vez de fabricar sucesso.
+    return false;
 }
 
 bool IglHook::dispatch_iegl(int slot, GuestMachine& gm){
     using namespace iegl_slot;
     if(slot==AddRef || slot==Release){ gm.set_ret(1); return true; }
-    if(slot==QueryInterface){ gm.set_ret(0); return true; }
+    if(slot==QueryInterface) return false; // deixa o wrapper/firmware preencher ppOut real
     // eglSwapBuffers -> apresenta o frame no fb_sink existente.
     if(slot==eglSwapBuffers){
         rast_.end_frame(); rast_.begin_frame(); gm.set_ret(1); return true;
     }
-    gm.set_ret(1);   // EGL lifecycle: devolver sucesso é seguro (handles sentinela)
+    // IEGL não modelado segue no wrapper/firmware real, sem mutar R0.
     return false;
 }
 
