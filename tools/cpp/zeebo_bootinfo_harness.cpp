@@ -7,7 +7,7 @@
 //       O bloco __okl4_bootinfo do 1.1.2_APPS.bin (@0x57000) e seus records
 //       reais — BI_TAG_EMPTY (magic 0x1960021d), 10x VIRT_POOLS(5) e
 //       5x PHYS_POOLS(6). Provado por MUTAÇÃO: alterar os bytes de origem
-//       muda/quebra a saída do parser (ver test-bootinfo-derivation).
+//       muda/quebra a saída do parser (ver a seção de MUTAÇÃO no main()).
 //
 //   (B) MEMPOOL HYPOTHESIS (NÃO derivado do firmware — hipótese explícita):
 //       A geração de 96 fpages de 1 MiB em 0xb0d00000..0xb6d00000 é ARITMÉTICA
@@ -24,8 +24,10 @@
 // trabalho da NAND (o dump original permanece read-only).
 //
 // GATE HONESTO: se o firmware real estiver ausente, o harness FALHA com exit
-// não-zero (não faz SKIP silencioso). O alvo `make test-bootinfo` exige os
-// bytes reais; sem eles o CI fica vermelho, nunca falso-verde.
+// não-zero (não faz SKIP silencioso). O alvo `make test-bootinfo-real` exige
+// os bytes reais; sem eles ele fica vermelho, nunca falso-verde. Esse alvo
+// fica FORA do `check` agregado (a NAND é proprietária/gitignored); o `check`
+// apenas COMPILA este harness (compile-only) e não afirma validação por bytes.
 // ---------------------------------------------------------------------------
 #include "zeebo_bootinfo.h"
 
