@@ -19,7 +19,7 @@ gpu_smoke_gl: gpu_smoke.cpp soft_rasterizer.cpp gl_host_rasterizer.cpp rasterize
 clean:
 	rm -f gpu_smoke gpu_smoke_gl igl_smoke gpu_display_integration \
 	      igl_transform_smoke igl_guest_bridge_test gl_quickwins_smoke \
-	      gl_alpha_sampler_smoke
+	      gl_alpha_sampler_smoke atitc_smoke
 
 # IglHook (produtor CORRETO, FASE 1 real) — prova por framebuffer sem Unicorn.
 igl_smoke: igl_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp igpu_rasterizer.h igl_hook.h
@@ -56,3 +56,10 @@ gl_alpha_sampler_smoke: gl_alpha_sampler_smoke.cpp igl_hook.cpp soft_rasterizer.
 
 test-alpha-sampler: gl_alpha_sampler_smoke
 	./gl_alpha_sampler_smoke
+
+# QW9: ATITC/ATC host-side decode (glCompressedTexImage2D slot 15) — pixel/hash TDD.
+atitc_smoke: atitc_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp atitc_decode.h igpu_rasterizer.h igl_hook.h
+	$(CXX) $(CXXFLAGS) atitc_smoke.cpp igl_hook.cpp soft_rasterizer.cpp rasterizer_factory.cpp -o atitc_smoke
+
+test-atitc: atitc_smoke
+	./atitc_smoke
