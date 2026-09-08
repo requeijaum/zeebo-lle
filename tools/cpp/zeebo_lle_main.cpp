@@ -435,6 +435,30 @@ public:
         paused_ = p;
     }
 
+    // QW14: opt-in strict-unmapped mode. When armed, the first UNKNOWN unmapped
+    // access deterministically halts the machine and captures structured
+    // evidence (see strict_unmapped_). Disarmed by default so the boot stays
+    // observable-equivalent to the base.
+    void arm_strict_unmapped(bool on) { strict_unmapped_.Arm(on); }
+
+    // Shared decision for both cores' unmapped hooks. Returns true iff the strict
+    // trap fired, in which case the hook must return FALSE to Unicorn so
+    // uc_emu_start reports UC_ERR_*_UNMAPPED with PC left at the faulting
+    // instruction and the page NOT auto-mapped (evidence preserved). We also set
+    // paused_ so the interleaved loop idles deterministically (no deadlock,
+    // with or without a ControlServer) instead of re-entering the fault.
+    bool strict_unmapped_consider(unsigned long core, unsigned long pc,
+                                  unsigned long addr, unsigned width,
+                                  zeebo_lle::UnmappedKind kind, bool has_value,
+                                  unsigned long long value, bool known_handled) {
+        if (!strict_unmapped_.Consider(core, pc, addr, width, kind, has_value,
+                                       value, known_handled)) {
+            return false;
+        }
+        paused_ = true;
+        return true;
+    }
+
     // ── Passo 5: entrada Z-Pad/SDL2 → despacho contínuo de EVT_KEY_* ao BREW ──
     // Configura o manipulador de eventos do applet ativo (HandleEvent Thumb) e o
     // ponteiro do objeto applet para que o laço SDL2 encaminhe cada tecla como
@@ -1627,6 +1651,19 @@ public:
             req->reply.set_value(resp);
             return;
         }
+        if (req->cmd == "strict_unmapped") {
+            // QW14 opt-in trap over the control channel. `str_mode` "arm"/"disarm"
+            // toggles; with no mode it just reports {armed,tripped,event}.
+            if (req->str_mode == "arm") {
+                strict_unmapped_.Arm(true);
+            } else if (req->str_mode == "disarm") {
+                strict_unmapped_.Arm(false);
+            }
+            std::string resp = "{\"ok\":true,\"strict_unmapped\":" +
+                               strict_unmapped_.Json() + "}";
+            req->reply.set_value(std::move(resp));
+            return;
+        }
         if (req->cmd == "quit") {
             paused_ = true;
             quit_requested_ = true;
@@ -2405,8 +2442,28 @@ private:
     static bool c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-        if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
-            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        const bool is_keypad =
+            (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE &&
+             type == UC_MEM_READ_UNMAPPED);
+        // QW14: opt-in strict trap. A known/handled access (keypad) never trips.
+        // On an unknown trip we return FALSE without mapping the page, so
+        // uc_emu_start reports UC_ERR_*_UNMAPPED with PC at the fault and the
+        // captured evidence intact (real Unicorn behavior, see the probe).
+        {
+            zeebo_lle::UnmappedKind kind =
+                (type == UC_MEM_WRITE_UNMAPPED) ? zeebo_lle::UnmappedKind::kWrite
+                : (type == UC_MEM_FETCH_UNMAPPED) ? zeebo_lle::UnmappedKind::kFetch
+                : zeebo_lle::UnmappedKind::kRead;
+            const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
+            if (sys->strict_unmapped_consider(
+                    0, pc, (unsigned long)addr, (unsigned)size, kind,
+                    /*has_value=*/is_wr, (unsigned long long)value,
+                    /*known_handled=*/is_keypad)) {
+                return false;
+            }
+        }
+        if (is_keypad) {
             u32 val = sys->input_->read((u32)(addr - KEYPAD_BASE));
             uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
             uc_mem_write(uc, addr, &val, size);
@@ -2418,7 +2475,6 @@ private:
         // NOTE: an unmapped hook proves nothing about MMIO — it fires for any
         // access to an unmapped page (stray pointer, undiscovered device, etc.).
         {
-            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
             sys->unmapped_unknown_.Record(zeebo_lle::UnmappedAccessEvent{
                 /*core=*/0, /*pc=*/pc, /*addr=*/(unsigned long)addr,
@@ -2429,14 +2485,29 @@ private:
     }
 
     static bool c1_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+        u32 pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        // QW14: opt-in strict trap on Core 1. No known-handled ranges here, so
+        // any unmapped access is unknown. On trip, return FALSE without mapping.
+        {
+            zeebo_lle::UnmappedKind kind =
+                (type == UC_MEM_WRITE_UNMAPPED) ? zeebo_lle::UnmappedKind::kWrite
+                : (type == UC_MEM_FETCH_UNMAPPED) ? zeebo_lle::UnmappedKind::kFetch
+                : zeebo_lle::UnmappedKind::kRead;
+            const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
+            if (sys->strict_unmapped_consider(
+                    1, pc, (unsigned long)addr, (unsigned)size, kind,
+                    /*has_value=*/is_wr, (unsigned long long)value,
+                    /*known_handled=*/false)) {
+                return false;
+            }
+        }
         // Dynamically map unmapped page for Core 1 (e.g. MMIO / MSM peripheral discovery)
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
         // QW8: structured record of an unknown UNMAPPED access on Core 1.
         // Same caveat: unmapped != proven MMIO; treat as discovery telemetry.
         {
-            u32 pc = 0;
-            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-            ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             const bool is_wr = (type == UC_MEM_WRITE_UNMAPPED);
             sys->unmapped_unknown_.Record(zeebo_lle::UnmappedAccessEvent{
                 /*core=*/1, /*pc=*/pc, /*addr=*/(unsigned long)addr,
@@ -2704,6 +2775,9 @@ private:
     std::unique_ptr<zeebo_lle::ControlServer> control_;
     // QW3: enumerable read-only diagnostic probes (probe.list / probe.get)
     zeebo_lle::ProbeRegistry probes_;
+    // QW14: opt-in strict-unmapped trap (structured halt + latched evidence).
+    // Disarmed by default so boot stays observable-equivalent to the base.
+    zeebo_lle::StrictUnmappedTrap strict_unmapped_;
     // QW8: bounded structured log of unknown UNMAPPED accesses (read-only diag)
     zeebo_lle::UnmappedAccessLog unmapped_unknown_{128};
     bool paused_ = false;
@@ -2819,6 +2893,7 @@ static void print_usage(const char* prog) {
     printf("  --zwheel-preview-headless  Testa preview gráfico em modo headless (para CI)\n");
     printf("\nOpções de Debug e Controle:\n");
     printf("  --control-port=<PORTA>     Habilita servidor de controle remoto/debug na porta TCP\n");
+    printf("  --strict-unmapped          (opt-in) Interrompe deterministicamente no primeiro acesso NAO mapeado desconhecido e captura evidencia estruturada (core/PC/addr/width/dir/type/value); default inalterado\n");
     printf("  --help, -h                 Exibe este menu de ajuda e opções\n\n");
 }
 
@@ -2855,6 +2930,7 @@ int main(int argc, char** argv) {
     bool zwheel_preview = false;
     bool show_fps = false;
     int control_port = 0;
+    bool strict_unmapped = false;
     int cycles = 250;
     int slice_insns = 10000;
     double max_seconds = 0.0;
@@ -2911,6 +2987,8 @@ int main(int argc, char** argv) {
             if (!parse_seconds_arg(arg.substr(10), max_seconds)) {
                 fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
             }
+        } else if (arg == "--strict-unmapped") {
+            strict_unmapped = true;
         } else if (arg[0] != '-') {
             if (nand_path == nullptr || std::string(nand_path) == "../../nand/1.1.2.bin") {
                 nand_path = argv[i];
@@ -2947,6 +3025,13 @@ int main(int argc, char** argv) {
     }
     // Aponta o parser EFS2 para a mesma cópia de trabalho da NAND usada no boot.
     sys.set_efs2_nand_path(nand_path);
+
+    // QW14: opt-in strict-unmapped. Off by default => boot unchanged.
+    if (strict_unmapped) {
+        sys.arm_strict_unmapped(true);
+        printf("[StrictUnmapped] Armed: first UNKNOWN unmapped access will halt "
+               "deterministically and capture structured evidence.\n");
+    }
 
     // --efs2-ls: lista os dirents da partição 0:EFS2APPS e sai.
     if (efs2_ls_flag) {
