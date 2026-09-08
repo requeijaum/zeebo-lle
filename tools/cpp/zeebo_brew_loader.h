@@ -131,13 +131,25 @@ public:
         f.seekg(0);
         std::vector<u8> d(sz);
         f.read((char*)d.data(), sz);
+        return inject_bytes(d, load_va, clsid, host_path);
+    }
+
+    // (a') Injeta um payload já materializado (ex.: extraído do EFS2 da NAND via
+    // efs2::Efs2Filesystem) no espaço guest de Core 0. Mesma garantia honesta que
+    // inject_mod: só retorna true com uc_mem_write verificado. `origin` é apenas o
+    // rótulo de proveniência (ex.: "efs2:reksio.mod") — não abre arquivo no host.
+    bool inject_bytes(const std::vector<u8>& d, u32 load_va, u32 clsid = 0,
+                      const std::string& origin = "<bytes>") {
+        if (!uc_) { printf("[BREW] inject_bytes: uc não vinculado\n"); return false; }
+        if (d.empty()) { printf("[BREW] inject_bytes: payload vazio ('%s')\n", origin.c_str()); return false; }
+        u32 sz = (u32)d.size();
 
         u32 map_base = load_va & ~0x000FFFFFu;
         uc_mem_map(uc_, map_base, 0x00800000, UC_PROT_ALL); // 8MB; ok se já mapeado
 
         uc_err e = uc_mem_write(uc_, load_va, d.data(), d.size());
         if (e != UC_ERR_OK) {
-            printf("[BREW] inject_mod: uc_mem_write falhou: %s\n", uc_strerror(e));
+            printf("[BREW] inject_bytes: uc_mem_write falhou: %s\n", uc_strerror(e));
             return false;
         }
         // Espelho na LUT (aliasing host-backed) quando disponível: garante que
@@ -147,13 +159,13 @@ public:
                 printf("[BREW]   (espelhado na VTLB LUT host-backed @0x%08x)\n", load_va);
         }
         mod_ = AppletModule{};
-        mod_.host_path = host_path;
+        mod_.host_path = origin;
         mod_.load_va = load_va;
         mod_.size = sz;
         mod_.clsid = clsid;
         mod_.injected = true;
         mod_.entry_va = resolve_mod_entry(d, load_va);
-        printf("[BREW] .mod injetado em 0x%08x (%u bytes)%s\n", load_va, sz,
+        printf("[BREW] payload '%s' injetado em 0x%08x (%u bytes)%s\n", origin.c_str(), load_va, sz,
                mod_.entry_va ? "" : " [entry AEEMod_Load não resolvido do header]");
         if (mod_.entry_va) printf("[BREW] AEEMod_Load do módulo @ 0x%08x [infer ELF e_entry]\n", mod_.entry_va);
         return true;

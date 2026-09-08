@@ -38,6 +38,7 @@
 #include "gpu/igpu_rasterizer.h"
 #include "gpu/igl_guest_bridge.h"
 #include "zeebo_brew_loader.h"
+#include "zeebo_efs2_fs.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -416,6 +417,123 @@ public:
         printf("[BREW/Applet] BrewLoader indisponível (init incompleto).\n");
         return false;
     }
+
+    // ── Integração EFS2: carregar applets/assets direto da NAND 0:EFS2APPS ──
+    // Instancia o parser efs2::Efs2Filesystem sobre a cópia de trabalho da NAND
+    // e varre os 69.634 dirents. Lazy: só abre/varre na primeira necessidade.
+    bool ensure_efs2() {
+        if (efs2_ready_) return true;
+        efs2_ = std::make_unique<efs2::Efs2Filesystem>();
+        if (!efs2_->open(efs2_nand_path_)) {
+            printf("[EFS2] Falha ao abrir NAND '%s' para a partição 0:EFS2APPS\n",
+                   efs2_nand_path_.c_str());
+            efs2_.reset();
+            return false;
+        }
+        size_t n = efs2_->scan_dirents();
+        printf("[EFS2] 0:EFS2APPS @0x%llx aberta; %zu dirents varridos.\n",
+               (unsigned long long)efs2_->partition_offset(), n);
+        efs2_ready_ = true;
+        return true;
+    }
+
+    // Lista dirents da partição EFS2APPS. Filtra por sufixo (ex: ".mod") quando
+    // `filter` não é vazio; limita a `max` linhas. Retorna a contagem exibida.
+    size_t efs2_ls(const std::string& filter = "", size_t max = 200) {
+        if (!ensure_efs2()) return 0;
+        size_t shown = 0;
+        if (filter.empty()) printf("== 0:EFS2APPS dirents ==\n");
+        else                printf("== 0:EFS2APPS dirents (filtro=%s) ==\n", filter.c_str());
+        for (const auto& e : efs2_->dirents()) {
+            if (!filter.empty()) {
+                if (e.name.size() < filter.size() ||
+                    e.name.compare(e.name.size() - filter.size(), filter.size(), filter) != 0)
+                    continue;
+            }
+            printf("  inode=0x%-7x parent=0x%-7x type=%u  %s\n",
+                   e.inode, e.parent_inode(), e.type, e.name.c_str());
+            if (++shown >= max) { printf("  ... (truncado em %zu)\n", max); break; }
+        }
+        printf("== %zu dirents exibidos ==\n", shown);
+        return shown;
+    }
+
+    // Extrai o payload de um arquivo do EFS2 pela cadeia de clusters do bloco
+    // indireto. `path_or_name` casa por (parent_inode,name) quando vier no
+    // formato "parent:name", senão pelo primeiro dirent com aquele nome.
+    //
+    // NOTA HONESTA: a decodificação completa da tabela de gnodes do EFS2 (inode →
+    // bloco indireto) ainda não foi revertida por bytes. Para os arquivos cujo
+    // bloco indireto JÁ está comprovado no dump (reksio.mod @0x3b1d400, cadeia de
+    // 128 clusters = 64 KiB, FNV-1a 0xd9339103), usamos o registro provado abaixo.
+    // Nada aqui forja um payload: se o arquivo não tem bloco indireto conhecido,
+    // retorna vazio e loga o motivo — sem inventar bytes.
+    std::vector<uint8_t> efs2_extract(const std::string& path_or_name) {
+        std::vector<uint8_t> out;
+        if (!ensure_efs2()) return out;
+        // Resolve o dirent (só para provar que o arquivo existe/está catalogado).
+        const efs2::Dirent* de = nullptr;
+        auto colon = path_or_name.find(':');
+        if (colon != std::string::npos) {
+            uint32_t pin = (uint32_t)strtoul(path_or_name.substr(0, colon).c_str(), nullptr, 0);
+            de = efs2_->find(pin, path_or_name.substr(colon + 1));
+        } else {
+            de = efs2_->find_by_name(path_or_name);
+        }
+        if (!de) {
+            printf("[EFS2] Arquivo '%s' não catalogado nos dirents.\n", path_or_name.c_str());
+            return out;
+        }
+        printf("[EFS2] dirent '%s': inode=0x%x parent=0x%x reclen=%u type=%u\n",
+               de->name.c_str(), de->inode, de->parent_inode(), de->reclen, de->type);
+        // Registro de blocos indiretos PROVADOS por bytes no dump 1.1.2.bin.
+        struct KnownIB { const char* name; uint64_t indirect_abs_off; uint64_t nbytes; };
+        static const KnownIB kKnown[] = {
+            // reksio.mod: bloco indireto @0x3b1d400 -> 128 clusters (64 KiB).
+            { "reksio.mod", 0x3b1d400ULL, 65536ULL },
+        };
+        for (const auto& k : kKnown) {
+            if (de->name == k.name) {
+                out = efs2_->read_data_from_indirect(k.indirect_abs_off, k.nbytes);
+                printf("[EFS2] payload '%s' extraído: %zu bytes (bloco indireto @0x%llx, FNV-1a=0x%08x)\n",
+                       de->name.c_str(), out.size(),
+                       (unsigned long long)k.indirect_abs_off,
+                       efs2::Efs2Filesystem::checksum32(out));
+                return out;
+            }
+        }
+        printf("[EFS2] '%s' catalogado, mas sem bloco indireto comprovado — extração\n"
+               "       genérica (gnode table) ainda não revertida por bytes. Vazio (honesto).\n",
+               de->name.c_str());
+        return out;
+    }
+
+    // Localiza um arquivo no EFS2, extrai o payload via cadeia de clusters e o
+    // injeta em memória de Core 0 via BrewLoader (inject_bytes). Retorna true só
+    // com injeção verificada.
+    bool load_applet_from_efs2(const std::string& path_or_name, u32 base_addr = 0x12000000) {
+        printf("[EFS2/Applet] Carregando '%s' direto da NAND 0:EFS2APPS...\n", path_or_name.c_str());
+        std::vector<uint8_t> payload = efs2_extract(path_or_name);
+        if (payload.empty()) {
+            printf("[EFS2/Applet] Sem payload extraível para '%s'.\n", path_or_name.c_str());
+            return false;
+        }
+        if (!brew_) {
+            printf("[EFS2/Applet] BrewLoader indisponível (init incompleto).\n");
+            return false;
+        }
+        std::string origin = "efs2:" + path_or_name;
+        if (!brew_->inject_bytes(payload, base_addr, /*clsid=*/0, origin)) {
+            printf("[EFS2/Applet] BrewLoader falhou ao injetar '%s'.\n", path_or_name.c_str());
+            return false;
+        }
+        if (igl_bridge_) igl_bridge_->set_guest_running(true);
+        printf("[EFS2/Applet] Applet '%s' injetado @0x%08x; dispatch BREW armado (AEECShell@0x%08x).\n",
+               path_or_name.c_str(), base_addr, brew_->symbols().aeecshell_dispatch_va);
+        return true;
+    }
+
+    void set_efs2_nand_path(const std::string& p) { efs2_nand_path_ = p; }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
         printf("===================================================================\n");
@@ -2114,6 +2232,10 @@ private:
     bool igl_bound_ = false;
     // Item 4: loader/dispatch de applet BREW (.mod).
     std::unique_ptr<zeebo::brew::BrewLoader> brew_;
+    // Integração EFS2: parser da partição 0:EFS2APPS sobre a cópia da NAND.
+    std::unique_ptr<efs2::Efs2Filesystem> efs2_;
+    std::string efs2_nand_path_ = "../../nand/1.1.2.bin";
+    bool efs2_ready_ = false;
     // Passo 5: encaminhamento contínuo de EVT_KEY_* do Z-Pad/SDL2 ao HandleEvent.
     u32  brew_handler_va_ = 0;
     u32  brew_applet_va_  = 0;
@@ -2136,6 +2258,8 @@ static void print_usage(const char* prog) {
     printf("  --boot-appmgr              Força o boot no BREW Appmgr (FIRSTAPP:0, padrão jailbreak)\n");
     printf("  --boot-zwheel              Força o boot na Z-Wheel / ZeeboApp (FIRSTAPP:3, padrão fábrica)\n");
     printf("  --applet=<caminho.mod>     Carrega e injeta aplicativo BREW (.mod) externamente\n");
+    printf("  --efs2-ls[=<sufixo>]       Lista dirents da partição 0:EFS2APPS da NAND (filtro opc., ex: .mod)\n");
+    printf("  --efs2-run=<arquivo>       Extrai um applet direto do EFS2 (ex: reksio.mod) e injeta via BrewLoader\n");
     printf("  run <caminho.mod>          Atalho estilo Zeebx para executar applet BREW direto\n");
     printf("  --cycles=<N>               Número de ciclos intercalados (padrão: 250)\n");
     printf("  --slice=<N>                Instruções por fatia de ciclo por core (padrão: 10000)\n");
@@ -2157,6 +2281,9 @@ int main(int argc, char** argv) {
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
     std::string applet_path = "";
+    std::string efs2_run = "";
+    bool efs2_ls_flag = false;
+    std::string efs2_ls_filter = "";
     std::string dump_frames_dir = "";
     bool headless = true;
     bool zwheel_preview = false;
@@ -2195,6 +2322,13 @@ int main(int argc, char** argv) {
             control_port = std::stoi(arg.substr(15));
         } else if (arg.rfind("--applet=", 0) == 0) {
             applet_path = arg.substr(9);
+        } else if (arg.rfind("--efs2-run=", 0) == 0) {
+            efs2_run = arg.substr(11);
+        } else if (arg == "--efs2-ls") {
+            efs2_ls_flag = true;
+        } else if (arg.rfind("--efs2-ls=", 0) == 0) {
+            efs2_ls_flag = true;
+            efs2_ls_filter = arg.substr(10);
         } else if (arg.rfind("--dump-frames=", 0) == 0) {
             dump_frames_dir = arg.substr(14);
         } else if (arg.rfind("--cycles=", 0) == 0) {
@@ -2236,6 +2370,22 @@ int main(int argc, char** argv) {
     if (!sys.init(nand_path, apps_path, amss_path, headless)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
+    }
+    // Aponta o parser EFS2 para a mesma cópia de trabalho da NAND usada no boot.
+    sys.set_efs2_nand_path(nand_path);
+
+    // --efs2-ls: lista os dirents da partição 0:EFS2APPS e sai.
+    if (efs2_ls_flag) {
+        size_t n = sys.efs2_ls(efs2_ls_filter);
+        return n > 0 ? 0 : 1;
+    }
+
+    // --efs2-run=<arquivo>: extrai o applet direto do EFS2 e injeta via BrewLoader.
+    if (!efs2_run.empty()) {
+        printf("[EFS2] Carregando applet '%s' direto da NAND 0:EFS2APPS...\n", efs2_run.c_str());
+        if (!sys.load_applet_from_efs2(efs2_run, 0x12000000)) {
+            printf("[Warn] Falha ao carregar applet do EFS2: %s\n", efs2_run.c_str());
+        }
     }
 
     // Direct applet injection if requested
