@@ -22,12 +22,14 @@ int main() {
 
     // Register a handful of read-only probes.
     // The `mmu` probe must expose only fields backed by live guest state:
-    // min_page_log2 is DERIVED from the live PageInfo word (CTZ), never read
-    // from an independent/unbacked scratch address. Model that invariant here.
+    // min_page_log2 is DERIVED from the live PageInfo word by DECODING the
+    // OKL4 KIP PageInfo layout (bits[0:9]=rights, bits[10:31]=page-size mask),
+    // exactly as the firmware's l4e_min_pagesize() does — NOT a raw CTZ of the
+    // whole word (which would latch onto a low rights bit). Model that here.
     const unsigned kLivePageInfo = 0x01111006u; // as written to KIP+0xc8
     reg.Register("mmu", "APPS L4 MMU state", [kLivePageInfo] {
         unsigned min_page_log2 =
-            kLivePageInfo ? (unsigned)__builtin_ctz(kLivePageInfo) : 0u;
+            zeebo_lle::PageInfoMinPageLog2(kLivePageInfo);
         char b[96];
         std::snprintf(b, sizeof(b),
                       "{\"page_info\":%u,\"min_page_log2\":%u}",
@@ -57,12 +59,47 @@ int main() {
     }
 
     // GetJson returns the wrapped probe payload for a known probe. The mmu
-    // payload's min_page_log2 must equal CTZ(page_info) — proving it is derived
-    // from the live PageInfo word, not an independent/unbacked value.
+    // payload's min_page_log2 must equal the DECODED minimum page-size log2 of
+    // the live PageInfo word — proving it is derived from real KIP state.
     {
         const std::string js = reg.GetJson("mmu");
-        // 0x01111006 -> CTZ = 1.
-        assert(js == "{\"ok\":true,\"name\":\"mmu\",\"value\":{\"page_info\":17895430,\"min_page_log2\":1}}");
+        // 0x01111006 -> page-size mask 0x01111000, CTZ = 12 (4KB min page).
+        assert(js == "{\"ok\":true,\"name\":\"mmu\",\"value\":{\"page_info\":17895430,\"min_page_log2\":12}}");
+    }
+
+    // ---- OKL4 KIP PageInfo decode: externally pinned vectors ----------------
+    // Each vector is an independently-derived (page_info, expected min log2)
+    // pair grounded in the OKL4/Iguana PageInfo layout — bits[0:9] are page
+    // rights/metadata and bits[10:31] are the page-size mask (bit N set =>
+    // page size 2^N supported). The minimum page size is CTZ of the mask, NOT
+    // CTZ of the raw word. These pins would FAIL a naive raw-CTZ implementation.
+    {
+        struct Vec { unsigned page_info; unsigned expect; const char* why; };
+        const Vec vs[] = {
+            // Live Zeebo KIP: 4K/64K/1M/16M pages | rwx=0x6. Min = 4K => log2 12.
+            {0x01111006u, 12u, "4K/64K/1M/16M, rwx set -> 4K min"},
+            // Rights bit 1 set but no page-size bits: no valid size mask -> 0.
+            {0x00000006u, 0u,  "rights only, no page-size mask -> undefined"},
+            // Pure 4K page-size bit, no rights: min = 4K => log2 12.
+            {0x00001000u, 12u, "only 4K bit -> 12"},
+            // 1MB (bit 20) as smallest supported page, rights 0x3ff all set.
+            {0x001003ffu, 20u, "1MB smallest, all rights bits set -> 20"},
+            // 64K (bit 16) smallest, plus 16M (bit 24); low bits garbage.
+            {0x01010001u, 16u, "64K smallest despite bit0 rights -> 16"},
+            // Full mask 4K..2G, all rights: smallest is 4K => 12.
+            {0xfffff3ffu, 12u, "all sizes 4K..2G -> 12"},
+            // No bits at all: no page info -> 0.
+            {0x00000000u, 0u,  "empty PageInfo -> undefined min"},
+        };
+        for (const auto& v : vs) {
+            unsigned got = zeebo_lle::PageInfoMinPageLog2(v.page_info);
+            if (got != v.expect) {
+                std::fprintf(stderr,
+                    "PageInfo 0x%08x: expected min_page_log2=%u got=%u (%s)\n",
+                    v.page_info, v.expect, got, v.why);
+            }
+            assert(got == v.expect);
+        }
     }
 
     // Unknown probe -> structured error, never a crash.
