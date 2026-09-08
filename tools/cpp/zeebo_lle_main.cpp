@@ -446,6 +446,17 @@ public:
             printf("[Fatal] Failed to init Core 1: %s\n", uc_strerror(err1));
             return false;
         }
+        // TLB flat/virtual: o firmware REX habilita a MMU do ARM9 via
+        // 'mcr p15,c1,c0,0' (SCTLR.M=1) em 0xf0017718. Em UC_TLB_CPU (default),
+        // o Unicorn passa a traduzir com as page tables do guest (TTBR ainda nao
+        // configurada de forma valida p/ o nosso mapa espelhado) e TODA insn apos
+        // esse ponto vira no-op silencioso (PC+=4, sem efeito), NOP-slide ate os
+        // zeros em 0xf00184cc. Como o bring-up do Core1 usa mapeamento espelhado
+        // (VA==host, janela de relocacao 0xdf600000), forcamos UC_TLB_VIRTUAL —
+        // igual ao Core0 — para o Unicorn ignorar a MMU do guest e manter o mapa
+        // plano. Validado por execucao real: sem isso os registradores congelam
+        // exatamente na escrita do SCTLR (r3=0x5317d).
+        uc_ctl_tlb_mode(core1_.uc, UC_TLB_VIRTUAL);
         uc_ctl_set_cpu_model(core1_.uc, UC_CPU_ARM_926);
         core1_.name = "ARM9-Modem";
         core1_state_ = &core1_;
@@ -503,6 +514,9 @@ public:
             if (!core1_.halted) {
                 e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
                 uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+                if (e1 != UC_ERR_OK) {
+                    core1_.halted = true;
+                }
             }
 
             if (c % 10 == 0 || c < 5) {
