@@ -338,8 +338,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW15 | **concluído** | Gate transacional QW6 + crossing real de página (`ba3f534`) | baixo | dois vetores PASS; crossing word/half em `0x00102000`, SCTLR.A=0; CPU 12/12 |
 | QW16 | **concluído** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` para [0,1], validação de enum de alpha-func e de combinações `glTexParameterx` (pname/param) | baixo | `gl_alpha_sampler_smoke` 17/17 estado+pixel; ref>1/<0 clampado, func/pname/param inválidos não mutam estado e retornam false (caminho firmware); sem slot `glFrontFace` inventado; MIN_FILTER mipmap rejeitado (limitação LOD documentada) |
 | QW17 | **concluído** | Correção do PC-resume no `c0_intr_hook` (`target_pc = pc`, evitando pular 1 instrução) (`a88a9bd`) | baixo | microteste `test_intr_pc_resume.cpp` com asserção RED e GREEN integrada em `make check`; elimina avanço duplo em syscalls 0xb4/0x00/0x0c |
-| QW18 | **proposto** | Eliminação de escritas legadas em `sp+0/4/8` no handler de interrupção 0xb4 de `zeebo_lle_main.cpp:2223` | baixo | espelhar a correção de pilha ABI feita no hook 0xb000c738 (`4224919`) para o caminho de interrupção case 0xb4 |
-| QW19 | **proposto** | Diagnóstico determinístico e guarda contra `size_log2 >= 32` no avanço do pool em `zeebo_l4_mmu.h` / `mempool_init` | baixo-médio | reprodução do stall `d708` (`lr=0x380` -> `size_log2=56`) sem permitir laço infinito em `0xb000d6dc` |
+| QW18 | **concluído** | Eliminação de escritas legadas em `sp+0/4/8` no handler de interrupção 0xb4 de `zeebo_lle_main.cpp:2223` | baixo | Fechado por análise causal sem alteração de código: trap 0xb000c738 intercepta antes e SP codifica trap-id em região segura de interrupção |
+| QW19 | **concluído** | Retomada no `pop` (`svc+4`) para stub de `MapControl` (syscall 0x14) em `c0_intr_hook` (`475ee1c`) | baixo | TDD reproduzindo restauração do frame de registradores (`r4-r8, sb, sl, fp`) no stub `0xb000c930` (`test_mapcontrol_frame_resume.cpp`); elimina corrupção de r4 que causava `size_log2=56` |
 
 ### P1 — Infraestrutura após o Passo 13
 
