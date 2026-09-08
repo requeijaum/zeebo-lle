@@ -50,6 +50,12 @@ clean:
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
+zeebo_efs2apps: zeebo_efs2apps.cpp zeebo_devices.h
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_efs2apps.cpp -lunicorn
+
+test-efs2apps: zeebo_efs2apps
+	./zeebo_efs2apps
+
 zeebo_elf: zeebo_elf.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_elf.cpp -lunicorn -lcapstone
 
