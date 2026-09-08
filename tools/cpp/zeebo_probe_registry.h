@@ -26,6 +26,28 @@ namespace zeebo_lle {
 // scalar) as a string. It must be side-effect free w.r.t. guest state.
 using ProbeFn = std::function<std::string()>;
 
+// Decode the OKL4/Iguana KIP PageInfo word (KIP+0xc8) into the log2 of the
+// smallest supported page size, exactly as the firmware's l4e_min_pagesize()
+// routine at 0xb000d498 does:
+//
+//   b000d498  ldr  r3,[r0,#0xc8]     ; PageInfo
+//   b000d49c  bic  r2,r3,#0x3fc      ; clear bits[2:9]
+//   b000d4a0  bic  r2,r2,#3          ; clear bits[0:1]  => r2 = page-size mask
+//   ... CTZ over the surviving mask (bits[10:31]) -> log2(min page size)
+//
+// PageInfo layout (L4 KernelInterfacePage):
+//   bits[0:9]   = page access-rights / metadata (rwx) — NOT a page size
+//   bits[10:31] = page-size mask; bit N set => page size 2^N is supported
+//
+// So the minimum page-size log2 is CTZ of (page_info & ~0x3ff), never CTZ of
+// the raw word (which would spuriously latch onto a low rights bit). Returns 0
+// when no page-size bit is set (no valid size mask -> undefined min page).
+inline unsigned PageInfoMinPageLog2(unsigned page_info) {
+    unsigned mask = page_info & ~0x3ffu; // strip bits[0:9] rights/metadata
+    if (mask == 0u) return 0u;           // no page-size bit -> no valid minimum
+    return (unsigned)__builtin_ctz(mask);
+}
+
 class ProbeRegistry {
 public:
     ProbeRegistry() = default;

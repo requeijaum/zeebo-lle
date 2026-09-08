@@ -376,15 +376,15 @@ public:
     void register_probes() {
         probes_.Register("mmu", "APPS L4 MMU / KIP PageInfo state", [this] {
             // Only expose fields backed by live guest state. KIP PageInfo lives
-            // at KIP_BASE+0xc8 and is genuinely written during KIP setup; the
-            // guest CTZ of that word yields log2(min page-size). No probe reads
-            // unbacked scratch addresses.
+            // at KIP_BASE+0xc8 and is genuinely written during KIP setup.
             u32 page_info = 0;
             uc_mem_read(core0_.uc, KIP_BASE + 0xc8, &page_info, 4);
-            // Derive min page-size log2 from the live PageInfo word (CTZ),
-            // mirroring the guest l4e_min_pagesize() bit-scan. 0 => unknown.
+            // Decode min page-size log2 exactly as the guest l4e_min_pagesize()
+            // bit-scan does: strip bits[0:9] rights/metadata, then CTZ over the
+            // page-size mask (bits[10:31]). Raw CTZ of the whole word would
+            // wrongly latch onto a low rights bit (e.g. 0x01111006 -> 1 not 12).
             unsigned min_page_log2 =
-                page_info ? (unsigned)__builtin_ctz(page_info) : 0u;
+                zeebo_lle::PageInfoMinPageLog2(page_info);
             char b[160];
             snprintf(b, sizeof(b),
                      "{\"kip_base\":%u,\"page_info\":%u,\"min_page_log2\":%u}",
