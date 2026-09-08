@@ -259,25 +259,29 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Passo 8: Diagnóstico Preciso da Rotina de FPage e Mempool (Concluído `645f332` / Análise)**:
   - Desmistificado `0xb000d4a8`: não se trata de loop de polling de produtor externo, mas de rotina determinística `l4e_min_pagesize()` / CTZ (*Count Trailing Zeros*) que varre `KIP[0xc8]` (`PageInfo = 0x01111006`) e calcula `log2(min_pagesize) = 12` (páginas de 4 KiB), armazenando em `0xb0041284`.
   - Causa raiz do travamento em `mempool_init`: a rotina de decomposição `0xb000d4dc` itera aumentando `size_log2` a partir de 12. Quando os limites virtual e físico repassados via BootInfo (`0xb0d00000`) não estão estritamente alinhados ou extrapolam a memória convencional, a rotina não encontra uma fpage cobrindo o bloco, resultando em avanço nulo `r0 = 0` em `0xb000d6dc: add r4, r4, r0` e prendendo o loop.
-- [ ] **Passo 9: Alinhamento de Memória BootInfo/KIP e Conclusão de `mempool_init` (Em Andamento)**:
-  - Ajustar descritores de memória e alinhamentos de pools em `__okl4_bootinfo` (`0xb0d00000`) e na KIP para que o gerador de fpages retorne tamanhos estritamente positivos ($\ge 4$ KiB).
-  - Permitir avanço do Core 0 para o spawn dos primeiros threads de espaço de usuário (Iguana naming service / pager).
+- [x] **Passo 9: Investigação de `mempool_init` e Comportamento Real de MapControl (Concluído `e0ea94b` / Análise)**:
+  - Isolada a execução de `0xb000d4dc`: em ambiente isolado, `0xb000d4dc` compõe fpages de 1 MiB (`size_log2 = 20`) com avanço positivo (`r4` de `0xb0d00000` para `0xb0e00000`).
+  - No emulador completo com múltiplos ciclos (`--cycles=60`), o Iguana invoca repetidas vezes `L4_MapControl` via UTCB (`0xdff00000`) para registrar e mapear pools do sistema, executando o bit-scan `l4e_min_pagesize()` / CTZ de `KIP[0xc8]` de forma contínua e sem travamentos.
+  - Ajustado o log do endereço `0xb000d4a8` em `zeebo_lle_main.cpp` para refletir estritamente o algoritmo real de CTZ (`[Core0/CTZ]`), eliminando qualquer interpretação espúria de polling.
 - [x] **Passo 10: Despacho Automático AEECShell / Ciclo de Vida Z-Wheel (274755) (Concluído `fccca5e`)**:
   - Descoberto que o payload de 64 KiB de `274755` (@0x3a92000, FNV-1a `0x544a6f30`) são metadados de gnode do VFS com assinatura `"274755"` e referências a assets (`slidemodel.qxm`), enquanto o código executável do ZeeboApp reside embutido em `0:APPS` no manipulador Thumb `@0x10532344`.
   - Implementado `ZeeboLLESystem::dispatch_zwheel_app_start()`: instancia scratch applet + vtable gráfica (`0x28`), despacha `EVT_APP_START` (`0x1f96`) sob Unicorn ao manipulador pré-mapeado com retorno real `r0 = 1` (sucesso) e roteia chamada para o `SoftRasterizer`, reproduzindo frame RGB565 com soma `2013081600`.
   - Integrado à CLI `--efs2-run=274755` e adicionado o teste automatizado `test-efs2-zwheel` no Makefile (agora 8 alvos de CI 100% verdes).
+- [ ] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua**:
+  - Acoplar o despacho de eventos de controle Z-Pad (`EVT_KEY_PRESS` / `EVT_KEY_RELEASE`) ao applet vivo da Z-Wheel com janela interativa SDL2.
+- [ ] **Passo 12: Servidores Iguana (Naming/Pager) e Boot Integrado**:
+  - Handoff para os primeiros threads de espaço de usuário do Iguana OS no Core 0.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 9 (Alinhamento de Memória BootInfo/KIP para Conclusão de `mempool_init`)**:
-   - Ajustar as faixas de memória virtual e física passadas ao Iguana no segmento `0xb0d00000` e na KIP (`0xf0f00000`), garantindo alinhamento compatível com o particionador de fpages (`0xb000d4dc`).
-   - Validar com `--cycles=150` que `r4` avança até o limite superior do pool (`r7 = 0xb6d00000`), saindo de `mempool_init`.
+1. **Passo 11 (Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua)**:
+   - Sincronizar o despacho contínuo de eventos de entrada Z-Pad (`EVT_KEY_PRESS` / `EVT_KEY_RELEASE`) com o ciclo de renderização gráfica do ZeeboApp (`274755`) em execução interativa sob SDL2.
+   - Validar com `--efs2-run=274755 --seconds=2` o fluxo interativo com apresentação em tela viva e consumo de entradas.
 
-2. **Passo 10 (Handoff e Despacho de Applets EFS2 via AEECShell)**:
-   - Sincronizar o término do setup do Iguana com o ponto de despacho do `AEECShell` (`0x10c874f4`).
-   - Automatizar a carga e ciclo de eventos dos applets provados do catálogo EFS2.
+2. **Passo 12 (Servidores Iguana e Boot Integrado)**:
+   - Monitorar a transição pós-`mempool_init` para a criação das threads de naming e pager no espaço de Core 0.
 
 ---
 
