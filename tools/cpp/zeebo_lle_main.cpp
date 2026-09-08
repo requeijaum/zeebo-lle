@@ -18,6 +18,7 @@
 #include <string>
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <memory>
 #include <algorithm>
 #include <SDL2/SDL.h>
@@ -1195,6 +1196,20 @@ private:
         // (probe_f0017448.py / probe_reloc.py validam a passagem por execucao real.)
         seed_rex_region_table();
 
+        // ── Snapshot pristino da janela do heap REX + shadow de dados (split I/D) ─
+        // Captura o CÓDIGO real do AMSS em 0xf0000000..0xf0200000 (visão de instrução)
+        // e aloca a RAM de dados dedicada (PA 0x00a00000). A partir daqui, o par de
+        // hooks (c1_code_hook + c1_mem_hook) mantém I e D desacoplados nesse VA para
+        // que rex_heap_init (0xf0002cd4) particione o heap sem corromper o .text.
+        rex_heap_pristine_.assign(REX_HEAP_VA_SIZE, 0);
+        uc_mem_read(core1_.uc, REX_HEAP_VA_BASE, rex_heap_pristine_.data(), REX_HEAP_VA_SIZE);
+        rex_heap_shadow_.assign(REX_HEAP_VA_SIZE, 0);
+        rex_heap_dirty_.clear();
+        rex_split_id_ = true;
+        printf("[System][Core1] Split I/D do heap REX armado: janela 0x%08x+%uKB "
+               "(código pristino preservado, dados -> shadow PA 0x00a00000)\n",
+               REX_HEAP_VA_BASE, REX_HEAP_VA_SIZE>>10);
+
         return true;
     }
 
@@ -1241,9 +1256,12 @@ private:
         uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 0, ~0ULL);
 
         // Core 1 hooks
-        uc_hook h_c1, h_m1, h_u1;
+        uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
         uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
+        // Split I/D do heap REX: leitura de DADO na janela 0xf0000000+2MB injeta o shadow.
+        uc_hook_add(core1_.uc, &h_r1, UC_HOOK_MEM_READ, (void*)c1_heap_read_hook, this,
+                    REX_HEAP_VA_BASE, REX_HEAP_VA_BASE + REX_HEAP_VA_SIZE - 1);
         uc_hook_add(core1_.uc, &h_u1, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c1_unmapped_hook, this, 0, ~0ULL);
 
         // Instala capture hook do QDSP5 para monitorar pacotes ONCRPC no Core 1
@@ -1658,6 +1676,19 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
 
+        // ── Split I/D do heap REX: antes do fetch, restaura o código pristino ────
+        // dos endereços que foram tocados como DADO (heap free-list), desacoplando
+        // a visão de instrução da de dados no mesmo VA — exatamente o que a MMU do
+        // ARM9 faria. Sem isto, rex_heap_init corromperia 0xf000a800/0xf000e6d4.
+        if (sys->rex_split_id_ && !sys->rex_heap_dirty_.empty()) {
+            u32 pc=(u32)ad;
+            for (u32 w : sys->rex_heap_dirty_) sys->rex_restore_code(w, 4);
+            sys->rex_heap_dirty_.clear();
+            if (rex_in_heap(pc)) uc_ctl_remove_cache(uc, pc, pc + (size?size:4));
+        }
+        if (sys->rex_split_id_ && rex_in_heap((u32)ad))
+            sys->rex_restore_code((u32)ad, size?size:4);
+
         // ── Slide-detector (Item 1) ────────────────────────────────────────
         // Se o PC avanca estritamente +4 (ARM) por N insns consecutivas sem
         // nenhum branch tomado — ou entra em area zerada/NOP — o Core1 esta
@@ -1814,7 +1845,33 @@ private:
         }
     }
 
+    // Split I/D do heap REX: leitura de DADO na janela 0xf0000000+2MB. Injeta o
+    // valor do shadow no endereço mapeado logo antes da leitura (a instrução lê o
+    // DADO do heap), marcando a word suja p/ restaurar o código pristino no fetch.
+    static void c1_heap_read_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t, void* ud) {
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        if (!sys->rex_split_id_ || type != UC_MEM_READ || !rex_in_heap((u32)addr)) return;
+        u32 a=(u32)addr, off=a-REX_HEAP_VA_BASE, n=(u32)size;
+        if (off+n <= sys->rex_heap_shadow_.size()) {
+            uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
+            for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
+        }
+    }
+
     static void c1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        // ── Split I/D do heap REX: escrita de DADO na janela 0xf0000000+2MB ──────
+        // Grava no shadow (RAM de dados) e marca a word suja p/ restaurar o código
+        // pristino no próximo fetch (o store do Unicorn commita APÓS este hook, então
+        // não adianta restaurar aqui — faríamos e o store sobrescreveria de novo).
+        if (sys->rex_split_id_ && type == UC_MEM_WRITE && rex_in_heap((u32)addr)) {
+            u32 a=(u32)addr, off=a-REX_HEAP_VA_BASE, n=(u32)size;
+            if (off+n <= sys->rex_heap_shadow_.size()) {
+                for (u32 i=0;i<n;i++)
+                    sys->rex_heap_shadow_[off+i] = (u8)((value>>(8*i)) & 0xff);
+                for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
+            }
+        }
         if (addr == 0xc5000108 && type == UC_MEM_READ) {
             static u32 ticker = 100000;
             ticker += 5000;
@@ -1847,6 +1904,31 @@ private:
     CoreState core0_;
     CoreState core1_;
     CoreState* core1_state_;
+
+    // ── Split I/D do heap REX em 0xf0000000..0xf0200000 (Core 1 / ARM9) ──────
+    // No HW real (dump MMU L1, TripleOxygen) VA 0xf0000000 = PA 0x00a00000 (SRAM
+    // de DADOS); o código executável do modem vive em 0x16e00000+. Mas o seg
+    // kernel-VA do AMSS carrega CÓDIGO em 0xf0000000..0xf001e2c0 no mirror plano.
+    // rex_heap_init (0xf0002cd4) particiona uma free-list de 2MB com base
+    // 0xf0000000 (0xf0002d4c: str r2,[r2,#-0x400]) que, sem isolamento, arrasaria
+    // o .text do AMSS (0xf000a800, re-entry 0xf000e6d4) -> UC_ERR_INSN_INVALID.
+    // Mantemos a janela mapeada SEMPRE com o código pristino (visão de instrução)
+    // e roteamos as escritas de DADOS para rex_heap_shadow_ (PA 0x00a00000).
+    static constexpr u32 REX_HEAP_VA_BASE = 0xf0000000;
+    static constexpr u32 REX_HEAP_VA_SIZE = 0x00200000;
+    std::vector<u8> rex_heap_pristine_;    // código pristino da janela (visão I)
+    std::vector<u8> rex_heap_shadow_;      // RAM de dados dedicada (visão D)
+    std::unordered_set<u32> rex_heap_dirty_; // words com dado, a restaurar no fetch
+    bool rex_split_id_ = false;
+
+    static bool rex_in_heap(u32 a){ return a>=REX_HEAP_VA_BASE && a<REX_HEAP_VA_BASE+REX_HEAP_VA_SIZE; }
+    void rex_restore_code(u32 addr, u32 n){
+        u32 off=addr-REX_HEAP_VA_BASE;
+        if(off>=rex_heap_pristine_.size()) return;
+        if(off+n>rex_heap_pristine_.size()) n=(u32)rex_heap_pristine_.size()-off;
+        uc_mem_write(core1_.uc, addr, &rex_heap_pristine_[off], n);
+    }
+
     std::unique_ptr<NandController> nand_;
     std::unique_ptr<UnifiedMDDI> mddi_;
     std::unique_ptr<UnifiedAdreno130> gpu_;

@@ -52,10 +52,21 @@ zeebo_zwheel_harness: zeebo_zwheel_harness.cpp gpu/igl_guest_bridge.h gpu/igl_ho
 test-zwheel: zeebo_zwheel_harness
 	./zeebo_zwheel_harness ../../nand/1.1.2_APPS.bin
 
-clean:
-	rm -f zeebo_zwheel_harness zeebo_efs2apps
+# REX heap split-I/D harness: prova por execução real o particionamento do heap
+# REX de 2MB em 0xf0000000 (Core 1 / ARM9) sem corromper o .text do AMSS, a
+# travessia da re-entry 0xf000e6d4 e o decode de rex_sched 0xf0013b84.
+zeebo_rex_harness: zeebo_rex_harness.cpp
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_rex_harness.cpp -lunicorn
 
-.PHONY: all test clean gpu test-gpu test-zwheel
+test-rex: zeebo_rex_harness
+	./zeebo_rex_harness ../../nand/1.1.2_AMSS.bin
+
+test-core1: test-rex
+
+clean:
+	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness
+
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
