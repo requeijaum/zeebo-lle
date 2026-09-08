@@ -109,6 +109,21 @@ int main(){
         h.regs={glenum::TRIANGLES,0,3}; h.call(igl_slot::glDrawArrays);
         check("QW4 cull front-kept",h.center(),0xF800);
     }
+    // ---------- QW4e: default cull face is GL_BACK (no glCullFace call) ----------
+    // GLES1 spec: GL_CULL_FACE_MODE defaults to GL_BACK. Enabling culling without
+    // ever calling glCullFace must discard a CW (back) triangle. Proves the
+    // RenderState.cull_face default is 0x0405, not 0.
+    {
+        Harness h; h.clear_black();
+        float v[3][2]={{-2.f,-2.f},{-2.f,4.f},{4.f,-2.f}}; // CW => back face
+        size_t w=0; for(auto&p:v){ h.mem[w++]=Harness::FX(p[0]); h.mem[w++]=Harness::FX(p[1]); }
+        h.regs={2,glenum::FIXED,0,Harness::BASE}; h.call(igl_slot::glVertexPointer);
+        h.regs={glenum::VERTEX_ARRAY}; h.call(igl_slot::glEnableClientState);
+        h.regs={h.FX(1),0,0,h.FX(1)}; h.call(igl_slot::glColor4x);
+        h.regs={glenum::CULL_FACE}; h.call(igl_slot::glEnable); // NO glCullFace
+        h.regs={glenum::TRIANGLES,0,3}; h.call(igl_slot::glDrawArrays);
+        check("QW4 default cull back",h.center(),0x0000);
+    }
     // ---------- QW5a: NEAREST + REPEAT samples exact texel ----------
     {
         Harness h; h.clear_black();
