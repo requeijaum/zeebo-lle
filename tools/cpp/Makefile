@@ -129,6 +129,15 @@ test-efs2-zwheel-loop: zeebo_lle_main
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
 
+# QW6 + QW15 transactional conformance: locally authored ARM/Thumb vectors run
+# under the Unicorn txn probe and diffed against golden traces (ordered
+# bus transactions: prefetch/load/store width/addr/value + full INIT/FINAL
+# CPSR). qw15_page pins genuine cross-4KiB-boundary accesses. No NAND / no
+# proprietary asset -- safe for a clean clone, so it belongs in `check`. The
+# script exits nonzero on any AS/LD/objcopy/build/run/diff failure.
+test-txn:
+	bash run_qw6_txn.sh
+
 test_control_server: test_control_server.cpp zeebo_control_server.h
 	$(CXX) $(CXXFLAGS) -o $@ test_control_server.cpp -pthread
 
@@ -147,7 +156,7 @@ test-cli: zeebo_lle_main
 check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
-       test_probe_registry
+       test_probe_registry test-txn
 	./test_audio_sink
 	./test_control_server
 	./test_probe_registry
@@ -159,10 +168,12 @@ clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
 	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
-	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness
+	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
+	      zeebo_lle_txn_probe test_probe_registry
+	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
