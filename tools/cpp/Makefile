@@ -40,10 +40,11 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	./test_l4_mmu_uc
 
 # QW13: regressão TRANSACIONAL de L4_MapControl sob Unicorn — fixa MRs iniciais,
-# entradas da syscall, transação de map (regiões criadas em ordem), bytes de
-# retorno phys_desc/fpage no UTCB, resultado r0 e o avanço do mempool_init.
-# Pega o bug do Passo 13 (mempool_init relê MR[1]) via mutação. Sem Unicorn não
-# roda; requer libunicorn.
+# entradas da syscall, transação de map (regiões criadas em ordem, escrita real
+# de página), resultado r0, skip de item malformado e whole-space sem overflow.
+# NÃO detecta o write-back idêntico ausente (echo neutro é indistinguível por
+# black-box); o "Passo 13" continua BLOQUEADO pendente de harness de guest vivo.
+# Sem Unicorn não roda; requer libunicorn.
 test_l4_mmu_txn: test_l4_mmu_txn.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_txn.cpp -lunicorn
 	./test_l4_mmu_txn

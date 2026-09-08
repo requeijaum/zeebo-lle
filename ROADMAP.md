@@ -331,7 +331,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW10 | **pendente** | Clipping `z+w>=0` antes do divide | médio | triângulo cruzando near-plane sem explosão |
 | QW11 | **pendente** | Interpolação corrigida por perspectiva | médio | quad inclinado com baseline determinístico |
 | QW12 | **novo — prioridade 1** | Script Python `mempool/bi_execute` usando breakpoints, probes e dedup existentes | baixo | captura ordenada de PC, MRs UTCB, fpage, `r4/r7` e retorno; nenhum trace C++ novo |
-| QW13 | **novo — prioridade 2** | Regressão transacional de `L4_MapControl` para retorno dos MRs | baixo | cada chamada valida MR físico/fpage, avanço de 1 MiB e whole-space sem overflow |
+| QW13 | **bloqueado (guest vivo)** | Regressão transacional de `L4_MapControl`: transação de map sob Unicorn | baixo | valida regiões/ordem/permissões, escrita real de página, skip de malformado e whole-space sem overflow. NÃO prova write-back de MR ausente (echo idêntico é indistinguível por black-box); fechamento do Passo 13 pendente de harness de guest vivo |
 | QW14 | **novo** | Modo opt-in `--strict-unmapped` sobre o log QW8 | baixo-médio | acesso sintético pausa com erro estruturado; default continua byte-idêntico no boot 22/22 |
 | QW15 | **novo** | Integrar `run_qw6_txn.sh` ao gate e adicionar acesso cruzando página | baixo | mutações de ordem/valor/fronteira falham; agregado permanece verde |
 | QW16 | **novo** | Fechar pequenos desvios GLES: clamp de `glAlphaFuncx` e validação explícita de sampler enums | baixo | testes de limites/enum inválido por estado e pixel, sem absorver slot não observado |
