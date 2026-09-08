@@ -229,6 +229,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Implementado `Fpage::is_whole_space()` e tratamento limpo no dispatcher L4e em `tools/cpp/zeebo_l4_mmu.h`.
   - Cobertura em `tools/cpp/test_l4_mmu.cpp` com caso 8 validado (`ALL TESTS PASSED`). Core 0 agora avança sem crash na inicialização de pools de memória do Iguana.
 
+- [ ] **Passo 5: Mapeamento de Teclas Z-Pad/SDL2 e Despacho Contínuo de EVT_KEY_* (Passo 5 / Fase 13 - Em Finalização)**:
+  - Implementado `tools/cpp/zeebo_input_harness.cpp` com validação de `EVT_KEY_PRESS` (0x0100) e `EVT_KEY_RELEASE` (0x0101) para os opcodes AVK do Zeebo (AVK_UP, DOWN, LEFT, RIGHT, SELECT, CLR e numéricos).
+  - Alvo `test-input` criado no `Makefile` com teste determinístico passando (retorno `r0=1` consumido).
+  - Conexão do manipulador ativo no loop contínuo SDL2 de `zeebo_lle_main.cpp`.
+
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
