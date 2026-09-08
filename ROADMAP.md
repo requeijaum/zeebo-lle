@@ -267,23 +267,22 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Descoberto que o payload de 64 KiB de `274755` (@0x3a92000, FNV-1a `0x544a6f30`) são metadados de gnode do VFS com assinatura `"274755"` e referências a assets (`slidemodel.qxm`), enquanto o código executável do ZeeboApp reside embutido em `0:APPS` no manipulador Thumb `@0x10532344`.
   - Implementado `ZeeboLLESystem::dispatch_zwheel_app_start()`: instancia scratch applet + vtable gráfica (`0x28`), despacha `EVT_APP_START` (`0x1f96`) sob Unicorn ao manipulador pré-mapeado com retorno real `r0 = 1` (sucesso) e roteia chamada para o `SoftRasterizer`, reproduzindo frame RGB565 com soma `2013081600`.
   - Integrado à CLI `--efs2-run=274755` e adicionado o teste automatizado `test-efs2-zwheel` no Makefile (agora 8 alvos de CI 100% verdes).
-- [x] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua** (CONCLUÍDO):
+- [x] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua (Concluído `79ec1eb`)**:
   - Implementado `ZeeboLLESystem::run_zwheel_interactive()`: após `dispatch_zwheel_app_start()` persiste o scratch do applet (manipulador `0x10532344`, applet, pilha) e re-arma o roteamento gráfico slot 10 → `SoftRasterizer`, mantendo um loop que (a) apresenta o framebuffer RGB565 no `HostVideoSink`/tela SDL2 à taxa de quadros e (b) drena eventos de teclado/gamepad SDL2 mapeados para AVK BREW via `dispatch_zpad_to_brew` (`EVT_KEY_PRESS`/`EVT_KEY_RELEASE`, retorno real `r0=1` sob Unicorn).
   - Wired em `main`: `--efs2-run=274755` com `--seconds=N` (N>0) ou modo GUI entra no loop; `--seconds=0 --cycles=1` headless preserva o comportamento de 1 frame estático (`test-efs2-zwheel` intacto).
-  - Adicionado `test-efs2-zwheel-loop` ao Makefile; suíte de 8 alvos de CI 100% verde. Validado com execução real (`--seconds=1`: 13066 frames apresentados, loop encerrado organicamente).
+  - Adicionado `test-efs2-zwheel-loop` ao Makefile; suíte de 9 alvos de CI 100% verde. Validado com execução real (`--seconds=1`: 13066 frames apresentados, loop encerrado organicamente).
 - [ ] **Passo 12: Servidores Iguana (Naming/Pager) e Boot Integrado**:
   - Handoff para os primeiros threads de espaço de usuário do Iguana OS no Core 0.
+  - RE do fluxo de inicialização pós-`mempool_init`: rotina `bi_execute` (`0xb00001fc`), parser de tags de BootInfo (`0xb0d00000`) e despacho para o loop do servidor em `0xb000aa94`.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 11 (Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua)**:
-   - Sincronizar o despacho contínuo de eventos de entrada Z-Pad (`EVT_KEY_PRESS` / `EVT_KEY_RELEASE`) com o ciclo de renderização gráfica do ZeeboApp (`274755`) em execução interativa sob SDL2.
-   - Validar com `--efs2-run=274755 --seconds=2` o fluxo interativo com apresentação em tela viva e consumo de entradas.
-
-2. **Passo 12 (Servidores Iguana e Boot Integrado)**:
+1. **Passo 12 (Servidores Iguana e Boot Integrado)**:
    - Monitorar a transição pós-`mempool_init` para a criação das threads de naming e pager no espaço de Core 0.
+   - Ajustar o contrato de BootInfo (`bi_execute` em `0xb00001fc`) para avançar sem acionar o panic `"PANIC: Bootinfo did not initialise correctly"` em `0xb0003450`.
+   - Implementar os shims para as syscalls de IPC/threading do OKL4 (`0x0c`, `0x00`, `0x10`) no `ZeeboLLESystem`.
 
 ---
 
