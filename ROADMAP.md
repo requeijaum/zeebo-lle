@@ -169,8 +169,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [ ] **Core 0 Iguana User-space Pipeline & L4_MapControl fpage sizing**:
   - Emissão real de syscalls `L4_MapControl` pelo Iguana OS confirmada (`sid=80000100`, `ctrl=80000000`, `modify count=1`).
   - Corrigir o descritor de fpage/pool na KIP (`0xb0d00000` / `BootInfo`): fpage em `0xb0d00206` decodifica com `size_log2 = 32`, gerando `size=4GB` e `UC_ERR_NOMEM`. Ajustar para refletir a faixa válida da APPS_RAM (96MB).
-- [ ] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector**:
-  - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Refinar o slide-detector para diferenciar loops legítimos com instrução de salto condicional/call de slides lineares sem branch.
+- [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (validado por execução real)**:
+  - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
+  - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista). Um NOP-slide autêntico não contém nenhum branch por centenas de instruções; loops de init (`bl`, `beq`, `ble`, `pop {..,pc}`) zeram o contador e nunca acumulam a run linear.
+  - Blank-detector endurecido: exige **run de 64 blanks consecutivos** (`slide_blank_run`) em vez de um único word zerado isolado (evita falso positivo em constantes/dados inline).
+  - **Resultado real**: Core 1 atravessa todo o loop CP15 e o dispatch de init do REX (`0xf0017b04 → ... → 0xf0018438/0xf0018480`, tabela de init em `0xf0019e78` indexada por contador em `0xf001da60`), avançando de `0xf0017b04` até `0xf00184a8`. Nova fronteira legítima: em `0xf00184a8 pop {pc}` a rotina retorna para zeros (`0xf00184cc+`) — uma **entrada de função nula/não-inicializada** na tabela de init `0xf0019e78[1].fn = 0x00000000`, não um slide. CPU conformance 12/12 mantido.
 - [x] **Item 4 (Loader BREW / Dispatch de Applets — commit `da9d5f4`)**:
   - Criada classe modular `BrewLoader` (`tools/cpp/zeebo_brew_loader.h`), integrando injeção de `.mod` e resolução de `AEEMod_Load` via ELF `e_entry`.
   - Tratamento honesto de símbolos ausentes/não mapeados.

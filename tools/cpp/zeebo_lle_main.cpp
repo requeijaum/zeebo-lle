@@ -346,6 +346,7 @@ struct CoreState {
     u32 slide_last_pc = 0;      // PC da insn anterior
     u32 slide_run = 0;          // quantas insns consecutivas avancaram +4
     bool slide_tripped = false; // ja disparou o aviso (evita spam)
+    u32 slide_blank_run = 0;    // insns blank/NOP consecutivas (slide real)
 };
 
 class ZeeboLLESystem {
@@ -1644,32 +1645,62 @@ private:
         {
             CoreState& c = sys->core1_;
             u32 pc = (u32)ad;
-            if (c.slide_last_pc != 0 && pc == c.slide_last_pc + 4) {
+
+            u32 insn = 0;
+            bool have_insn = (uc_mem_read(uc, ad, &insn, 4) == UC_ERR_OK);
+
+            // Detecta se a insn ARM eh um branch/call/escrita-de-PC real.
+            // Um NOP-slide autentico NAO contem nenhum destes por centenas de
+            // instrucoes; um loop de init (bl, beq, ble, pop {..,pc}) contem.
+            bool is_ctrl_flow = false;
+            if (have_insn) {
+                u32 cond = insn >> 28;
+                u32 op   = (insn >> 25) & 0x7;   // bits[27:25]
+                // B / BL: cond xxxx 101L ...
+                if (op == 0x5) is_ctrl_flow = true;
+                // BX/BLX/BXJ: cond 0001 0010 .... 000L1 Rm (bits[27:20]=0x12)
+                if ((insn & 0x0ff000f0) == 0x01200010 ||  // BX
+                    (insn & 0x0ff000f0) == 0x01200030)    // BLX reg
+                    is_ctrl_flow = true;
+                // BLX imm (cond==1111, bits[27:25]==101)
+                if (cond == 0xf && op == 0x5) is_ctrl_flow = true;
+                // Qualquer insn que escreve Rd=PC (r15): data-proc/ldr/mov pc,..
+                // Rd em bits[15:12] para data-proc/ldr single.
+                {
+                    u32 top3 = (insn >> 26) & 0x3;    // 00=dp/mul, 01=ldr/str
+                    u32 rd   = (insn >> 12) & 0xf;
+                    if ((top3 == 0x0 || top3 == 0x1) && rd == 0xf)
+                        is_ctrl_flow = true;
+                }
+                // LDM/POP com PC na lista (bit 15): cond 100x xxxx .... 1xxx...
+                if (op == 0x4 && (insn & 0x00008000)) is_ctrl_flow = true;
+            }
+
+            if (c.slide_last_pc != 0 && pc == c.slide_last_pc + 4 && !is_ctrl_flow) {
                 c.slide_run++;
             } else {
-                c.slide_run = 0;  // branch tomado / PC nao-linear -> reset
+                // branch tomado / PC nao-linear / insn de control-flow -> reset.
+                // Loops legitimos de init (bl/beq/ble/pop pc) zeram aqui e nunca
+                // acumulam a run linear necessaria para tripar o detector.
+                c.slide_run = 0;
             }
             c.slide_last_pc = pc;
 
-            // Detecta tambem area zerada/NOP: le a instrucao corrente.
-            bool blank = false;
-            {
-                u32 insn = 0;
-                if (uc_mem_read(uc, ad, &insn, 4) == UC_ERR_OK) {
-                    // 0x00000000 (andeq r0,r0,r0) e 0xe1a00000 (nop/mov r0,r0)
-                    // sao os padroes de "slide" tipicos.
-                    if (insn == 0x00000000 || insn == 0xe1a00000 || insn == 0xffffffff)
-                        blank = true;
-                }
-            }
+            // Detecta area zerada/NOP: exige uma RUN de blanks, nao um unico
+            // blank isolado (evita falso positivo em constantes/dados inline).
+            bool blank_insn = have_insn &&
+                (insn == 0x00000000 || insn == 0xe1a00000 || insn == 0xffffffff);
+            if (blank_insn) c.slide_blank_run++; else c.slide_blank_run = 0;
 
-            const u32 SLIDE_LIMIT = 256;  // insns lineares consecutivas => derail
+            const u32 SLIDE_LIMIT = 256;       // insns lineares SEM branch => derail
+            const u32 BLANK_LIMIT = 64;        // blanks consecutivos => slide real
+            bool blank = (c.slide_blank_run >= BLANK_LIMIT);
             if (!c.slide_tripped && (c.slide_run >= SLIDE_LIMIT || blank)) {
                 c.slide_tripped = true;
                 printf("\n[Core1][SLIDE-DETECT] NOP-slide detectado @0x%08x "
-                       "(run=%u linear+4, blank=%d). Entry provavelmente errado — "
+                       "(run=%u linear+4, blank_run=%u). Entry provavelmente errado — "
                        "abortando execucao do Core1 em vez de rodar cego ate 0xfffffe.\n",
-                       pc, c.slide_run, (int)blank);
+                       pc, c.slide_run, c.slide_blank_run);
                 fflush(stdout);
                 sys->core1_.halted = true;
                 uc_emu_stop(uc);
