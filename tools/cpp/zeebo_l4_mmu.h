@@ -179,6 +179,30 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
         // Já mapeado (overlap): apenas reajusta a proteção.
         e = uc_mem_protect(uc, base, (size_t)msize, prot);
     }
+
+    // --- Sonda de páginas vazias (Item 2) ---------------------------------
+    // Detecta o modo de falha clássico do MAP_CONTROL: a página é mapeada com
+    // sucesso, porém seu conteúdo é virgem (tudo 0x00 = RAM não populada, ou
+    // tudo 0xFF = NAND não escrita). Nesse caso o mapeamento é "correto porém
+    // inútil" — falta o loader/relocador copiar a imagem da task ANTES do salto.
+    // A sonda é rápida (lê só 32 bytes) e NÃO altera memória nem registradores.
+    if (e == UC_ERR_OK && it.fpage.is_execute()) {
+        u8 probe[32];
+        if (uc_mem_read(uc, va, probe, sizeof probe) == UC_ERR_OK) {
+            bool all_zero = true, all_ff = true;
+            for (u8 b : probe) {
+                if (b != 0x00) all_zero = false;
+                if (b != 0xFF) all_ff = false;
+            }
+            if (all_zero || all_ff) {
+                printf("[MMU/WARN] map_one: page @ 0x%08llx is EMPTY/UNINITIALIZED "
+                       "(all 0x%02x, size=%llu, x-perm) -> loader nao populou a task; "
+                       "derail (NOP-slide) provavel aqui\n",
+                       (unsigned long long)va, all_zero ? 0x00 : 0xFF,
+                       (unsigned long long)size);
+            }
+        }
+    }
     return e;
 }
 

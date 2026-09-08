@@ -1246,6 +1246,30 @@ private:
     static void c0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
+
+        // --- Sonda de telemetria do loop de poll 0xb000d4a8 (Item 3) ----------
+        // Loop de espera-ocupada do APPS.bin (ARM):
+        //   d498: ldr r3,[r0,#0xc8]  d4a0: bic r2,...  d4a8: ldr r3,[r4] ...
+        //   d4b4: tst r2,#1  d4bc: beq 0xb000d4a8 (loop enquanto bit0==0)
+        // Espera um bit em [descriptor+0xc8] que só é setado por um produtor real
+        // (Core1/REX ou resposta de IPC). PROIBIDO forçar r2=1 (fake progress 5a).
+        // Esta sonda apenas OBSERVA: loga o valor de polling e conta iterações,
+        // sem tocar r2 nem nenhum registrador/memória.
+        if (ad == 0xb000d4a8) {
+            u32 r0 = 0, r2 = 0, r4 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            u32 status = 0;
+            uc_mem_read(uc, (uint64_t)r0 + 0xc8, &status, 4);
+            u64 n = ++sys->c0_poll_d4a8_iters_;
+            // Log esparso: 1ª, 2ª e depois a cada potência de 2 (evita flood/lentidão).
+            if (n <= 2 || (n & (n - 1)) == 0) {
+                printf("[Core0/POLL] 0xb000d4a8 iter=%llu status[0x%08x+0xc8]=0x%08x "
+                       "r2(mask)=0x%08x bit0=%u (aguardando produtor; r2 NAO forcado)\n",
+                       (unsigned long long)n, r0, status, r2, (unsigned)(r2 & 1));
+            }
+        }
         // Intercepta a trap SVC L4_KernelInterface diretamente no endereço real para garantia de desvio
         if (ad == 0xb000c738) {
             u32 ip = 0;
@@ -1517,6 +1541,7 @@ private:
     std::set<u32> c1_breakpoints_;
     std::map<u32, std::string> c0_script_hooks_;
     std::map<u32, std::string> c1_script_hooks_;
+    uint64_t c0_poll_d4a8_iters_ = 0; // Item 3: contador de iterações do poll 0xb000d4a8
 
     CoreState core0_;
     CoreState core1_;
