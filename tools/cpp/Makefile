@@ -69,6 +69,16 @@ test-core1: test-rex
 test-zwheel-preview: zeebo_lle_main
 	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --zwheel-preview-headless
 
+# Ciclo de vida do applet Z-Wheel (274755) carregado do EFS2: extrai o gnode de
+# 274755 da NAND 0:EFS2APPS, injeta via BrewLoader e despacha EVT_APP_START ao
+# manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344), roteando a chamada
+# gráfica ao SoftRasterizer. Valida sem crash e exige o PASS do ciclo de vida.
+test-efs2-zwheel: zeebo_lle_main
+	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=0 --cycles=1 \
+	  | grep -q "Z-Wheel/Life] PASS" \
+	  && echo "PASS: --efs2-run=274755 instanciou o ciclo de vida do ZeeboApp (EVT_APP_START, r0=1)." \
+	  || (echo "FAIL: ciclo de vida do applet 274755 não completou EVT_APP_START"; exit 1)
+
 # Passo 5: mapeamento Z-Pad/SDL2 → AVK e despacho contínuo de EVT_KEY_PRESS/
 # EVT_KEY_RELEASE ao manipulador BREW (HandleEvent), provado por execução real
 # sob Unicorn (applet stub que consome a tecla e retorna r0=1).
@@ -81,7 +91,7 @@ test-input: zeebo_input_harness
 clean:
 	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-input test-efs2-fs
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-input test-efs2-fs
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

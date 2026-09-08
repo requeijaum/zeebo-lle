@@ -567,6 +567,117 @@ public:
         return true;
     }
 
+    // ── Ciclo de vida do applet Z-Wheel (ZeeboApp) sob EVT_APP_START ──────────
+    // O payload de 274755 extraído do EFS2 (bloco indireto @0x3a92000) é METADADO
+    // de gnode do VFS (carrega nomes como "slidemodel.qxm" e a assinatura ASCII
+    // "274755"), NÃO um ELF/.mod executável — o código executável e os
+    // manipuladores de ciclo de vida do ZeeboApp residem embutidos no ELF de
+    // 0:APPS, no manipulador Thumb @0x10532344 (já carregado em Core 0 pelos
+    // PT_LOAD com PF_X). Portanto, "instanciar e chamar o ciclo de vida do applet"
+    // = despachar EVT_APP_START (0x1f96) a esse manipulador pré-mapeado, roteando
+    // a chamada gráfica que ele dispara ([applet+0x2c] → vtable[10]/slot 0x28,
+    // arg=1) para o SoftRasterizer — exatamente o contrato provado no harness
+    // test-zwheel. Retorna true se o manipulador tratou EVT_APP_START (r0==1).
+    static ZeeboLLESystem* s_zwheel_hook_sys_;   // ctx p/ o hook transitório do stub
+    static uint32_t        s_zwheel_stub_va_;
+    bool dispatch_zwheel_app_start() {
+        static constexpr u32 ZWHEEL_HANDLER_VA = 0x10532344; // manipulador Thumb do ZeeboApp
+        static constexpr u32 EVT_APP_START     = 0x1f96;     // K(0x1f92)+4
+        static constexpr u32 GFX_SLOT_OFF      = 0x28;       // vtable[10]
+        if (!brew_ || !core0_.uc) {
+            printf("[Z-Wheel/Life] BrewLoader/Core0 indisponível — dispatch abortado.\n");
+            return false;
+        }
+        // Confirma que o manipulador está REALMENTE carregado (0:APPS PF_X).
+        u8 pfx[2] = {0};
+        if (uc_mem_read(core0_.uc, ZWHEEL_HANDLER_VA, pfx, 2) != UC_ERR_OK) {
+            printf("[Z-Wheel/Life] manipulador @0x%08x não mapeado — 0:APPS não carregado?\n",
+                   ZWHEEL_HANDLER_VA);
+            return false;
+        }
+        printf("[Z-Wheel/Life] manipulador ZeeboApp @0x%08x presente (bytes %02x %02x, "
+               "esperado 70 b5 push{r4-r6,lr})\n", ZWHEEL_HANDLER_VA, pfx[0], pfx[1]);
+
+        // Janela de scratch do ciclo de vida (fora do firmware e do payload 274755
+        // @0x12000000): applet + objeto gráfico + vtable + trampolim + pilha.
+        const u32 SB      = 0x22000000, SS = 0x00100000;
+        const u32 APPLET  = SB + 0x0100;
+        const u32 GFXOBJ  = SB + 0x0200;
+        const u32 GFXVTBL = SB + 0x0300;
+        const u32 GFXSTUB = SB + 0x1000;
+        const u32 STACKTP = SB + 0xf000;
+        const u32 RETMAG  = SB + 0xfffe;
+        uc_mem_map(core0_.uc, SB, SS, UC_PROT_ALL); // ok se já mapeado
+        std::vector<u8> zeros(SS, 0);
+        uc_mem_write(core0_.uc, SB, zeros.data(), zeros.size());
+        for (int s = 0; s < 16; s++) { u32 fn = 0; uc_mem_write(core0_.uc, GFXVTBL + s*4, &fn, 4); }
+        u32 stub_thumb = GFXSTUB | 1u;
+        uc_mem_write(core0_.uc, GFXVTBL + GFX_SLOT_OFF, &stub_thumb, 4);
+        u16 bxlr = 0x4770; uc_mem_write(core0_.uc, GFXSTUB, &bxlr, 2); // fallback bx lr
+        u32 gfxvt = GFXVTBL; uc_mem_write(core0_.uc, GFXOBJ, &gfxvt, 4);        // obj[0]=&vtable
+        u32 gfxobj = GFXOBJ; uc_mem_write(core0_.uc, APPLET + 0x2c, &gfxobj, 4);// applet[0x2c]=obj
+
+        // Hook transitório: captura o `blx` da vtable gráfica → SoftRasterizer.
+        s_zwheel_hook_sys_ = this;
+        s_zwheel_stub_va_  = GFXSTUB;
+        uc_hook h_stub;
+        uc_hook_add(core0_.uc, &h_stub, UC_HOOK_CODE, (void*)zwheel_stub_hook, this,
+                    GFXSTUB, GFXSTUB + 4);
+
+        const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
+        unsigned long long sum_before = 0;
+        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum_before += fb[i];
+
+        printf("[Z-Wheel/Life] despachando EVT_APP_START(0x%04x) → HandleEvent@0x%08x "
+               "applet@0x%08x\n", EVT_APP_START, ZWHEEL_HANDLER_VA, APPLET);
+        bool clean = false;
+        u32 r0 = brew_->dispatch_event(ZWHEEL_HANDLER_VA, APPLET, EVT_APP_START,
+                                       /*keycode=*/0, STACKTP, RETMAG, /*dwparam=*/0, &clean);
+        uc_hook_del(core0_.uc, h_stub);
+        s_zwheel_hook_sys_ = nullptr;
+
+        unsigned long long sum_after = 0;
+        if (fb) for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) sum_after += fb[i];
+
+        bool ok = clean && r0 == 1 && zwheel_gfx_calls_ >= 1;
+        printf("[Z-Wheel/Life] EVT_APP_START → r0=%u (uc=%s) | chamadas gráficas=%d | "
+               "framebuffer soma antes=%llu depois=%llu\n%s\n",
+               r0, clean ? "clean" : "abortado", zwheel_gfx_calls_,
+               sum_before, sum_after,
+               ok ? "[Z-Wheel/Life] PASS: ciclo de vida do ZeeboApp instanciado — "
+                    "EVT_APP_START tratado com SUCESSO (r0=1)."
+                  : "[Z-Wheel/Life] AVISO: ciclo de vida não completou o contrato "
+                    "(esperado r0=1 + chamada gráfica).");
+        if (ok && igl_bridge_) igl_bridge_->set_guest_running(true);
+        return ok;
+    }
+
+    // Hook do trampolim da vtable gráfica da Z-Wheel: idêntico ao contrato do
+    // harness test-zwheel — dirige o SoftRasterizer (viewport + clear azul),
+    // devolve r0=0 (o validador do firmware @0x10724104 então retorna 1) e
+    // retorna da função (PC=LR respeitando o bit Thumb).
+    static void zwheel_stub_hook(uc_engine* uc, uint64_t address, uint32_t, void* ud) {
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        if ((u32)(address & ~1u) != s_zwheel_stub_va_) return;
+        u32 arg = 0, lr = 0, r0 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R1, &arg);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        sys->zwheel_gfx_calls_++;
+        printf("[Z-Wheel/Life] chamada gráfica capturada: vtable[10] (this=0x%08x) arg=%u "
+               "→ roteando p/ SoftRasterizer\n", r0, arg);
+        if (sys->rast_) {
+            sys->rast_->begin_frame();
+            sys->rast_->set_viewport(0, 0, FB_WIDTH, FB_HEIGHT);
+            sys->rast_->clear_color(0.1f, 0.2f, 0.8f, 1.0f);
+            sys->rast_->clear(0x4000 /*GL_COLOR_BUFFER_BIT*/);
+            sys->rast_->end_frame();
+            if (sys->gpu_) sys->gpu_->mark_dirty();
+        }
+        u32 zero = 0; uc_reg_write(uc, UC_ARM_REG_R0, &zero); // contrato: método → 0
+        uc_reg_write(uc, UC_ARM_REG_PC, &lr);                 // retorna ao chamador
+    }
+
     void set_efs2_nand_path(const std::string& p) { efs2_nand_path_ = p; }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
@@ -2276,9 +2387,15 @@ private:
     u32  brew_stack_top_  = 0x2f0f0000;
     u32  brew_ret_magic_  = 0x2f0ffffe;
     bool brew_input_enabled_ = false;
+    // Ciclo de vida Z-Wheel: chamadas gráficas capturadas no EVT_APP_START.
+    int  zwheel_gfx_calls_ = 0;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };
+
+// Definições dos membros estáticos do hook transitório do ciclo de vida Z-Wheel.
+ZeeboLLESystem* ZeeboLLESystem::s_zwheel_hook_sys_ = nullptr;
+uint32_t        ZeeboLLESystem::s_zwheel_stub_va_  = 0;
 
 static void print_usage(const char* prog) {
     printf("===================================================================\n");
@@ -2419,6 +2536,11 @@ int main(int argc, char** argv) {
         printf("[EFS2] Carregando applet '%s' direto da NAND 0:EFS2APPS...\n", efs2_run.c_str());
         if (!sys.load_applet_from_efs2(efs2_run, 0x12000000)) {
             printf("[Warn] Falha ao carregar applet do EFS2: %s\n", efs2_run.c_str());
+        } else if (efs2_run == "274755") {
+            // Z-Wheel (ZeeboApp, AEECLSID 0x01070798): após injetar o gnode/metadado
+            // de 274755 do EFS2, instancia o ciclo de vida do applet despachando
+            // EVT_APP_START ao manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344).
+            sys.dispatch_zwheel_app_start();
         }
     }
 
