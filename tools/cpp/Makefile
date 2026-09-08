@@ -26,6 +26,16 @@ zeebo_devices_test: zeebo_devices_test.cpp zeebo_devices.h
 test: zeebo_devices_test
 	./zeebo_devices_test
 
+# L4 MMU: decoder + VTLB LUT + PhysPool (host-only, sem Unicorn).
+test_l4_mmu: test_l4_mmu.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -o $@ test_l4_mmu.cpp
+	./test_l4_mmu
+
+# Integração de aliasing via uc_mem_map_ptr (requer libunicorn).
+test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
+	./test_l4_mmu_uc
+
 # GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
 gpu:
 	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke

@@ -5,6 +5,8 @@
 // (map.h / fpage.h) e verifica que zeebo_l4_mmu.h os decodifica corretamente.
 #include "zeebo_l4_mmu.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cassert>
 
 using namespace zeebo_l4;
@@ -135,6 +137,59 @@ int main() {
             CHECK(it.fpage.vaddr()     == spec[i].va);
             CHECK(it.fpage.size_bytes()== ((u64)1 << spec[i].sz));
         }
+    }
+
+    // 6) VTLB LUT — tradução VA->host_ptr O(1), aliasing e r/w diretos.
+    {
+        VtlbLut lut;
+        // Pool física de host de 96MB (APPS_RAM), alinhada a 4KB.
+        const u64 POOL = 96u * 1024 * 1024;
+        u8* host = (u8*)aligned_alloc(0x1000, POOL);
+        memset(host, 0, POOL);
+
+        // Mapeia VA1 e VA2 (alias) para o MESMO host (offset 0).
+        const u64 VA1 = 0xb0000000, VA2 = 0xd0000000;
+        lut.map(VA1, 0x10000, host);
+        lut.map(VA2, 0x10000, host); // aliasing: mesmo host_ptr
+
+        CHECK(lut.is_mapped(VA1));
+        CHECK(lut.is_mapped(VA2 + 0x8000));
+        CHECK(!lut.is_mapped(0xe0000000)); // não mapeado
+
+        // translate preserva offset intra-página.
+        CHECK(lut.translate(VA1 + 0x123) == host + 0x123);
+        CHECK(lut.translate(VA1 + 0x1000) == host + 0x1000); // 2a página
+
+        // Escreve via LUT em VA1, lê via LUT em VA2 (aliasing) e no host direto.
+        CHECK(lut.write_u32(VA1 + 0x40, 0xdeadbeef));
+        u32 r = 0;
+        CHECK(lut.read_u32(VA2 + 0x40, &r) && r == 0xdeadbeef);
+        u32 hr = 0; memcpy(&hr, host + 0x40, 4);
+        CHECK(hr == 0xdeadbeef);
+
+        // Acesso fora do mapeamento falha (não crasha).
+        CHECK(!lut.read_u32(0xe0000000, &r));
+        CHECK(!lut.write_u32(0xe0000000, 1));
+
+        // unmap remove a tradução.
+        lut.unmap(VA1, 0x10000);
+        CHECK(!lut.is_mapped(VA1));
+        CHECK(lut.is_mapped(VA2)); // alias segue vivo
+        CHECK(lut.translate(VA1) == nullptr);
+
+        free(host);
+    }
+
+    // 7) PhysPool — resolução phys->host e limites.
+    {
+        u8 buf[0x4000];
+        PhysPool pool{ 0x10000000, sizeof buf, buf };
+        CHECK(pool.host_of(0x10000000) == buf);
+        CHECK(pool.host_of(0x10000100) == buf + 0x100);
+        CHECK(pool.host_of(0x0fffffff) == nullptr); // abaixo
+        CHECK(pool.host_of(0x10004000) == nullptr); // fim exclusivo
+        CHECK(pool.contains(0x10000000, 0x4000));
+        CHECK(!pool.contains(0x10000000, 0x4001));
     }
 
     if (g_fail == 0) {

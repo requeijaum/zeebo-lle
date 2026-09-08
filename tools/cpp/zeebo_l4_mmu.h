@@ -38,6 +38,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
@@ -46,6 +47,7 @@
 
 namespace zeebo_l4 {
 
+using u8  = uint8_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
@@ -148,6 +150,113 @@ inline int fpage_to_uc_prot(const Fpage& f) {
     return prot;
 }
 
+// ===========================================================================
+// VTLB LUT (Host-side Virtual Translation Lookaside Buffer)
+// ---------------------------------------------------------------------------
+// Inspiração: VTLB do PCSX2 (LUT direta indexada por página, resolvida no host)
+// e Fastmem / Page Aliasing do Dolphin (mmap/uc_mem_map_ptr apontando várias
+// VAs para a MESMA memória de host).
+//
+// Ideia: manter um array indexado por (va >> 12) que guarda o ponteiro de host
+// correspondente ao início de cada página de 4KB do guest. Assim telemetria,
+// hooks e o BrewLoader traduzem VA->host_ptr em O(1) e leem/escrevem
+// diretamente na RAM do host, sem a sobrecarga de uc_mem_read/uc_mem_write
+// (que copiam + fazem lookup interno na TB do Unicorn a cada acesso).
+//
+// O espaço de endereços do Zeebo (ARM 32-bit) tem 2^32 bytes = 2^20 páginas de
+// 4KB. Um array denso de 2^20 ponteiros custa 8MB (64-bit host) — aceitável e
+// idêntico à abordagem do PCSX2. Índices sem mapeamento ficam nullptr.
+// ===========================================================================
+class VtlbLut {
+public:
+    static constexpr u32 PAGE_BITS  = 12;
+    static constexpr u64 PAGE_SIZE  = 1u << PAGE_BITS;          // 4096
+    static constexpr u64 PAGE_MASK  = PAGE_SIZE - 1;            // 0xfff
+    static constexpr u64 NUM_PAGES  = (u64)1 << (32 - PAGE_BITS); // 2^20
+
+    VtlbLut() : lut_(NUM_PAGES, nullptr) {}
+
+    // Registra o mapeamento de [va, va+size) para o host_ptr correspondente.
+    // va e size DEVEM ser alinhados a 4KB. host_ptr aponta para o início da
+    // região de host que espelha essa faixa de VA (aliasing físico permitido:
+    // vários VAs podem apontar para a mesma pool física do host).
+    void map(u64 va, u64 size, u8* host_ptr) {
+        u64 first = (va & 0xffffffffu) >> PAGE_BITS;
+        u64 pages = (size + PAGE_MASK) >> PAGE_BITS;
+        for (u64 i = 0; i < pages && (first + i) < NUM_PAGES; i++)
+            lut_[first + i] = host_ptr + (i << PAGE_BITS);
+    }
+
+    // Remove o mapeamento de [va, va+size).
+    void unmap(u64 va, u64 size) {
+        u64 first = (va & 0xffffffffu) >> PAGE_BITS;
+        u64 pages = (size + PAGE_MASK) >> PAGE_BITS;
+        for (u64 i = 0; i < pages && (first + i) < NUM_PAGES; i++)
+            lut_[first + i] = nullptr;
+    }
+
+    // Traduz VA -> host_ptr em O(1). Retorna nullptr se a página não está
+    // mapeada. O offset dentro da página é preservado.
+    u8* translate(u64 va) const {
+        u8* base = lut_[(va & 0xffffffffu) >> PAGE_BITS];
+        return base ? base + (va & PAGE_MASK) : nullptr;
+    }
+
+    bool is_mapped(u64 va) const {
+        return lut_[(va & 0xffffffffu) >> PAGE_BITS] != nullptr;
+    }
+
+    // Leitura/escrita direta na RAM do host via LUT, respeitando limites de
+    // página (um acesso que cruza fronteira de página é feito byte-a-byte,
+    // pois páginas contíguas em VA podem não ser contíguas no host).
+    bool read(u64 va, void* dst, u64 n) const {
+        u8* d = (u8*)dst;
+        for (u64 i = 0; i < n; i++) {
+            u8* p = translate(va + i);
+            if (!p) return false;
+            d[i] = *p;
+        }
+        return true;
+    }
+    bool write(u64 va, const void* src, u64 n) {
+        const u8* s = (const u8*)src;
+        for (u64 i = 0; i < n; i++) {
+            u8* p = translate(va + i);
+            if (!p) return false;
+            *p = s[i];
+        }
+        return true;
+    }
+
+    // Conveniências de 32 bits (little-endian, como ARM do Zeebo em uso normal).
+    bool read_u32(u64 va, u32* out) const  { return read(va, out, 4); }
+    bool write_u32(u64 va, u32 v)          { return write(va, &v, 4); }
+
+private:
+    std::vector<u8*> lut_;
+};
+
+// ---------------------------------------------------------------------------
+// PhysPool — pool física contígua de host (estilo APPS_RAM), fonte para o
+// aliasing via uc_mem_map_ptr. Cada map_control resolve o phys_base dentro
+// desta pool e mapeia o MESMO host_ptr no VA pedido, permitindo que dois VAs
+// distintos (ex.: identidade + espaço de usuário) compartilhem RAM física.
+// ---------------------------------------------------------------------------
+struct PhysPool {
+    u64 phys_base = 0;   // endereço físico do início da pool no mapa do guest
+    u64 size      = 0;   // tamanho em bytes
+    u8* host      = nullptr; // memória de host (dona; alinhada a 4KB)
+
+    bool contains(u64 phys, u64 len) const {
+        return host && phys >= phys_base && (phys + len) <= (phys_base + size);
+    }
+    // Retorna o host_ptr para um endereço físico dentro da pool, ou nullptr.
+    u8* host_of(u64 phys) const {
+        if (!host || phys < phys_base || phys >= phys_base + size) return nullptr;
+        return host + (phys - phys_base);
+    }
+};
+
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
 
 // Lê MR[index] cru do UTCB do thread corrente no espaço do Unicorn.
@@ -203,6 +312,42 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
             }
         }
     }
+    return e;
+}
+
+// --- Aliasing via uc_mem_map_ptr (estilo Dolphin fastmem / PCSX2 VTLB) -----
+// Mapeia a fpage apontando para a POOL FÍSICA de host, em vez de RAM anônima
+// duplicada. Se o phys_base cai dentro da pool, usa uc_mem_map_ptr(host_ptr)
+// e registra a tradução VA->host_ptr no VTLB LUT. Assim:
+//   - dois VAs sobre o mesmo phys compartilham a mesma RAM de host (aliasing);
+//   - telemetria/BrewLoader leem via LUT em O(1) sem uc_mem_read.
+// Retorna UC_ERR_OK em sucesso. Fallback: se não há pool cobrindo o phys,
+// devolve UC_ERR_ARG para o chamador cair no map_one() anônimo.
+inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
+                              const PhysPool& pool, VtlbLut* lut) {
+    const u64 PAGE = 0x1000;
+    u64 va   = it.fpage.vaddr();
+    u64 size = it.fpage.size_bytes();
+    if (it.fpage.is_nil() || size == 0) return UC_ERR_OK;
+
+    u64 base  = va & ~(PAGE - 1);
+    u64 end   = (va + size + PAGE - 1) & ~(PAGE - 1);
+    u64 msize = end - base;
+    if (msize < PAGE) msize = PAGE;
+
+    u64 phys  = it.phys.phys_base();
+    u8* hp    = pool.host_of(phys);
+    if (!hp || !pool.contains(phys, msize)) return UC_ERR_ARG; // sem pool: fallback
+
+    int prot = fpage_to_uc_prot(it.fpage);
+    if (prot == 0) prot = 1;
+
+    uc_err e = uc_mem_map_ptr(uc, base, (size_t)msize, prot, hp);
+    if (e == UC_ERR_MAP) {
+        // Já existe região nesse VA: só reajusta a proteção (host_ptr imutável).
+        e = uc_mem_protect(uc, base, (size_t)msize, prot);
+    }
+    if (e == UC_ERR_OK && lut) lut->map(base, msize, hp);
     return e;
 }
 
