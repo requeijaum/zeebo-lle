@@ -166,14 +166,20 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Constatado que `1.1.2_APPS.bin` é stripped (`e_shnum=0`) e as vtables são povoadas em runtime via `ISHELL_CreateInstance`.
   - Implementado `IglGuestBridge::resolve_from_object(uc, obj_va, is_igl)` resolvendo diretamente de `obj[0]=&vtable`.
   - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
-- [ ] **Core 0 Iguana User-space Pipeline & L4_MapControl fpage sizing**:
-  - Emissão real de syscalls `L4_MapControl` pelo Iguana OS confirmada (`sid=80000100`, `ctrl=80000000`, `modify count=1`).
-  - Corrigir o descritor de fpage/pool na KIP (`0xb0d00000` / `BootInfo`): fpage em `0xb0d00206` decodifica com `size_log2 = 32`, gerando `size=4GB` e `UC_ERR_NOMEM`. Ajustar para refletir a faixa válida da APPS_RAM (96MB).
-- [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (validado por execução real)**:
+- [x] **Core 0 Iguana User-space Pipeline & Mapeamento de Pool L4_MapControl**:
+  - Falso diagnóstico do "gargalo de 4GB / size_log2=32" refutado por execução e RE: o calculador de fpages `0xb000d4dc` gera fpages legítimas de 1MB (`0xb0d00146`), e o comparador de mínimo em `0xb000d6fc` seleciona `size=1MB`.
+  - O loop `mempool_init` (`0xb000d5b4`) executa com sucesso 96 iterações de `L4_MapControl`, cobrindo de `0xb0d00000` a `0xb6d00000` (pool físico `0x10000000..0x16000000`).
+  - Sequência de boot do Iguana mapeada em `0xb0003424`: avança por `mempool_init`, `0xb00055dc`, `0xb000b1dc`, `0xb0001e80`, `0xb00056c4`, `0xb0004de4`, `0xb00070c8` até `bi_execute` (`0xb00001fc`) e o servidor em `0xb000345c`.
+- [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (commit `7bc384c`)**:
   - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
-  - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista). Um NOP-slide autêntico não contém nenhum branch por centenas de instruções; loops de init (`bl`, `beq`, `ble`, `pop {..,pc}`) zeram o contador e nunca acumulam a run linear.
-  - Blank-detector endurecido: exige **run de 64 blanks consecutivos** (`slide_blank_run`) em vez de um único word zerado isolado (evita falso positivo em constantes/dados inline).
-  - **Resultado real**: Core 1 atravessa todo o loop CP15 e o dispatch de init do REX (`0xf0017b04 → ... → 0xf0018438/0xf0018480`, tabela de init em `0xf0019e78` indexada por contador em `0xf001da60`), avançando de `0xf0017b04` até `0xf00184a8`. Nova fronteira legítima: em `0xf00184a8 pop {pc}` a rotina retorna para zeros (`0xf00184cc+`) — uma **entrada de função nula/não-inicializada** na tabela de init `0xf0019e78[1].fn = 0x00000000`, não um slide. CPU conformance 12/12 mantido.
+  - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista).
+  - Blank-detector endurecido: exige run de 64 blanks consecutivos (`slide_blank_run`) em vez de um único word isolado.
+  - Adicionado `c1_unmapped_hook` para acomodar acessos periféricos/MMIO do modem ARM9 sem travamentos de memória.
+  - **Resultado real**: Core 1 atravessa todo o loop CP15 e o dispatch de init do REX (`0xf0017b04 → 0xf0018480`), processando a tabela `0xf0019e78`. Fronteira seguinte: callback de terminação/espera do subsistema REX. CPU conformance 12/12 mantido.
+- [x] **Partição 0:EFS2APPS & Acesso DMA NandController (commit `09d0d54`)**:
+  - MIBIB @`0x60810` e geometria de partições confirmadas: `0:APPS` no bloco `0xe6` (`0x1cc0000`), `0:EFS2APPS` no bloco `0x191` (`0x3220000`).
+  - Harness `zeebo_efs2apps.cpp` 10/10 PASS provando acesso via DMOV/NandController byte-a-byte idêntico ao dump.
+  - Provado que o launcher `ZeeboApp` (`AEEAppletNew`, strings `fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/appmgr{ls,ln}.bar`) reside embutido diretamente no ELF de **`0:APPS`** (offset de arquivo `0x46e2e8`, VA `0x105322e8`, manipulador de eventos Thumb em `0x10532344`), enquanto `0:EFS2APPS` armazena dirents e recursos de módulos (`.mod`, `.bar`, `.ini`). EFS acessado localmente pelo ARM11 sem dependência de RPC de arquivos com o modem.
 - [x] **Item 4 (Loader BREW / Dispatch de Applets — commit `da9d5f4`)**:
   - Criada classe modular `BrewLoader` (`tools/cpp/zeebo_brew_loader.h`), integrando injeção de `.mod` e resolução de `AEEMod_Load` via ELF `e_entry`.
   - Tratamento honesto de símbolos ausentes/não mapeados.
@@ -183,19 +189,33 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ---
 
+### Fase 13: Bring-Up do Shell ZeeboApp / Z-Wheel e Integração EFS2APPS (Fase Atual)
+- [x] **Engenharia Reversa do Launcher ZeeboApp e Z-Wheel**:
+  - Ponto de entrada de eventos BREW do ZeeboApp localizado em `0x10532344` (Thumb): manipula `EVT_APP_START` (`0x10532394`), `EVT_APP_SUSPEND` (`0x1053235c`), `EVT_APP_START_BACKGROUND` (`0x10532360`).
+  - Despacho de interface `IShell` via chamadas de vtable do host (`0x10724104` e `0x105c2ef4`).
+- [ ] **Integração de EFS2APPS no VFS Guest / IFILEMGR**:
+  - Expor as leituras de `0:EFS2APPS` resolvidas pelo `NandController`/`DMOVModel` para o subsistema IFILEMGR do ARM11, permitindo que a BREW leia os diretórios `fs:/mod/` e dirents de jogos.
+- [ ] **Gatilho de Instanciação do ZeeboApp & Acoplamento IGL (Z-Wheel 3D)**:
+  - Interceptar a criação de applet (`AEEAppletNew` com `AEECLSID_ZEEBO_APP`) ou invocar `0x10532344` com `EVT_APP_START`.
+  - Conectar a vtable IGL (`resolve_from_object`) no instante da criação de instâncias 3D para renderizar o carrossel da Z-Wheel via `SoftRasterizer` -> MDDI -> SDL2 display sink.
+- [ ] **Core 1 REX Subsystem Task Loop / Idle Barrier**:
+  - Tratar o término da tabela de módulos de inicialização `0xf0019e78` para que o ARM9 estacione no laço de espera de eventos do REX (`rex_wait` / `0x16ef0b02`) sem saltar para zeros.
+
+---
+
 ## Próximos Passos Priorizados (Plano de Ação)
 
-1. **Passo 1 (Core 0: Correção de Bounds/fpage no BootInfo e Conclusão do L4_MapControl)**:
-   - Investigar a construção do `__okl4_bootinfo` em `0xb0d00000` (segmento 5) referenciado por `KIP[0xb0]`.
-   - Ajustar as descrições de pool/memória no bootinfo para que o cálculo da fpage (`0xb000d660..0xb000d680`) produza `size_log2` condizente com as regiões da APPS_RAM (evitando `size_log2=32` / 4GB), permitindo que `map_one_aliased` conclua o mapeamento e o cursor `r4` alcance `r7`.
+1. **Passo 1 (Conexão do ZeeboApp com a vtable IGL para o carrossel 3D da Z-Wheel)**:
+   - Utilizar o ponto de despacho do ZeeboApp mapeado em `0x10532344` para disparar `EVT_APP_START`.
+   - Garantir que a requisição de contexto gráfico (`AEECLSID_IGL` / `AEECLSID_GRAPHICS`) resolva via `IglGuestBridge` e direcione os comandos OpenGL ES 1.1 para o `IglHook`/`SoftRasterizer`.
+   - Validar com geração do primeiro frame do menu renderizado na janela SDL2 / framebuffer PPM.
 
-2. **Passo 2 (Core 1: Refinamento do Slide-Detector no Loop de CP15)**:
-   - Em `c1_code_hook`, refinar o slide-detector para verificar se houve instruções de branch/call recentes (`bl 0xf0015d7c`, `ble`, etc.) ou contadores de loop que avançam.
-   - Permitir que o loop de inicialização do CP15 em `0xf0017b04` execute suas iterações completas até saltar para o agendador principal do REX (`rex_wait` / task init).
+2. **Passo 2 (Mapeador de Arquivos EFS2APPS -> IFILEMGR do Guest)**:
+   - Conectar o parser de diretórios validado em `zeebo_efs2apps` às chamadas do subsistema de arquivos da BREW no ARM11.
+   - Permitir a listagem de módulos instalados em `fs:/mod/` (`reksio.mod`, `darkseal.mod`, etc.) para exibição na interface do launcher.
 
-3. **Passo 3 (Gatilho da Resolução IGL / BREW via ISHELL_CreateInstance)**:
-   - Conectar o interceptador na tabela de chamadas virtuais da BREW para acionar `resolve_from_object` no retorno de criação da interface gráfica (`AEECLSID_IGL`).
-   - Validar a execução ponta a ponta com injeção de applet real via `--applet`.
+3. **Passo 3 (Finalização da Barreira de Init REX no Core 1)**:
+   - Semear o terminador ou tratar o callback em `0xf0019e78` para que o ARM9 finalize a inicialização e permaneça em `rex_wait` atendendo mensagens ONCRPC/SMD do Core 0.
 
 ---
 

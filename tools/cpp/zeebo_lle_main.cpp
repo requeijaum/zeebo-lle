@@ -1227,9 +1227,10 @@ private:
         uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 0, ~0ULL);
 
         // Core 1 hooks
-        uc_hook h_c1, h_m1;
+        uc_hook h_c1, h_m1, h_u1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
         uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
+        uc_hook_add(core1_.uc, &h_u1, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c1_unmapped_hook, this, 0, ~0ULL);
 
         // Instala capture hook do QDSP5 para monitorar pacotes ONCRPC no Core 1
         zeebo::qdsp5::install_capture_hook(core1_.uc);
@@ -1585,6 +1586,13 @@ private:
             return true;
         }
         // Map dynamically to continue discovery
+        uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+        return true;
+    }
+
+    static bool c1_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+        (void)type; (void)size; (void)value; (void)ud;
+        // Dynamically map unmapped page for Core 1 (e.g. MMIO / MSM peripheral discovery)
         uc_mem_map(uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
         return true;
     }
