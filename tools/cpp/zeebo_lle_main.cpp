@@ -71,6 +71,12 @@ enum {
     APPS_RAM_PHYS_BASE  = 0x10000000,
     APPS_RAM_PHYS_SIZE  = 0x06000000, // 96MB
 
+    // Janela de relocacao do REX (Core 1). Delta fisico-vs-virtual = 0xef600000
+    // (0xf0000000 - base RAM 0x00a00000). A transicao 0xf001774c (mov pc,r0) salta
+    // para PC+0xef600000, ou seja, para a janela baseada em 0xf0000000+0xef600000.
+    REX_RELOC_DELTA     = 0xef600000,
+    REX_RELOC_BASE      = 0xdf600000, // 0xf0000000 + 0xef600000
+
     // OKL4 Kernel Interface Page (constructed, returned to Iguana by L4_KernelInterface).
     // Dentro da janela kernel já mapeada 0xf0000000..0xf1000000 (funcional — kernel roda dali).
     KIP_BASE            = 0xf0f00000,
@@ -886,6 +892,18 @@ private:
         uc_mem_map(core1_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel/REX High VA
         uc_mem_map(core1_.uc, 0xb0000000, 0x01000000, UC_PROT_ALL); // AMSS user/task VA
 
+        // Janela de RELOCAcao do REX (transicao 0xf0017740..0xf001774c).
+        // Apos passar a checagem de regioes (0xf0017448) e reconfigurar o CP15, o REX
+        // recomputa PC/SP com um delta fisico-vs-virtual:
+        //   r3 = 0xf0000000 - [0xf000004c]  ; [0xf000004c] = base RAM = 0x00a00000
+        //   r3 = 0xef600000                 ; delta de relocacao
+        //   add sp,sp,r3 ; add r0,pc,r3 ; mov pc,r0  -> salta p/ (PC + 0xef600000)
+        // Ex.: 0xf0017750 + 0xef600000 = 0xdf617750. Sem esta janela mapeada (e sem o
+        // codigo espelhado, feito em load_amss), o mov pc,r0 cai em UC_ERR_EXCEPTION /
+        // fetch unmapped. Com MMU desabilitada no Unicorn, espelhamos o codigo do REX
+        // nesta janela para que a transicao execute suavemente (probe_reloc.py valida).
+        uc_mem_map(core1_.uc, REX_RELOC_BASE, 0x01000000, UC_PROT_ALL); // 0xdf600000
+
         // Peripherals on Core 0
         uc_mem_map(core0_.uc, MSM_MDDI_BASE, MDDI_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, ADRENO130_BASE, ADRENO130_SIZE, UC_PROT_ALL);
@@ -1101,6 +1119,16 @@ private:
             // Direct mapping: os segmentos sao gravados no VA (0xf0000000...).
             uc_mem_write(core1_.uc, va, d.data() + off, fs);
 
+            // Espelho na janela de RELOCACAO do REX (0xdf600000 = va + 0xef600000).
+            // A transicao 0xf001774c (mov pc,r0) relocaliza PC/SP por +0xef600000; sem o
+            // codigo espelhado nessa janela, o salto cai em fetch/exec unmapped no Unicorn
+            // (que nao tem MMU ARM real). Espelhar somente segmentos na faixa kernel-VA
+            // (0xf0000000..0xf1000000) — os unicos alcancados pela relocacao do REX.
+            if (va >= 0xf0000000 && va < 0xf1000000) {
+                u32 mirror = va + REX_RELOC_DELTA; // wraps para 0xdf6xxxxx
+                uc_mem_write(core1_.uc, mirror, d.data() + off, fs);
+            }
+
             // Traducao PA->VA do reset vector: e_entry do super-ELF e um PA (0x00a00000),
             // mas o codigo de reset esta mapeado no VA do seg (0xf0000000). Rodar a partir
             // do PA cru cai em bytes zerados -> NOP-slide. Achamos o seg cujo PA contem
@@ -1128,7 +1156,32 @@ private:
         uc_reg_write(core1_.uc, UC_ARM_REG_SP, &sp_svc);
         printf("[System][Core1] Preambulo: CPSR=0x%02x (SVC,IRQ/FIQ off) SP=0x%08x\n",
                cpsr_svc, sp_svc);
+
+        // Semeadura da TABELA DE REGIOES DE RAM do REX em 0x00a1d73c (= base RAM +0x1d73c).
+        // A rotina de varredura de descritores 0xf0017448 le entradas de 16 bytes
+        //   { base, limite+1, attr, reservado } e para quando [+8]==0. Um descritor com
+        // attr low-nibble 0xf (e high-nibble 0) faz a checagem retornar 0 (SUCESSO) em vez
+        // de -1, ultrapassando o panic dead-loop local em 0xf0017890. Fornecemos UMA regiao
+        // cobrindo a RAM do AMSS (0x00a00000..0x00c00000) seguida de terminador nulo.
+        // (probe_f0017448.py / probe_reloc.py validam a passagem por execucao real.)
+        seed_rex_region_table();
+
         return true;
+    }
+
+    // Preenche a tabela de regioes de RAM esperada pelo scanner do REX (0xf0017448)
+    // no endereco fisico 0x00a1d73c. Sem ela o scanner retorna -1 e o REX entra em
+    // panic dead-loop em 0xf0017890 antes de reconfigurar a MMU/relocar.
+    void seed_rex_region_table() {
+        const u32 SRC = 0x00a1d73c;
+        auto w32 = [&](u32 a, u32 v){ uc_mem_write(core1_.uc, a, &v, 4); };
+        w32(SRC + 0x00, 0x00a00000); // entry0.base
+        w32(SRC + 0x04, 0x00c00000); // entry0.limite+1 (teto)
+        w32(SRC + 0x08, 0x0000000f); // entry0.attr (low-nibble 0xf => MATCH)
+        w32(SRC + 0x0c, 0x00000000); // entry0.reservado
+        w32(SRC + 0x18, 0x00000000); // entry1.attr = 0 => terminador
+        printf("[System][Core1] Tabela de regioes REX semeada @0x%08x "
+               "(base=0x00a00000 teto=0x00c00000 attr=0x0f) - checagem 0xf0017448 -> 0\n", SRC);
     }
 
     // Item 5: liga a vtable gpIGL/gpIEGL do guest ao IglGuestBridge. Idempotente.
@@ -1238,6 +1291,18 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R1, &control);
                 u32 utcb_ptr = 0;
                 uc_mem_read(uc, 0xff000ff0, &utcb_ptr, 4);
+                if (getenv("ZEEBO_MC_DEBUG")) {
+                    u32 rr[6]={0}; for(int k=0;k<6;k++){uc_reg_read(uc,UC_ARM_REG_R2+ (k==0?0:0),&rr[k]);} 
+                    u32 mr[8]={0};
+                    for(int k=0;k<8;k++) uc_mem_read(uc, utcb_ptr+0x40+k*4, &mr[k],4);
+                    u32 R2,R3,R4,R5,R6,R7,R9,PCv;
+                    uc_reg_read(uc,UC_ARM_REG_R2,&R2);uc_reg_read(uc,UC_ARM_REG_R3,&R3);
+                    uc_reg_read(uc,UC_ARM_REG_R4,&R4);uc_reg_read(uc,UC_ARM_REG_R5,&R5);
+                    uc_reg_read(uc,UC_ARM_REG_R6,&R6);uc_reg_read(uc,UC_ARM_REG_R7,&R7);
+                    uc_reg_read(uc,UC_ARM_REG_R9,&R9);uc_reg_read(uc,UC_ARM_REG_PC,&PCv);
+                    fprintf(stderr,"[MC-DBG] sid=%08x ctrl=%08x utcb=%08x R2=%08x R3=%08x R4=%08x R5=%08x R6=%08x R7=%08x R9=%08x PC=%08x MR=[%08x %08x %08x %08x]\n",
+                        sid,control,utcb_ptr,R2,R3,R4,R5,R6,R7,R9,PCv,mr[0],mr[1],mr[2],mr[3]);
+                }
                 res_r0 = zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control,
                              /*out_items=*/nullptr,
                              sys->apps_pool_.host ? &sys->apps_pool_ : nullptr,
