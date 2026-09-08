@@ -2265,6 +2265,20 @@ private:
             target_pc = pc; // pc already == svc+4; QW17: no extra +4
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, pc, 16);
+        } else if (syscall == 0x14) { // L4_MapControl
+            // O stub de MapControl em 0xb000c930 é:
+            //   0xb000c930: push {r4-r8, sb, sl, fp, lr}
+            //   0xb000c934: mov ip, sp
+            //   0xb000c938: mvn sp, #0xeb
+            //   0xb000c93c: svc #0x1414
+            //   0xb000c940: pop {r4-r8, sb, sl, fp, pc}
+            // UC_HOOK_INTR entrega pc == svc+4 (0xb000c940).
+            // Retomar em pc (com SP restaurado para ip) executa o pop e restaura
+            // perfeitamente todos os registradores do chamador (r4-r8, sb, sl, fp, pc).
+            target_pc = pc;
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c930, 0x40);
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
