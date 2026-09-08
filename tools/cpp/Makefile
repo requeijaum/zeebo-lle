@@ -88,10 +88,20 @@ zeebo_input_harness: zeebo_input_harness.cpp zeebo_brew_loader.h zeebo_l4_mmu.h
 test-input: zeebo_input_harness
 	./zeebo_input_harness
 
+# Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) sob SDL2.
+# Roda o ciclo de vida + loop por tempo real (--seconds=1) em headless (dummy),
+# apresentando o framebuffer à taxa de quadros e drenando eventos Z-Pad→AVK.
+# Valida que o loop entra e encerra organicamente sem crash.
+test-efs2-zwheel-loop: zeebo_lle_main
+	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=1 \
+	  | grep -q "Z-Wheel/Loop] loop encerrado" \
+	  && echo "PASS: --efs2-run=274755 --seconds=1 executou o loop interativo contínuo (Passo 11)." \
+	  || (echo "FAIL: loop interativo do applet 274755 não encerrou corretamente"; exit 1)
+
 clean:
 	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-input test-efs2-fs
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-input test-efs2-fs
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

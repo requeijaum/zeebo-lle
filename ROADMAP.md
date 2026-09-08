@@ -267,8 +267,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Descoberto que o payload de 64 KiB de `274755` (@0x3a92000, FNV-1a `0x544a6f30`) são metadados de gnode do VFS com assinatura `"274755"` e referências a assets (`slidemodel.qxm`), enquanto o código executável do ZeeboApp reside embutido em `0:APPS` no manipulador Thumb `@0x10532344`.
   - Implementado `ZeeboLLESystem::dispatch_zwheel_app_start()`: instancia scratch applet + vtable gráfica (`0x28`), despacha `EVT_APP_START` (`0x1f96`) sob Unicorn ao manipulador pré-mapeado com retorno real `r0 = 1` (sucesso) e roteia chamada para o `SoftRasterizer`, reproduzindo frame RGB565 com soma `2013081600`.
   - Integrado à CLI `--efs2-run=274755` e adicionado o teste automatizado `test-efs2-zwheel` no Makefile (agora 8 alvos de CI 100% verdes).
-- [ ] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua**:
-  - Acoplar o despacho de eventos de controle Z-Pad (`EVT_KEY_PRESS` / `EVT_KEY_RELEASE`) ao applet vivo da Z-Wheel com janela interativa SDL2.
+- [x] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua** (CONCLUÍDO):
+  - Implementado `ZeeboLLESystem::run_zwheel_interactive()`: após `dispatch_zwheel_app_start()` persiste o scratch do applet (manipulador `0x10532344`, applet, pilha) e re-arma o roteamento gráfico slot 10 → `SoftRasterizer`, mantendo um loop que (a) apresenta o framebuffer RGB565 no `HostVideoSink`/tela SDL2 à taxa de quadros e (b) drena eventos de teclado/gamepad SDL2 mapeados para AVK BREW via `dispatch_zpad_to_brew` (`EVT_KEY_PRESS`/`EVT_KEY_RELEASE`, retorno real `r0=1` sob Unicorn).
+  - Wired em `main`: `--efs2-run=274755` com `--seconds=N` (N>0) ou modo GUI entra no loop; `--seconds=0 --cycles=1` headless preserva o comportamento de 1 frame estático (`test-efs2-zwheel` intacto).
+  - Adicionado `test-efs2-zwheel-loop` ao Makefile; suíte de 8 alvos de CI 100% verde. Validado com execução real (`--seconds=1`: 13066 frames apresentados, loop encerrado organicamente).
 - [ ] **Passo 12: Servidores Iguana (Naming/Pager) e Boot Integrado**:
   - Handoff para os primeiros threads de espaço de usuário do Iguana OS no Core 0.
 

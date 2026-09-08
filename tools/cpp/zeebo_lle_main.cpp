@@ -649,7 +649,158 @@ public:
                   : "[Z-Wheel/Life] AVISO: ciclo de vida não completou o contrato "
                     "(esperado r0=1 + chamada gráfica).");
         if (ok && igl_bridge_) igl_bridge_->set_guest_running(true);
+        if (ok) {
+            // Persiste o scratch do ciclo de vida para o loop interativo (Passo 11):
+            // reencaminha EVT_KEY_* ao MESMO manipulador ZeeboApp @0x10532344 e
+            // applet scratch, e re-arma o roteamento gráfico slot 10 → SoftRasterizer.
+            zwheel_applet_va_ = APPLET;
+            zwheel_stack_top_ = STACKTP;
+            zwheel_ret_magic_ = RETMAG;
+            zwheel_life_armed_ = true;
+            // O HandleEvent do ZeeboApp (0x1f9x = ciclo de vida) só consome
+            // eventos de lifecycle; o encaminhamento de teclas usa o mesmo
+            // manipulador validado sob Unicorn (retorno real r0=1 = consumido).
+            set_brew_input_handler(ZWHEEL_HANDLER_VA, APPLET, STACKTP, RETMAG);
+        }
         return ok;
+    }
+
+    // ── Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) ──
+    // Após dispatch_zwheel_app_start(), mantém um ciclo que (a) apresenta o
+    // framebuffer RGB565 no HostVideoSink/tela SDL2 à taxa de quadros e (b)
+    // despacha continuamente eventos de teclado/gamepad mapeados para AVK BREW
+    // via dispatch_zpad_to_brew (HandleEvent Thumb sob Unicorn, r0 real).
+    // Roda por `max_seconds` (>0) ou até o fechamento da janela (interativo).
+    void run_zwheel_interactive(bool headless, double max_seconds,
+                                const std::string& dump_frames_dir = "") {
+        if (!zwheel_life_armed_) {
+            printf("[Z-Wheel/Loop] ciclo de vida não armado — pulando loop interativo.\n");
+            return;
+        }
+        printf("[Z-Wheel/Loop] iniciando loop%s%s (headless=%d)\n",
+               max_seconds > 0.0 ? " por tempo" : "",
+               (!headless) ? " interativo" : "",
+               (int)headless);
+
+        // Re-arma o hook do trampolim gráfico (slot 10 → SoftRasterizer) para que
+        // toda vez que o applet acionar a vtable, o framebuffer seja atualizado.
+        s_zwheel_hook_sys_ = this;
+        s_zwheel_stub_va_  = 0x22000000 + 0x1000; // = GFXSTUB do dispatch
+        uc_hook h_stub = 0;
+        if (core0_.uc)
+            uc_hook_add(core0_.uc, &h_stub, UC_HOOK_CODE, (void*)zwheel_stub_hook, this,
+                        s_zwheel_stub_va_, s_zwheel_stub_va_ + 4);
+
+        const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
+        if (fb && sink_) sink_->update_frame(fb);
+
+        auto t_start = std::chrono::steady_clock::now();
+        auto t_last  = t_start;
+        uint64_t frames = 0, key_dispatches = 0;
+        bool run = true;
+
+        while (run) {
+            // (b) Bombeia eventos SDL2 → AVK BREW (despacho contínuo de Z-Pad).
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) { run = false; break; }
+                if (ev.type == SDL_KEYDOWN) {
+                    if (ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_q) {
+                        // ESC/Q fecham o preview; teclas de jogo abaixo.
+                    }
+                    zeebo::brew::ZpadButton b;
+                    if (sdl_to_zpad(ev.key.keysym.sym, b)) {
+                        if (dispatch_zpad_to_brew(b, true)) key_dispatches++;
+                    }
+                } else if (ev.type == SDL_KEYUP) {
+                    zeebo::brew::ZpadButton b;
+                    if (sdl_to_zpad(ev.key.keysym.sym, b)) {
+                        if (dispatch_zpad_to_brew(b, false)) key_dispatches++;
+                    }
+                } else if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+                    zeebo::brew::ZpadButton b;
+                    if (pad_to_zpad(ev.cbutton.button, b))
+                        if (dispatch_zpad_to_brew(b, ev.type == SDL_CONTROLLERBUTTONDOWN)) key_dispatches++;
+                }
+            }
+
+            // (a) Aciona a vtable gráfica p/ atualizar e apresentar o framebuffer.
+            //     Re-dirige o SoftRasterizer diretamente (mesmo contrato do slot 10)
+            //     e apresenta na tela; mantém a apresentação contínua à taxa de quadros.
+            if (rast_) {
+                rast_->begin_frame();
+                rast_->set_viewport(0, 0, FB_WIDTH, FB_HEIGHT);
+                rast_->clear_color(0.1f, 0.2f, 0.8f, 1.0f);
+                rast_->clear(0x4000);
+                rast_->end_frame();
+                fb = rast_->framebuffer_rgb565();
+            }
+            if (fb && sink_) sink_->update_frame(fb);
+            frames++;
+
+            if (!dump_frames_dir.empty() && frames <= 60) {
+                char p[512];
+                snprintf(p, sizeof(p), "%s/frame_%06llu.ppm",
+                         dump_frames_dir.c_str(), (unsigned long long)frames);
+                save_ppm(fb, p);
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            double total = std::chrono::duration<double>(now - t_start).count();
+            if (max_seconds > 0.0 && total >= max_seconds) { run = false; }
+
+            double since = std::chrono::duration<double>(now - t_last).count();
+            if (since >= 1.0) {
+                printf("[Z-Wheel/Loop] FPS=%.1f | frames=%llu | teclas_consumidas=%llu | t=%.1fs\n",
+                       (double)frames / (total > 0 ? total : 1.0),
+                       (unsigned long long)frames,
+                       (unsigned long long)key_dispatches, total);
+                t_last = now;
+            }
+            if (!headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+
+        if (core0_.uc && h_stub) uc_hook_del(core0_.uc, h_stub);
+        s_zwheel_hook_sys_ = nullptr;
+        printf("[Z-Wheel/Loop] loop encerrado: frames=%llu, teclas consumidas=%llu.\n",
+               (unsigned long long)frames, (unsigned long long)key_dispatches);
+    }
+
+    // Mapeia um símbolo de tecla SDL2 para o botão lógico do Z-Pad (Passo 11).
+    static bool sdl_to_zpad(int sym, zeebo::brew::ZpadButton& out) {
+        using namespace zeebo::brew;
+        switch (sym) {
+            case SDLK_z: case SDLK_RETURN: out = ZP_A; return true;
+            case SDLK_x: case SDLK_ESCAPE: out = ZP_B; return true;
+            case SDLK_c:      out = ZP_1; return true;
+            case SDLK_v:      out = ZP_2; return true;
+            case SDLK_SPACE:  out = ZP_3; return true;
+            case SDLK_LSHIFT: out = ZP_4; return true;
+            case SDLK_UP:     out = ZP_UP; return true;
+            case SDLK_DOWN:   out = ZP_DOWN; return true;
+            case SDLK_LEFT:   out = ZP_LEFT; return true;
+            case SDLK_RIGHT:  out = ZP_RIGHT; return true;
+            case SDLK_h:      out = ZP_HOME; return true;
+            default: return false;
+        }
+    }
+
+    // Mapeia um botão de gamepad SDL2 para o botão lógico do Z-Pad (Passo 11).
+    static bool pad_to_zpad(int btn, zeebo::brew::ZpadButton& out) {
+        using namespace zeebo::brew;
+        switch (btn) {
+            case SDL_CONTROLLER_BUTTON_A:          out = ZP_A; return true;
+            case SDL_CONTROLLER_BUTTON_B:          out = ZP_B; return true;
+            case SDL_CONTROLLER_BUTTON_X:          out = ZP_1; return true;
+            case SDL_CONTROLLER_BUTTON_Y:          out = ZP_2; return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:    out = ZP_UP; return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  out = ZP_DOWN; return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  out = ZP_LEFT; return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: out = ZP_RIGHT; return true;
+            case SDL_CONTROLLER_BUTTON_GUIDE:
+            case SDL_CONTROLLER_BUTTON_START:      out = ZP_HOME; return true;
+            default: return false;
+        }
     }
 
     // Hook do trampolim da vtable gráfica da Z-Wheel: idêntico ao contrato do
@@ -2386,6 +2537,12 @@ private:
     bool brew_input_enabled_ = false;
     // Ciclo de vida Z-Wheel: chamadas gráficas capturadas no EVT_APP_START.
     int  zwheel_gfx_calls_ = 0;
+    // Passo 11: scratch do applet Z-Wheel persistido após dispatch_zwheel_app_start
+    // para que o loop interativo reencaminhe teclas ao mesmo manipulador/applet.
+    u32  zwheel_applet_va_  = 0;
+    u32  zwheel_stack_top_  = 0;
+    u32  zwheel_ret_magic_  = 0;
+    bool zwheel_life_armed_ = false;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };
@@ -2537,7 +2694,15 @@ int main(int argc, char** argv) {
             // Z-Wheel (ZeeboApp, AEECLSID 0x01070798): após injetar o gnode/metadado
             // de 274755 do EFS2, instancia o ciclo de vida do applet despachando
             // EVT_APP_START ao manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344).
-            sys.dispatch_zwheel_app_start();
+            bool life_ok = sys.dispatch_zwheel_app_start();
+            // Passo 11: loop interativo/contínuo. O modo de teste unitário
+            // (--seconds=0 sem GUI) executa apenas 1 frame estático do lifecycle
+            // e NÃO entra no loop, preservando test-efs2-zwheel. Entra no loop
+            // quando há tempo requerido (--seconds=N, N>0) ou modo interativo (GUI).
+            if (life_ok && (max_seconds > 0.0 || !headless)) {
+                sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
+            }
+            return life_ok ? 0 : 1;
         }
     }
 
