@@ -278,6 +278,13 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - `vram_stat`: telemetria de framebuffer RGB565 (resolução, soma de pixels `pixel_sum`, pixel central, flag `blank`, draw calls).
     - `set_hook`: injeção dinâmica de ações e desvios sem necessidade de recompilar C++.
   - Validado via teste automatizado de cliente Python sobre instância viva com `--headless`.
+- [x] **Passo 15: Execução Universal de Apps e Jogos EFS2 via Agente de IA (Concluído `aa3fa5c`)**:
+  - Implementado o harness autônomo `tools/cpp/zeebo_debug_agent.py` para agentes de IA:
+    - CLI com suporte a `--peek`, `--poke`, `--trace`, `--vram`, `--run-app=<id_ou_nome>`, `--test-catalog`, `--report=<caminho>`.
+    - Conexão e orquestração determinística via TCP NDJSON/JSON-RPC sobre o `ControlServer` com tolerância a latência de injeção em memória (`0x12000000`).
+    - Validação de execução dos applets do catálogo (`274755`, `reksio.mod`, `tectoy.mod`): ciclo de vida com frame RGB565 real para a Z-Wheel (`pixel_sum = 2013081600`) e injeção/execução com backtrace honesto para applets `.mod`.
+    - Criado teste automatizado `tools/cpp/test_zeebo_debug_agent.py` e novo alvo `test-debug-agent` no Makefile (18/18 asserções PASS).
+    - Suíte de CI expandida para **10 alvos 100% verdes**.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
   - Resolução do parser `bi_execute` (`0xb00001fc`) do bloco `__okl4_bootinfo` (`0xb0d00000`):
     - Alinhamento das faixas de pools virtuais (`BI_TAG_VIRT_POOLS` = 5) e físicas (`BI_TAG_PHYS_POOLS` = 6) para a rotina de fpage `0xb0000184`.
@@ -286,9 +293,6 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
   - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
-- [ ] **Passo 15: Execução Universal de Apps e Jogos EFS2 via Agente de IA**:
-  - Script de orquestração autônoma do agente (`tools/cpp/zeebo_debug_agent.py`) varrendo o catálogo de applets extraídos do EFS2 (`reksio.mod`, `tectoy.mod`, etc.).
-  - Validação automatizada de ciclo de vida (startup, input, renderização de VRAM sem blank) para cada applet.
 
 ---
 
