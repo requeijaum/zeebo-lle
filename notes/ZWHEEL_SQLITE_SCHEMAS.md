@@ -178,7 +178,32 @@ Ao receber `EVT_APP_START` (`0x1f96`), a Z-Wheel executa a seguinte sequência:
 
 ---
 
-## 4. Recomendações para o Projeto LLE / HLE
+## 4. Arquitetura de Downloads, ZeeboNet e Armazenamento (NAND vs eNAND)
+
+### 4.1. A Z-Wheel como Cliente da ZeeboNet (Loja Embutida)
+A Z-Wheel não era apenas um lançador de jogos, mas o próprio **cliente da loja ZeeboNet 3G**:
+- **Telas da Loja e Compra**: Fluxos de catálogo, compra de Z-Credits e formulários de recarga (boleto bancário e débito em conta via WebServices SOAP com envelopes XML da TecToy) estão embutidos diretamente no executável da Z-Wheel (`274755.mod`).
+- **Gerenciamento de Fila**: Disparava callbacks (`ShopForm_StartDownloadCallback`, `ShopForm_AskDownloadListener`) e enfileirava itens no SQLite `tt_dlqueue.db`.
+
+### 4.2. Destino Físico dos Downloads: eNAND (`fs:/mmc4/`)
+A NAND física interna (MCP de 128 MB) é restrita ao sistema operacional, logs e à própria Z-Wheel (apenas 30–60 MB livres). Portanto:
+- O download dos jogos baixava **diretamente para a eNAND / eMMC de 1 GB**, montada no VFS do BREW em **`fs:/mmc4/`**:
+  - `fs:/mmc4/mod/<appid>/` (ex: `fs:/mmc4/mod/274802/quake.mod`)
+  - `fs:/mmc4/mif/<appid>.mif` (ex: `fs:/mmc4/mif/274802.mif`)
+  - `fs:/mmc4/sys/download/` (metadados temporários da loja)
+- A Z-Wheel gravava apenas os metadados no seu catálogo local da NAND `fs:/mod/274755/tt_game_info` (`GAMEINFO` e `TITLETEXT`) e as miniaturas JPEG em `fs:/mod/274755/assets/games/<appid>/`.
+
+### 4.3. O Componente ZeeboMCP e a Cópia Temporária para a NAND
+Para contornar a menor taxa de transferência da eNAND (`/mmc4`), o sistema utilizava um daemon chamado **`ZeeboMCP`**:
+1. Ao clicar em "Jogar" na Z-Wheel, o `ZeeboMCP` copiava temporariamente o executável do jogo da eNAND para a NAND interna, criando o arquivo de estado `fs:/zmcp.dat`.
+2. O jogo executava a partir da NAND interna de alta velocidade.
+3. Ao encerrar normalmente, o `ZeeboMCP` apagava a cópia da NAND e removia `zmcp.dat`.
+4. **Causa de falha ("NAND cheia")**: Se o jogo travasse ou o console fosse desligado repentinamente, a cópia do jogo permanecia órfã na partição NAND, causando instabilidade por esgotamento de espaço.
+
+---
+
+## 5. Recomendações para o Projeto LLE / HLE
 1. **Mock e Inicialização Inicial**: Ao carregar a Z-Wheel pela primeira vez num ambiente emulado, basta fornecer um banco `tt_prefs.db` com `Initialized=1` e `TermsAccepted=1` para pular o fluxo de primeiro boot.
 2. **Registro de Jogos**: Para fazer um jogo (ex: Quake, ID `274802`) aparecer na interface da Z-Wheel, basta um registro correspondente em `GAMEINFO` e `TITLETEXT` apontando para o diretório de assets com os JPEGs.
 3. **Resolução de Caminhos**: O sistema de arquivos deve ser estritamente *case-insensitive* ao resolver caminhos em `assets/` e `mod/274755/`.
+4. **VFS e Montagem `/mmc4`**: Emuladores podem mapear o diretório de jogos comerciais diretamente em `fs:/mmc4/mod/` e ignorar o overhead do `ZeeboMCP`, executando o binário direto do VFS.
