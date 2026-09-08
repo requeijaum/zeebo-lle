@@ -224,23 +224,22 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Implementar extrator de extents/payload lendo os 64 bytes de metadados OOB/spare de cada página em `nand/1.1.2_spare.bin` para recompor os arquivos de diretórios `0x435` e `0x6064` (`fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/*`, `fs:/mif/274755.mif`, `fs:/mod/274755/*`).
 - [x] **Acoplamento do ZeeboApp ao Loop Principal do Core 0 e Display SDL2 (Passo 3 / Fase 13 - Concluído `5223647`, `06b61e5`)**:
   - Integrado o pipeline gráfico da Z-Wheel ao loop principal de `zeebo_lle_main`, conectando o ponto de despacho de applets da BREW ao pipeline de display SDL2 e criando a interface de controle CLI/telemetria.
+- [x] **Destravar IPC do Iguana OS no Core 0 - Resolução de `L4_MapControl` (Passo 4 / Fase 13 - Concluído `6fe15b6`)**:
+  - Identificada a causa raiz de `UC_ERR_NOMEM` no Iguana OS / OKL4 2.1.1: descritores de fpage com `size_log2 >= 32` (4GB) e `phys_base >= 0x100000000` representam operações de controle sobre todo o address space (flush/unmap global/concessão de permissões de espaço), e não mapeamento físico de RAM.
+  - Implementado `Fpage::is_whole_space()` e tratamento limpo no dispatcher L4e em `tools/cpp/zeebo_l4_mmu.h`.
+  - Cobertura em `tools/cpp/test_l4_mmu.cpp` com caso 8 validado (`ALL TESTS PASSED`). Core 0 agora avança sem crash na inicialização de pools de memória do Iguana.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
 1. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Extração via OOB Spare)**:
-   - Implementar leitor C++ que correlaciona os dirents de `nand/1.1.2.bin` com os blocos de dados indexados no arquivo de spare `nand/1.1.2_spare.bin` (2.112 B por página: 2.048 B dados + 64 B metadados/tags EFS2).
-   - Extrair e validar byte-a-byte os payloads essenciais para o boot dos applets:
-     - BREW Appmgr: `fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/appmgrls.bar`, `fs:/mod/brewappmgr/appmgrln.bar`.
-     - Z-Wheel (274755): `fs:/mif/274755.mif`, `fs:/mod/274755/tectoy.cfg`, `uiconfig.xml`, `.qxt`, `.qxm`, `.qxa`.
+   - Layout comprovado: páginas de 2.112 B no `1.1.2_spare.bin` divididas em 4 codewords de 528 B (512 B dados + 16 B spare).
+   - O VFS do EFS2 reside em `0:EFS2APPS` (`0x3220000` em diante), enquanto os binários centrais e strings do Appmgr (`fs:/mif/brewappmgr.mif`) estão embutidos diretamente no ELF de `0:APPS` (`0x1cc0000`–`0x3220000`).
+   - Implementar leitor C++ que mapeia os dirents e extrai os assets/configurações da Z-Wheel (`274755`, `tectoy.cfg`, `.qxt`, `.qxm`).
    - Adicionar alvo `test-efs2-fs` ao Makefile comprovando a extração dos arquivos com checksum real.
 
-2. **Passo 4 (Destravar IPC do Iguana OS no Core 0 - Resolução de `L4_MapControl`)**:
-   - Diagnosticar o laço em que o Iguana OS solicita via UTCB (`0xdff00000`) o mapeamento de `va=0xb0d00000` / `va=0x00000000` com tamanho de 4GB (`phys=0x100000000 size=4294967296`), resultando em `UC_ERR_NOMEM`.
-   - Implementar o clamp/sanitização do tamanho de mapeamento virtual ou fornecer a resposta de space control esperada pelo L4e para permitir que o Iguana conclua a inicialização de seus servidores internos (VFS, naming, loader de ELF).
-
-3. **Passo 5 (Execução Contínua de Jogos Externos e Despacho de Applet via `AEECShell`)**:
+2. **Passo 5 (Execução Contínua de Jogos Externos e Despacho de Applet via `AEECShell`)**:
    - Conectar o manipulador do `BrewLoader` carregado via `--applet` ou `run <app.mod>` ao laço de eventos contínuo do SDL2.
    - Fornecer mapeamento das teclas do Z-Pad (`INT_KEYSENSE #28`) para os eventos BREW (`EVT_KEY_PRESS`, `EVT_KEY_RELEASE`) permitindo que applets interativos executem draws contínuos além do primeiro frame de clear.
    - Validar a telemetria com contadores contínuos de FPS e MIPS durante a execução interativa.
