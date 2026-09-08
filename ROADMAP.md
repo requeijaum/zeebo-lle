@@ -271,18 +271,39 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Implementado `ZeeboLLESystem::run_zwheel_interactive()`: após `dispatch_zwheel_app_start()` persiste o scratch do applet (manipulador `0x10532344`, applet, pilha) e re-arma o roteamento gráfico slot 10 → `SoftRasterizer`, mantendo um loop que (a) apresenta o framebuffer RGB565 no `HostVideoSink`/tela SDL2 à taxa de quadros e (b) drena eventos de teclado/gamepad SDL2 mapeados para AVK BREW via `dispatch_zpad_to_brew` (`EVT_KEY_PRESS`/`EVT_KEY_RELEASE`, retorno real `r0=1` sob Unicorn).
   - Wired em `main`: `--efs2-run=274755` com `--seconds=N` (N>0) ou modo GUI entra no loop; `--seconds=0 --cycles=1` headless preserva o comportamento de 1 frame estático (`test-efs2-zwheel` intacto).
   - Adicionado `test-efs2-zwheel-loop` ao Makefile; suíte de 9 alvos de CI 100% verde. Validado com execução real (`--seconds=1`: 13066 frames apresentados, loop encerrado organicamente).
-- [ ] **Passo 12: Servidores Iguana (Naming/Pager) e Boot Integrado**:
-  - Handoff para os primeiros threads de espaço de usuário do Iguana OS no Core 0.
-  - RE do fluxo de inicialização pós-`mempool_init`: rotina `bi_execute` (`0xb00001fc`), parser de tags de BootInfo (`0xb0d00000`) e despacho para o loop do servidor em `0xb000aa94`.
+- [x] **Passo 12: Primitivas de Debugging Estruturado para Agentes de IA Autônomos (Concluído `38fa980`)**:
+  - Implementadas primitivas RPC via TCP NDJSON/JSON-RPC no `ZeeboControlServer` (`zeebo_lle_main.cpp` + `zeebo_debug_scripting.py`):
+    - `backtrace`: unwinding de pilha sob Unicorn (frames com PC, LR, SP, FP e filtros de segmentos `0:APPS`/`0:AMSS`).
+    - `peek` / `poke`: leitura e escrita atômica (1, 2, 4, 8 bytes) com invalidação automática de cache de tradução JIT (`uc_ctl_remove_cache`) em páginas PF_X.
+    - `vram_stat`: telemetria de framebuffer RGB565 (resolução, soma de pixels `pixel_sum`, pixel central, flag `blank`, draw calls).
+    - `set_hook`: injeção dinâmica de ações e desvios sem necessidade de recompilar C++.
+  - Validado via teste automatizado de cliente Python sobre instância viva com `--headless`.
+- [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
+  - Resolução do parser `bi_execute` (`0xb00001fc`) do bloco `__okl4_bootinfo` (`0xb0d00000`):
+    - Alinhamento das faixas de pools virtuais (`BI_TAG_VIRT_POOLS` = 5) e físicas (`BI_TAG_PHYS_POOLS` = 6) para a rotina de fpage `0xb0000184`.
+    - Garantir retorno `r0 = 0` em `0xb0003448` para evitar salto de pânico em `0xb0003450` (`"PANIC: Bootinfo did not initialise correctly"`).
+    - Concluir `extensions_init` (`0xb00017b8`) e alcançar o loop de servidores em `0xb000aa94`.
+- [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
+  - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
+  - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
+- [ ] **Passo 15: Execução Universal de Apps e Jogos EFS2 via Agente de IA**:
+  - Script de orquestração autônoma do agente (`tools/cpp/zeebo_debug_agent.py`) varrendo o catálogo de applets extraídos do EFS2 (`reksio.mod`, `tectoy.mod`, etc.).
+  - Validação automatizada de ciclo de vida (startup, input, renderização de VRAM sem blank) para cada applet.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 12 (Servidores Iguana e Boot Integrado)**:
-   - Monitorar a transição pós-`mempool_init` para a criação das threads de naming e pager no espaço de Core 0.
-   - Ajustar o contrato de BootInfo (`bi_execute` em `0xb00001fc`) para avançar sem acionar o panic `"PANIC: Bootinfo did not initialise correctly"` em `0xb0003450`.
-   - Implementar os shims para as syscalls de IPC/threading do OKL4 (`0x0c`, `0x00`, `0x10`) no `ZeeboLLESystem`.
+1. **Passo 13 (Execução do BootInfo `bi_execute` e Servidores Iguana)**:
+   - Configurar os limites de RAM e descritores no `__okl4_bootinfo` (`0xb0d00000`) para que a decomposição de fpages em `0xb0000184` cubra integralmente os pools de memória sem rejeição.
+   - Validar com `--cycles=150` o avanço de Core 0 além de `0xb000345c`, alcançando o ponto de entrada do servidor de nomes e paginação (`0xb000aa94`).
+
+2. **Passo 14 (Syscalls OKL4 IPC/Threading e Vetor BREW)**:
+   - Implementar no dispatcher de SVC do `ZeeboLLESystem` (`case 0x00`, `case 0x0c`, `case 0x10`) o roteamento de IPC para permitir que o servidor Iguana responda requisições de mapeamento e criação de threads.
+   - Conectar o vetor de inicialização do BREW (`0x10137000`) ao loop de escalonamento.
+
+3. **Passo 15 (Suíte Autônoma de Execução de Apps)**:
+   - Utilizar a API de depuração estruturada (`zeebo_debug_scripting.py` / `zeebo_control_server.h`) para instrumentar e bootar cada app catalogado no EFS2, avaliando `vram_stat` e estabilidade de registradores.
 
 ---
 
