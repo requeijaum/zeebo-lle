@@ -23,3 +23,16 @@ tools/cpp/gpu/igl_smoke
 tools/cpp/gpu/gpu_display_integration
 tools/cpp/gpu/igl_transform_smoke
 refs/tainted/
+
+# QDSP5 build artifacts (fontes ficam rastreados; só binários/WAV/corpus ignorados)
+tools/cpp/qdsp5/qdsp5_smoke
+tools/cpp/qdsp5/qdsp5_capture_test
+tools/cpp/qdsp5/qdsp5_fuzz
+tools/cpp/qdsp5/qdsp5_out.wav
+tools/cpp/qdsp5/fuzz_corpus/
+tools/cpp/test_l4_mmu
+
+# Estado local do agente e caches Python
+.hermes/
+__pycache__/
+*.pyc

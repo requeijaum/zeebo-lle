@@ -1,0 +1,33 @@
+# Makefile.qdsp5 — ISOLATED build for the QDSP5 skeleton (FASE 1).
+# Mantido separado de tools/cpp/Makefile de propósito: outro agente pode estar
+# editando o Makefile/codebase principal em paralelo (mesma convenção do gpu/).
+# Build:  make -f qdsp5/Makefile.qdsp5
+# Sem dependência de Unicorn nem SDL: o smoke prova o caminho AUDPP por WAV.
+CXX ?= g++
+CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
+
+QDSP5_SRC := qdsp5_dispatcher.cpp audpp_engine.cpp stub_engines.cpp
+QDSP5_HDR := qdsp5_rpc.h iqdsp_engine.h qdsp5_dispatcher.h qdsp5_capture_hook.h
+
+qdsp5_smoke: qdsp5_smoke.cpp $(QDSP5_SRC) $(QDSP5_HDR)
+	$(CXX) $(CXXFLAGS) qdsp5_smoke.cpp $(QDSP5_SRC) -o qdsp5_smoke
+
+qdsp5_capture_test: qdsp5_capture_test.cpp qdsp5_capture_hook.h
+	$(CXX) $(CXXFLAGS) qdsp5_capture_test.cpp -o qdsp5_capture_test
+
+.PHONY: test clean
+test: qdsp5_smoke qdsp5_capture_test
+	./qdsp5_smoke
+	@echo "--- Q0.1 capture parser ---"
+	./qdsp5_capture_test
+
+clean:
+	rm -f qdsp5_smoke qdsp5_out.wav qdsp5_capture_test
+
+# Fuzzing dirigido do parser (Q0.1 hardening). Requer clang++ (libFuzzer+ASAN).
+# NÃO faz parte de 'test' default p/ não exigir clang. Uso: make -f Makefile.qdsp5 fuzz
+.PHONY: fuzz
+fuzz: qdsp5_fuzz.cpp $(QDSP5_SRC) $(QDSP5_HDR)
+	clang++ -std=c++23 -g -O1 -fsanitize=fuzzer,address \
+	  qdsp5_fuzz.cpp $(QDSP5_SRC) -o qdsp5_fuzz
+	./qdsp5_fuzz -max_total_time=60 -rss_limit_mb=2048
