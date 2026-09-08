@@ -35,6 +35,7 @@ tools/cpp/zeebo_input_harness
 tools/cpp/test_efs2_fs
 tools/cpp/test_l4_mmu_uc
 tools/cpp/test_l4_mmu
+tools/cpp/test_l4_mmu_txn
 
 # Estado local do agente e caches Python
 .hermes/
