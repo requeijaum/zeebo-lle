@@ -43,10 +43,19 @@ gpu:
 test-gpu: gpu
 	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke
 
-clean:
-	rm -f zeebo_harness zeebo_devices_test
+# Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
+# sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em
+# [applet+0x2c] → SoftRasterizer/IglGuestBridge.
+zeebo_zwheel_harness: zeebo_zwheel_harness.cpp gpu/igl_guest_bridge.h gpu/igl_hook.h gpu/igpu_rasterizer.h gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
+	$(CXX) $(CXXFLAGS) -o $@ zeebo_zwheel_harness.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp -lunicorn
 
-.PHONY: all test clean gpu test-gpu
+test-zwheel: zeebo_zwheel_harness
+	./zeebo_zwheel_harness ../../nand/1.1.2_APPS.bin
+
+clean:
+	rm -f zeebo_harness zeebo_devices_test zeebo_zwheel_harness
+
+.PHONY: all test clean gpu test-gpu test-zwheel
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
