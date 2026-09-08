@@ -1,9 +1,10 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, revisão da base + estudo GL/Zeebx)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, GL + auditoria Ymir/ares/higan)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão separa execução comprovada de mera carga, incorpora o hardening de `640147b`
-e o frontend/rasterizador GLES clean-room informado por fatos verificáveis do Zeebx.
+Esta revisão separa execução comprovada de mera carga, incorpora o hardening de `640147b`,
+o frontend/rasterizador GLES clean-room informado por fatos verificáveis do Zeebx e a auditoria
+arquitetural Ymir/ares/higan consolidada em `677679a`.
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -111,8 +112,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Executar e validar 12 testes de CPU de `/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests/` sob ARM11 Unicorn: 12/12 PASS (`alu`, `callret`, `condflags`, `controlflow`, `interwork`, `ldmstm`, `loadstore`, `media`, `memory`, `muldiv`, `shifter`, `thumb2branch`).
 - [x] Testar a execução do módulo limpo `zbtest.mod` (construído via SDK oficial BREW) no LLE e mapear o ponto de despacho para `AEEMod_Load`.
 
-### Fase 8: Absorção de Padrões HLE de Alta Relevância (Audio & SaveState Engine)
-- [x] Incorporar padrão de Save State Dual-Core (`ZeeboSaveStateManager` em `zeebo_save_state.h`) capturando CPU Unicorn context (`uc_context_save`) + regiões mapeadas de memória física/compartilhada.
+### Fase 8: Estado Reproduzível e Áudio
+- [x] Baseline de Save State Dual-Core (`ZeeboSaveStateManager` em `zeebo_save_state.h`, formato v2): contextos Unicorn (`uc_context_save`), contadores/PCs e regiões mapeadas de memória.
+- [ ] Elevar para checkpoint de máquina completa (v3 chunked): hash da cópia de NAND, serializer simétrico, `validate` antes de mutar, estado de MMU/IRQ/timers/GPU-GL/EFS-VFS/eventos e `post_load` para caches/callbacks. O v2 atual **não** prova restauração determinística dos dispositivos.
+- [ ] Gate de checkpoint: salvar em A → rodar N eventos → coletar hashes de bytes/pixels/registradores → restaurar A → repetir N eventos e exigir identidade.
 - [x] Incorporar mixer de áudio multi-stream (`UnifiedAudioSink` em `zeebo_audio_sink.h`) com controle de canais e vtable HLE/LLE limpa evitando problemas de ciclo de vida e interworking.
 
 ### Fase 9: Subsistema Gráfico (Adreno 130 / IGL) — acoplamento LLE e rasterização
@@ -310,17 +313,37 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 | Ordem | Quick win | Esforço | Ganho | Prova obrigatória |
 |---|---|---:|---|---|
-| QW1 | Alpha-test + culling/front-face no `SoftRasterizer` | baixo | corrige sprites recortados e faces invertidas | pixels discard/CCW/CW |
-| QW2 | `glTexParameterx`: nearest/linear e repeat/clamp por textura | baixo | remove sampling incorreto sem mexer no boot | textura 2×2 nas bordas |
-| QW3 | Demais depth funcs e blend factors usados no GLES 1.x | baixo-médio | amplia compatibilidade 3D/HUD | matriz de pixels por função |
-| QW4 | Harness isolado de BootInfo que enumera tags/fpages reais | baixo-médio | encurta o ciclo do Passo 13 e elimina boot cego | sequência de VAs/bytes até `0xb6d00000` |
-| QW5 | ATITC RGB/RGBA em `glCompressedTexImage2D` | médio | alto impacto nos jogos comerciais | blocos conhecidos → pixels/hash |
-| QW6 | Clipping `z+w>=0` antes do divide | médio | evita triângulos explodindo na tela | triângulo cruzando near-plane |
-| QW7 | Interpolação corrigida por perspectiva | médio | texturas 3D corretas | quad inclinado com baseline |
+| QW1 | Harness isolado de BootInfo que enumera tags/fpages reais | baixo-médio | encurta diretamente o Passo 13 e elimina boot cego | sequência de tags, VAs e bytes até `0xb6d00000` |
+| QW2 | Deduplicação de trace no cliente Python: máscara de PCs, janela de repetição, contador de omitidos e invalidação após `poke` | baixo | torna loops/CTZ/NOP-slide legíveis sem instrumentação C++ permanente | teste com sequência repetida + SMC produzindo saída determinística |
+| QW3 | `ProbeRegistry` mínimo no ControlServer para MMU/BootInfo, IRQ e GPU (`probe.list/get`; `set` somente onde seguro) | baixo-médio | substitui probes descartáveis e acelera RE orientada por agente | teste RPC prova leitura sem mutar bytes/flags/eventos |
+| QW4 | Alpha-test + culling/front-face no `SoftRasterizer` | baixo | corrige sprites recortados e faces invertidas | pixels discard/CCW/CW |
+| QW5 | `glTexParameterx`: nearest/linear e repeat/clamp por textura | baixo | remove sampling incorreto sem mexer no boot | textura 2×2 nas bordas |
+| QW6 | Converter um teste ARM11 para vetor transacional (estado inicial/final + prefetch/load/store) | baixo-médio | detecta erro de barramento que 12/12 por estado final pode ocultar | caso ARM/Thumb com transações e bytes esperados |
+| QW7 | Demais depth funcs e blend factors usados no GLES 1.x | baixo-médio | amplia compatibilidade 3D/HUD | matriz de pixels por função |
+| QW8 | Falha estruturada para MMIO não mapeado, com PC/endereço/largura/direção e pausa | baixo-médio | troca leitura zero/falha opaca por evidência acionável | teste de acesso inválido sem falso progresso |
+| QW9 | ATITC RGB/RGBA em `glCompressedTexImage2D` | médio | alto impacto nos jogos comerciais | blocos conhecidos → pixels/hash |
+| QW10 | Clipping `z+w>=0` antes do divide | médio | evita triângulos explodindo na tela | triângulo cruzando near-plane |
+| QW11 | Interpolação corrigida por perspectiva | médio | texturas 3D corretas | quad inclinado com baseline |
+
+### P1 — Infraestrutura após o Passo 13
+
+1. **Checkpoint v3 de máquina completa**
+   - Primeiro vertical slice: CPU/memória + MMU + IRQ/timers, com validação integral antes da restauração; depois GPU/GL, EFS/VFS e filas/eventos.
+   - Gate: save→run→restore→rerun produz os mesmos bytes, pixels, registradores e eventos.
+2. **Tempo híbrido ARM11/ARM9/periféricos**
+   - Contador relativo/dívida entre os dois cores; sync-on-access nas janelas IPC/SMD; deadlines absolutos para timers, IRQ, GPU e futuro QDSP5.
+   - Gate: variar quantum sem alterar a sequência observável de bytes/eventos nos harnesses.
+3. **JSON-RPC tipado sem quebrar NDJSON**
+   - Envelope `id/method/params/result/error` e notificações assíncronas de break/watch/probe; compatibilidade temporária com comandos atuais.
+4. **GDB RSP ARM11**
+   - Adaptador sobre pause/step/breakpoints/memória/registradores existentes; NDJSON/Python continua sendo a API principal dos agentes.
 
 ### Itens deliberadamente não classificados como quick win
 
 - `eglGetProcAddress`, `IEGLSurfaceManip`, IEGL11/IGLES11 e strings GL: dependem de objeto/VA/retorno real observado no firmware; não fabricar trampolim, vtable, interface ou string do Zeebx.
+- Checkpoint completo, scheduler e GDB RSP: têm alto valor, mas são mudanças transversais; executar como P1 com gates próprios, não vendê-los como correções pequenas.
+- `libco`/corrotinas, árvore dinâmica completa do ares, BML/icarus, GUI debugger do higan e dependência integral de nall: rejeitados para a arquitetura fixa baseada em Unicorn.
+- Código Ymir/higan: GPL; transferir somente arquitetura/comportamento documentado e reimplementar. ares é permissivo no núcleo, mas dependências exigem auditoria/atribuição antes de cópia literal.
 - Áudio/JPEG/VFE/QDSP5: aguardar liberação explícita do QDSP5.
 - Backend GL host/ubershader: otimização posterior; primeiro fechar correção do backend software e boot guest.
 
@@ -336,9 +359,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Estratégia de execução paralela
 
-- **Frente A — crítica:** QW4 + Passo 13 (BootInfo/fpages/`bi_execute`).
-- **Frente B — GL rápida:** QW1–QW3 em commits TDD independentes.
-- **Frente C — GL estrutural:** QW5–QW7, uma feature por vez, sempre com frame/pixel determinístico.
-- **Depois do Passo 13:** Passo 14; só então promover objetos, extensões e applets alcançados pelo boot real.
+- **Frente A — crítica:** QW1 + Passo 13 (BootInfo/fpages/`bi_execute`).
+- **Frente B — debug para agente:** QW2 e QW3, sem traces permanentes no core.
+- **Frente C — GL rápida:** QW4, QW5 e QW7 em commits TDD independentes.
+- **Frente D — conformidade/diagnóstico:** QW6 e QW8, validando transações e falhas por bytes/eventos.
+- **Frente E — GL estrutural:** QW9–QW11, uma feature por vez, sempre com frame/pixel determinístico.
+- **Depois do Passo 13:** Passo 14 e P1 na ordem checkpoint → tempo híbrido → JSON-RPC → GDB; só promover objetos, extensões e applets alcançados pelo boot real.
 
 Gate de toda frente: alvo afetado RED→GREEN, `make check`, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
