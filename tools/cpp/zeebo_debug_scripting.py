@@ -20,6 +20,22 @@ class ZeeboDebugClient:
         self.port = port
         self.sock = None
         self.sock_timeout = 30.0
+        # QW2: deduplicador de trace opcional. Quando anexado, um poke em
+        # código executável invalida os PCs afetados (SMC), reemitindo-os.
+        self._dedup = None
+
+    def attach_dedup(self, dedup):
+        """Anexa um TraceDeduplicator (QW2). poke() passará a invalidar a
+        máscara de PCs no range escrito, tornando SMC visível no trace."""
+        self._dedup = dedup
+        return self
+
+    def observe_pc(self, pc):
+        """Atalho: registra um PC no dedup anexado. Retorna True se emitir,
+        False se omitido; True (sem dedup) mantém comportamento verboso."""
+        if self._dedup is None:
+            return True
+        return self._dedup.observe(pc)
 
     def connect(self, timeout=10.0):
         start = time.time()
@@ -67,7 +83,11 @@ class ZeeboDebugClient:
         return self.rpc({"cmd": "peek", "core": core, "addr": addr, "len": size})
 
     def poke(self, addr, val, size=4, core=0):
-        return self.rpc({"cmd": "poke", "core": core, "addr": addr, "val": val, "len": size})
+        resp = self.rpc({"cmd": "poke", "core": core, "addr": addr, "val": val, "len": size})
+        # QW2: poke pode ser SMC. Invalida PCs no range para reemissão no trace.
+        if self._dedup is not None:
+            self._dedup.invalidate(addr, size=size)
+        return resp
 
     def vram_stat(self):
         return self.rpc({"cmd": "vram_stat"})
