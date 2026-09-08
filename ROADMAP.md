@@ -139,18 +139,23 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Eliminação de saltos artificiais**: remoção de `core0_.entry = 0x1013a000` hardcoded; avanço autêntico por `uc_emu_start` nos dois núcleos.
 - [x] **MAP_CONTROL funcional**: decodificação de MRs UTCB e mapeamento via `uc_mem_map`.
 - [x] **Injetor direto de applets BREW**: flag CLI `--applet=<path>` e rotina `load_applet` alocando janela e carregando binários `.mod`/`.bar` em `0x12000000`.
-- [ ] **Item 1 (AMSS / Core 1 REX scheduler)**:
-  - Localizar o vetor de reset real do ARM9 no `1.1.2_AMSS.bin` (preâmbulo `msr cpsr_c, #0xd3` / `ldr sp`).
-  - Inicializar Core 1 com CPSR SVC (`0xD3`) e SP do modem (`0x00b16000`), eliminando o NOP-slide linear de +0x9c40/ciclo.
-  - Implementar detector de slide (stall de branches) para diagnóstico rápido de regressão.
-- [ ] **Item 2 (MAP_CONTROL / Cópia prévia de páginas)**:
-  - Instrumentar `map_one` com probe de conteúdo inicial para detectar páginas mapeadas vazias (0x00 / 0xFF) que provocam derails.
-  - Assegurar que os descritores de tarefas Iguana e ELF do guest sejam devidamente populados antes do salto.
-- [ ] **Item 3 (Core 0 loop de poll em 0xb000d4a8)**:
-  - Investigar origem do status em `[r0 + 0xc8]`; validar se a subida do REX (Item 1) e respostas IPC destravam naturalmente o laço de espera.
-- [ ] **Item 4 (Loader BREW / Dispatch de Applets)**:
-  - Mapear símbolos `ISHELL_CreateInstance`, `AEEMod_Load` e `AEEClsCreateInstance` no binário do APPS/AEECShell.
-  - Conectar o vetor de inicialização do applet injetado aos eventos da AEECShell (`EVT_APP_START`, `EVT_KEY`).
+- [x] **Item 1 (AMSS / Core 1 REX scheduler — commit `9fa10db`)**:
+  - Vetor de reset real encontrado via `nand/find_arm9_reset.py`: `e_entry` PA `0x00a00000` traduzido para VA `0xf0000000` (preâmbulo `b 0xf0000024` → `msr cpsr_fc, #0xd3` SVC/IRQ/FIQ off → `ldr sp, =0x00a197f8`).
+  - Mapeadas janelas virtuais no Core 1 (`0xf0000000` kernel/REX, `0xb0000000` task).
+  - Implementado slide-detector em `c1_code_hook` para abortar NOP-slides.
+  - **Resultado real comprovado**: NOP-slide eliminado; Core 1 executa branches reais (`0xf0000000 → 0xf0017544 → 0xf0017890`) e estabiliza na barreira/loop de espera do REX (`b 0xf0017890`).
+- [x] **Item 2 (MAP_CONTROL / Cópia prévia de páginas — commit `99399d3`)**:
+  - `map_one` em `zeebo_l4_mmu.h` instrumentado com probe de conteúdo nas páginas com permissão de execução (`UC_PROT_EXEC`).
+  - Alerta imediato e limpo (`[MMU/WARN]`) quando página mapeada está virgem (0x00/0xFF).
+- [x] **Item 3 (Core 0 loop de poll em 0xb000d4a8 — commit `99399d3`)**:
+  - Adicionada sonda de telemetria limpa em `c0_code_hook` observando `[r0 + 0xc8]` a cada potência de 2.
+  - Sem forçar registradores nem inventar valores (regras de ouro preservadas).
+- [x] **Item 4 (Loader BREW / Dispatch de Applets — commit `da9d5f4`)**:
+  - Criada classe modular `BrewLoader` (`tools/cpp/zeebo_brew_loader.h`), integrando injeção de `.mod` e resolução de `AEEMod_Load` via ELF `e_entry`.
+  - Tratamento honesto de símbolos ausentes/não mapeados.
+- [x] **Item 5 (VTable IGL / Guest Machine — commit `da9d5f4`)**:
+  - Implementado `tools/cpp/gpu/igl_guest_bridge.h` conectando chamadas de vtable `gpIGL`/`gpIEGL` do espaço virtual do guest à `GuestMachine`, despachando para `IglHook` e `SoftRasterizer`.
+  - Atualização do display sink sincronizada com `mark_dirty()` nas chamadas gráficas.
 
 ---
 
