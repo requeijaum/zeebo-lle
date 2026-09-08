@@ -36,6 +36,12 @@ constexpr u32 RGB=0x1907, RGBA=0x1908, USHORT_565=0x8363;
 constexpr u32 TEXTURE_2D=0x0de1, DEPTH_TEST=0x0b71, BLEND=0x0be2,
               ALPHA_TEST=0x0bc0, CULL_FACE=0x0b44, TEXTURE0=0x84c0;
 constexpr u32 ATITC_RGB=0x8C92, ATITC_RGBA=0x8C93;
+// Alpha/depth comparison enum range (GLES1 §4.1.4): NEVER..ALWAYS are contiguous.
+constexpr u32 NEVER=0x0200, ALWAYS=0x0207;
+// Texture sampler pnames + the implemented (non-mipmap) params (GLES1 §3.7.4).
+constexpr u32 TEXTURE_MAG_FILTER=0x2800, TEXTURE_MIN_FILTER=0x2801,
+              TEXTURE_WRAP_S=0x2802, TEXTURE_WRAP_T=0x2803;
+constexpr u32 NEAREST=0x2600, LINEAR=0x2601, REPEAT=0x2901, CLAMP_TO_EDGE=0x812F;
 inline int type_size(u32 t){ switch(t){case BYTE:case UBYTE:return 1;
     case SHORT:case USHORT:return 2; case FLOAT:case FIXED:return 4; default:return 4;} }
 inline Prim to_prim(u32 mode){ switch(mode){case POINTS:return Prim::Points;

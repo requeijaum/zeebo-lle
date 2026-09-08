@@ -6,6 +6,7 @@
 // byte/short -> float host), lida SÓ no draw (VAs guardados como VA guest).
 #include "igl_hook.h"
 #include <cstring>
+#include <algorithm>
 
 namespace zeebo::gpu {
 
@@ -135,13 +136,41 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         return true;
     }
     if(slot==glDepthFunc){ state_.depth_func=gm.arg(0); return true; }
-    if(slot==glAlphaFuncx){ state_.alpha_func=gm.arg(0);
-        state_.alpha_ref=fixed_to_float(gm.arg(1)); return true; }
+    if(slot==glAlphaFuncx){                       // glAlphaFuncx(func, GLfixed ref)
+        const u32 func=gm.arg(0);
+        // Validate the comparison enum. An invalid func must NOT mutate render
+        // state and must fall through (return false) so the real firmware/wrapper
+        // path runs — never fabricate a permissive ALWAYS.
+        if(func<glenum::NEVER || func>glenum::ALWAYS) return false;
+        // GLES1 §3.6.5: the reference value is CLAMPED to [0,1].
+        state_.alpha_func=func;
+        state_.alpha_ref=std::clamp(fixed_to_float(gm.arg(1)),0.0f,1.0f);
+        return true;
+    }
     if(slot==glCullFace){ state_.cull_face=gm.arg(0); return true; }
     if(slot==glTexParameterx){                   // glTexParameterx(target,pname,param)
         if(gm.arg(0)!=glenum::TEXTURE_2D) return false;
+        const u32 pname=gm.arg(1), param=gm.arg(2);
+        // Validate (pname,param) before touching sampler state. An invalid combo
+        // must NOT silently mutate the sampler and must fall through (false) to
+        // the firmware path. See MIN/LOD limitation note in the header.
+        switch(pname){
+            case glenum::TEXTURE_MAG_FILTER:
+                if(param!=glenum::NEAREST && param!=glenum::LINEAR) return false;
+                break;
+            case glenum::TEXTURE_MIN_FILTER:
+                // Only the non-mipmap filters are implemented (no minification/LOD
+                // pipeline). Mipmap min filters are rejected, not silently reduced.
+                if(param!=glenum::NEAREST && param!=glenum::LINEAR) return false;
+                break;
+            case glenum::TEXTURE_WRAP_S:
+            case glenum::TEXTURE_WRAP_T:
+                if(param!=glenum::REPEAT && param!=glenum::CLAMP_TO_EDGE) return false;
+                break;
+            default: return false;               // unknown pname: firmware path
+        }
         const u32 unit=std::min<u32>(state_.active_unit,1);
-        rast_.tex_parameter(unit,gm.arg(1),gm.arg(2));
+        rast_.tex_parameter(unit,pname,param);
         return true;
     }
     if(slot==glDepthMask){ state_.depth_write=gm.arg(0)!=0; return true; }

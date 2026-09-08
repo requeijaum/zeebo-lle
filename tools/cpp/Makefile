@@ -66,10 +66,10 @@ test-bootinfo-real: zeebo_bootinfo_harness
 
 # GPU subsystem (tools/cpp/gpu/) — build isolado + verificação por framebuffer.
 gpu:
-	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke igl_guest_bridge_test
+	$(MAKE) -C gpu -f Makefile.gpu gpu_smoke igl_smoke gpu_display_integration igl_transform_smoke igl_guest_bridge_test gl_quickwins_smoke gl_alpha_sampler_smoke
 
 test-gpu: gpu
-	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke && ./igl_guest_bridge_test
+	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke && ./igl_guest_bridge_test && ./gl_quickwins_smoke && ./gl_alpha_sampler_smoke
 
 # Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
 # sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em
