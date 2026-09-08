@@ -21,6 +21,9 @@
 #include <unordered_set>
 #include <memory>
 #include <algorithm>
+#include <chrono>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <SDL2/SDL.h>
 #include <unicorn/unicorn.h>
 
@@ -484,7 +487,7 @@ public:
     // SDL2 (SDL_RenderPresent) na janela de 640x480.
     // Retorna a soma dos pixels do framebuffer (prova numérica do pipeline).
     // Em GUI, mantém a janela aberta apresentando o frame até SDL_QUIT.
-    unsigned long long run_zwheel_preview(bool headless) {
+    unsigned long long run_zwheel_preview(bool headless, const std::string& dump_frames_dir = "") {
         printf("[Z-Wheel] Preview: dirigindo o ciclo gráfico (slot 10/0x28, arg=1) "
                "pelo SoftRasterizer → SDL2 640x480...\n");
         if (!rast_) {
@@ -507,20 +510,14 @@ public:
         if (fb && sink_) sink_->update_frame(fb);
 
         // Salva frame em PPM para inspeção direta de imagem
-        {
-            FILE* f = fopen("/tmp/zeebo_zwheel_frame.ppm", "wb");
-            if (f) {
-                fprintf(f, "P6\n%d %d\n255\n", FB_WIDTH, FB_HEIGHT);
-                for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
-                    u16 p = fb ? fb[i] : 0;
-                    u8 r = ((p >> 11) & 0x1f) * 255 / 31;
-                    u8 g = ((p >> 5) & 0x3f) * 255 / 63;
-                    u8 b = (p & 0x1f) * 255 / 31;
-                    fputc(r, f); fputc(g, f); fputc(b, f);
-                }
-                fclose(f);
-                printf("[Z-Wheel] Frame dump salvo em: /tmp/zeebo_zwheel_frame.ppm\n");
-            }
+        save_ppm(fb, "/tmp/zeebo_zwheel_frame.ppm");
+        printf("[Z-Wheel] Frame dump salvo em: /tmp/zeebo_zwheel_frame.ppm\n");
+
+        if (!dump_frames_dir.empty()) {
+            char p[512];
+            snprintf(p, sizeof(p), "%s/frame_000000.ppm", dump_frames_dir.c_str());
+            save_ppm(fb, p);
+            printf("[Dump] Frame 0 salvo em: %s\n", p);
         }
 
         if (headless) {
@@ -531,8 +528,17 @@ public:
         printf("[Z-Wheel] Janela SDL2 ativa — apresentando frame. Feche a janela ou "
                "pressione ESC/Q para sair.\n");
         bool run = true;
+        auto t_start = std::chrono::steady_clock::now();
+        auto t_last = t_start;
+        uint64_t frames = 0;
         while (run) {
             if (fb && sink_) sink_->update_frame(fb); // re-apresenta (RenderPresent)
+            frames++;
+            if (!dump_frames_dir.empty() && frames < 60) {
+                char p[512];
+                snprintf(p, sizeof(p), "%s/frame_%06llu.ppm", dump_frames_dir.c_str(), (unsigned long long)frames);
+                save_ppm(fb, p);
+            }
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) { run = false; break; }
@@ -542,18 +548,54 @@ public:
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            auto now = std::chrono::steady_clock::now();
+            double elapsed_sec = std::chrono::duration<double>(now - t_last).count();
+            if (elapsed_sec >= 1.0) {
+                double total_sec = std::chrono::duration<double>(now - t_start).count();
+                double fps = (double)frames / total_sec;
+                printf("[GUI/Telemetry] FPS: %.1f | frames=%llu | tempo=%.1fs\n",
+                       fps, (unsigned long long)frames, total_sec);
+                t_last = now;
+            }
         }
         return sum;
     }
 
-    void run_interleaved(int cycles, int slice_insns) {
+    static bool save_ppm(const u16* fb, const std::string& path) {
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f) return false;
+        fprintf(f, "P6\n%d %d\n255\n", FB_WIDTH, FB_HEIGHT);
+        for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+            u16 p = fb ? fb[i] : 0;
+            u8 r = ((p >> 11) & 0x1f) * 255 / 31;
+            u8 g = ((p >> 5) & 0x3f) * 255 / 63;
+            u8 b = (p & 0x1f) * 255 / 31;
+            fputc(r, f); fputc(g, f); fputc(b, f);
+        }
+        fclose(f);
+        return true;
+    }
+
+    void run_interleaved(int cycles, int slice_insns, double max_seconds = 0.0, bool show_fps = false, const std::string& dump_frames_dir = "") {
         printf("[System] Beginning interleaved execution: %d cycles x %d insns...\n", cycles, slice_insns);
 
         // Framebuffer video buffer for host display sink (640x480 RGB565)
         std::vector<u16> fb_buffer(FB_WIDTH * FB_HEIGHT, 0x0010); // Dark navy backdrop
+        auto start_time = std::chrono::steady_clock::now();
+        auto last_telemetry_time = start_time;
+        uint64_t last_c0_insns = core0_.insns;
+        uint64_t last_c1_insns = core1_.insns;
+        uint64_t total_rendered_frames = 0;
 
         int c = 0;
-        while (!quit_requested_ && (c < cycles || control_ != nullptr)) {
+        while (!quit_requested_ && (c < cycles || control_ != nullptr || max_seconds > 0.0)) {
+            auto now = std::chrono::steady_clock::now();
+            double total_elapsed = std::chrono::duration<double>(now - start_time).count();
+            if (max_seconds > 0.0 && total_elapsed >= max_seconds) {
+                printf("[System] Reached maximum requested time (%.2f s). Halting.\n", total_elapsed);
+                break;
+            }
+
             // Drain and process remote debugging IPC commands
             if (control_) {
                 auto reqs = control_->Drain();
@@ -600,11 +642,12 @@ public:
             // Update display sink if GPU or MDDI marked dirty / drawn
             if (gpu_ && gpu_->is_fb_dirty()) {
                 gpu_->clear_fb_dirty();
+                const u16* cur_fb = nullptr;
                 if (rast_) {
                     rast_->end_frame();
-                    const u16* rgb565_src = rast_->framebuffer_rgb565();
-                    if (rgb565_src) {
-                        sink_->update_frame(rgb565_src);
+                    cur_fb = rast_->framebuffer_rgb565();
+                    if (cur_fb) {
+                        sink_->update_frame(cur_fb);
                     }
                 } else {
                     // Fallback test pattern
@@ -614,9 +657,31 @@ public:
                             fb_buffer[y * FB_WIDTH + x] = col;
                         }
                     }
-                    sink_->update_frame(fb_buffer.data());
+                    cur_fb = fb_buffer.data();
+                    sink_->update_frame(cur_fb);
                 }
+                total_rendered_frames++;
                 printf("[Display/Sink] Rendered active video frame %u (Adreno draws=%u)\n", c, gpu_->draws());
+                if (!dump_frames_dir.empty() && cur_fb) {
+                    char p[512];
+                    snprintf(p, sizeof(p), "%s/frame_%06llu.ppm", dump_frames_dir.c_str(), (unsigned long long)total_rendered_frames);
+                    save_ppm(cur_fb, p);
+                }
+            }
+
+            // Telemetria de FPS e MIPS periódica
+            double telemetry_elapsed = std::chrono::duration<double>(now - last_telemetry_time).count();
+            if (show_fps && telemetry_elapsed >= 1.0) {
+                uint64_t d_c0 = core0_.insns - last_c0_insns;
+                uint64_t d_c1 = core1_.insns - last_c1_insns;
+                double mips_c0 = (double)d_c0 / (telemetry_elapsed * 1000000.0);
+                double mips_c1 = (double)d_c1 / (telemetry_elapsed * 1000000.0);
+                double fps = (double)total_rendered_frames / (total_elapsed > 0 ? total_elapsed : 1.0);
+                printf("[Telemetry] t=%.1fs | C0=%.2f MIPS (pc=0x%08x) | C1=%.2f MIPS (pc=0x%08x) | Video FPS=%.2f (quadros=%llu)\n",
+                       total_elapsed, mips_c0, core0_.entry, mips_c1, core1_.entry, fps, (unsigned long long)total_rendered_frames);
+                last_telemetry_time = now;
+                last_c0_insns = core0_.insns;
+                last_c1_insns = core1_.insns;
             }
 
             // Process SDL events if window is open
@@ -2019,21 +2084,67 @@ public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };
 
+static void print_usage(const char* prog) {
+    printf("===================================================================\n");
+    printf("ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine\n");
+    printf("Clean-room Low-Level Emulator (ARM11 APPS + ARM9 AMSS + Adreno 130)\n");
+    printf("===================================================================\n\n");
+    printf("Uso:\n");
+    printf("  %s [opções] [nand.bin] [apps.bin] [amss.bin]\n", prog);
+    printf("  %s run <arquivo.mod> [opções]\n\n", prog);
+    printf("Opções de Execução e Boot:\n");
+    printf("  --boot-appmgr              Força o boot no BREW Appmgr (FIRSTAPP:0, padrão jailbreak)\n");
+    printf("  --boot-zwheel              Força o boot na Z-Wheel / ZeeboApp (FIRSTAPP:3, padrão fábrica)\n");
+    printf("  --applet=<caminho.mod>     Carrega e injeta aplicativo BREW (.mod) externamente\n");
+    printf("  run <caminho.mod>          Atalho estilo Zeebx para executar applet BREW direto\n");
+    printf("  --cycles=<N>               Número de ciclos intercalados (padrão: 250)\n");
+    printf("  --slice=<N>                Instruções por fatia de ciclo por core (padrão: 10000)\n");
+    printf("  --seconds=<N>              Tempo máximo de execução em segundos reais (0 = ilimitado)\n");
+    printf("\nOpções Gráficas e Telemetria:\n");
+    printf("  --gui, -g, --window        Abre janela interativa SDL2 (640x480 RGB565)\n");
+    printf("  --headless                 Execução em console sem abrir janela gráfica (padrão)\n");
+    printf("  --fps                      Exibe estatísticas contínuas: FPS, MIPS de C0 e C1\n");
+    printf("  --dump-frames=<DIR>        Exporta sequência contínua de frames em PPM para <DIR>\n");
+    printf("  --zwheel-preview           Abre preview interativo do pipeline gráfico da Z-Wheel\n");
+    printf("  --zwheel-preview-headless  Testa preview gráfico em modo headless (para CI)\n");
+    printf("\nOpções de Debug e Controle:\n");
+    printf("  --control-port=<PORTA>     Habilita servidor de controle remoto/debug na porta TCP\n");
+    printf("  --help, -h                 Exibe este menu de ajuda e opções\n\n");
+}
+
 int main(int argc, char** argv) {
     const char* nand_path = "../../nand/1.1.2.bin";
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
     std::string applet_path = "";
+    std::string dump_frames_dir = "";
     bool headless = true;
     bool zwheel_preview = false;
+    bool show_fps = false;
     int control_port = 0;
+    int cycles = 250;
+    int slice_insns = 10000;
+    double max_seconds = 0.0;
+    int boot_firstapp = 0; // 0 = BREW Appmgr (padrão jailbreak), 3 = Z-Wheel (fábrica)
 
+    // Processa argumentos de linha de comando
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--gui" || arg == "-g") {
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else if (arg == "run" && i + 1 < argc) {
+            applet_path = argv[++i];
+        } else if (arg == "--gui" || arg == "-g" || arg == "--window") {
             headless = false;
         } else if (arg == "--headless") {
             headless = true;
+        } else if (arg == "--fps") {
+            show_fps = true;
+        } else if (arg == "--boot-appmgr") {
+            boot_firstapp = 0;
+        } else if (arg == "--boot-zwheel") {
+            boot_firstapp = 3;
         } else if (arg == "--zwheel-preview") {
             zwheel_preview = true;
             headless = false; // preview interativo abre a janela SDL2
@@ -2044,16 +2155,33 @@ int main(int argc, char** argv) {
             control_port = std::stoi(arg.substr(15));
         } else if (arg.rfind("--applet=", 0) == 0) {
             applet_path = arg.substr(9);
-        } else if (i == 1 && arg[0] != '-') {
-            nand_path = argv[1];
-        } else if (i == 2 && arg[0] != '-') {
-            apps_path = argv[2];
-        } else if (i == 3 && arg[0] != '-') {
-            amss_path = argv[3];
+        } else if (arg.rfind("--dump-frames=", 0) == 0) {
+            dump_frames_dir = arg.substr(14);
+        } else if (arg.rfind("--cycles=", 0) == 0) {
+            cycles = std::stoi(arg.substr(9));
+        } else if (arg.rfind("--slice=", 0) == 0) {
+            slice_insns = std::stoi(arg.substr(8));
+        } else if (arg.rfind("--seconds=", 0) == 0) {
+            max_seconds = std::stod(arg.substr(10));
+        } else if (arg[0] != '-') {
+            if (nand_path == nullptr || std::string(nand_path) == "../../nand/1.1.2.bin") {
+                nand_path = argv[i];
+            } else if (apps_path == nullptr || std::string(apps_path) == "../../nand/1.1.2_APPS.bin") {
+                apps_path = argv[i];
+            } else if (amss_path == nullptr || std::string(amss_path) == "../../nand/1.1.2_AMSS.bin") {
+                amss_path = argv[i];
+            }
         }
     }
 
+    if (!dump_frames_dir.empty()) {
+        mkdir(dump_frames_dir.c_str(), 0777);
+    }
+
     printf("[System] Mode: %s\n", headless ? "Headless (CLI/Test runner)" : "Interactive GUI (SDL2 Window 640x480 active)");
+    printf("[System] Boot target: %s (FIRSTAPP:%d)\n",
+           boot_firstapp == 0 ? "BREW Appmgr (Jailbreak default)" : "Z-Wheel / ZeeboApp (Factory default)",
+           boot_firstapp);
 
     ZeeboLLESystem sys;
     if (control_port > 0) {
@@ -2072,6 +2200,7 @@ int main(int argc, char** argv) {
 
     // Direct applet injection if requested
     if (!applet_path.empty()) {
+        printf("[Applet] Loading external applet into memory: %s\n", applet_path.c_str());
         if (!sys.load_applet(applet_path, 0x12000000)) {
             printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
         }
@@ -2080,7 +2209,7 @@ int main(int argc, char** argv) {
     // Passo 3 / Fase 13: modo de teste gráfico da Z-Wheel. Dirige o pipeline
     // SoftRasterizer → SDL2 e apresenta o frame RGB565 comprovado (slot 10/0x28).
     if (zwheel_preview) {
-        unsigned long long sum = sys.run_zwheel_preview(headless);
+        unsigned long long sum = sys.run_zwheel_preview(headless, dump_frames_dir);
         // Prova numérica: um clear azul de 640x480 tem de somar > 0 pixels.
         bool ok = (sum > 0ULL);
         printf("\n%s soma_pixels=%llu\n",
@@ -2090,8 +2219,8 @@ int main(int argc, char** argv) {
         return ok ? 0 : 1;
     }
 
-    // Run interleaved for 250 cycles of 10k instructions
-    sys.run_interleaved(250, 10000);
+    // Run interleaved for requested cycles or duration
+    sys.run_interleaved(cycles, slice_insns, max_seconds, show_fps, dump_frames_dir);
 
     return 0;
 }
