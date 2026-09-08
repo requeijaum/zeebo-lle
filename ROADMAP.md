@@ -256,16 +256,26 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - `274755` (Z-Wheel / ZeeboApp, CLSID `0x01070798`): bloco indireto `@0x3a92000`, 64 KiB, FNV-1a `0x544a6f30`, assinatura ASCII `"274755"`.
     - `tectoy.mod`: bloco indireto `@0x6026200`, 64 KiB, FNV-1a `0xf7c3c740`, assinatura ASCII `"tectoy.claro.com.br"`, dirent `inode=0x7ff13, parent=0x1fae8`.
   - Harness `test_efs2_fs.cpp` expandido de 18 para **31/31 testes PASS**. Suíte completa verde.
-- [ ] **Passo 8: Handoff Iguana OS → Servidores de Usuário / Diagnóstico de Granularidade de FPage**:
-  - Diagnóstico da Task 1/2: em `mempool_init`, a rotina de decomposição de fpages (`0xb000d4dc` $\rightarrow$ `0xb000d464`) lê os descritores de memória e calculou um `size_log2` nulo para o granule de pool, impedindo o avanço de `r4` (`0xb000d6dc: add r4, r4, r0`). Necessário ajustar o retorno de `min_pagesize` / descritores KIP para que o split gere fpages válidas.
+- [x] **Passo 8: Diagnóstico Preciso da Rotina de FPage e Mempool (Concluído `645f332` / Análise)**:
+  - Desmistificado `0xb000d4a8`: não se trata de loop de polling de produtor externo, mas de rotina determinística `l4e_min_pagesize()` / CTZ (*Count Trailing Zeros*) que varre `KIP[0xc8]` (`PageInfo = 0x01111006`) e calcula `log2(min_pagesize) = 12` (páginas de 4 KiB), armazenando em `0xb0041284`.
+  - Causa raiz do travamento em `mempool_init`: a rotina de decomposição `0xb000d4dc` itera aumentando `size_log2` a partir de 12. Quando os limites virtual e físico repassados via BootInfo (`0xb0d00000`) não estão estritamente alinhados ou extrapolam a memória convencional, a rotina não encontra uma fpage cobrindo o bloco, resultando em avanço nulo `r0 = 0` em `0xb000d6dc: add r4, r4, r0` e prendendo o loop.
+- [ ] **Passo 9: Alinhamento de Memória BootInfo/KIP e Conclusão de `mempool_init` (Em Andamento)**:
+  - Ajustar descritores de memória e alinhamentos de pools em `__okl4_bootinfo` (`0xb0d00000`) e na KIP para que o gerador de fpages retorne tamanhos estritamente positivos ($\ge 4$ KiB).
+  - Permitir avanço do Core 0 para o spawn dos primeiros threads de espaço de usuário (Iguana naming service / pager).
+- [ ] **Passo 10: Despacho Automático AEECShell para Applets EFS2**:
+  - Conectar os applets extraídos do catálogo (`reksio.mod`, `274755`, `tectoy.mod`) ao fluxo de inicialização e ciclo de eventos contínuos do orquestrador.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 8 (Handoff Iguana OS → AEECShell / Z-Wheel)**:
-   - Sincronizar o avanço dos servidores Iguana com o loop contínuo de eventos do Core 0 e Core 1.
-   - Ativar o despacho do `AEECShell` para consumo automático dos applets extraídos do EFS2.
+1. **Passo 9 (Alinhamento de Memória BootInfo/KIP para Conclusão de `mempool_init`)**:
+   - Ajustar as faixas de memória virtual e física passadas ao Iguana no segmento `0xb0d00000` e na KIP (`0xf0f00000`), garantindo alinhamento compatível com o particionador de fpages (`0xb000d4dc`).
+   - Validar com `--cycles=150` que `r4` avança até o limite superior do pool (`r7 = 0xb6d00000`), saindo de `mempool_init`.
+
+2. **Passo 10 (Handoff e Despacho de Applets EFS2 via AEECShell)**:
+   - Sincronizar o término do setup do Iguana com o ponto de despacho do `AEECShell` (`0x10c874f4`).
+   - Automatizar a carga e ciclo de eventos dos applets provados do catálogo EFS2.
 
 ---
 
