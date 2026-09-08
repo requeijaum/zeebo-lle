@@ -246,20 +246,22 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Em `handle_map_control`, os descritores processados agora são gravados de volta no UTCB (`MR[i*2] = phys_desc`, `MR[i*2+1] = fpage`), atendendo à convenção do Iguana OS/OKL4.
   - O Core 0 agora avança além de `0xb000d860`: o laço `mempool_init` itera com múltiplos VAs (`0x00000000`, `0xb0d00000`, etc.), progredindo a execução interfolheada (60 ciclos completos sem travamento em `0xb000d860`).
   - Suíte completa de testes verde (exit 0).
-- [ ] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader (Em Andamento)**:
-  - Integrando o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
-  - Adicionando flags CLI `--efs2-ls` e `--efs2-run` para catalogar e carregar applets diretamente da partição EFS2 da NAND.
+- [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader (Concluído `f1b03fa`)**:
+  - Integrado o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
+  - Adicionado `BrewLoader::inject_bytes()` em `tools/cpp/zeebo_brew_loader.h` para injeção de payloads materializados direto da memória.
+  - Implementados métodos `ZeeboLLESystem::efs2_ls()`, `efs2_extract()` e `load_applet_from_efs2()`: varrem os 69.634 dirents da partição `0:EFS2APPS` (`0x3220000`), resolvem dirents por `(parent_inode, name)` e extraem a cadeia de clusters do bloco indireto, injetando via `BrewLoader`.
+  - Adicionadas flags CLI `--efs2-ls[=filtro]` (lista dirents, ex: `.mod`) e `--efs2-run=<arquivo>` (extrai e injeta em Core 0).
+  - Extração comprovada por bytes reais do dump: `reksio.mod` extraído (64 KiB, bloco indireto `0x3b1d400`, FNV-1a idêntico `0xd9339103`). Suíte verde.
+- [ ] **Passo 8: Handoff Iguana OS → Servidores de Usuário / AEECShell**:
+  - Investigar e implementar o progresso do Iguana OS após a inicialização de pools de memória até a instanciação dos servidores de arquivos e tarefas de usuário.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 7 (Conclusão da Integração EFS2 / Carregador de Applets)**:
-   - Finalizar a integração de `efs2::Efs2Filesystem` no `ZeeboLLESystem`.
-   - Disponibilizar `--efs2-ls` para inspeção da partição e `--efs2-run` para despacho via `BrewLoader`.
-
-2. **Passo 8 (Handoff Iguana OS → AEECShell / Z-Wheel)**:
+1. **Passo 8 (Handoff Iguana OS → AEECShell / Z-Wheel)**:
    - Sincronizar o avanço dos servidores Iguana com o loop contínuo de eventos do Core 0 e Core 1.
+   - Ativar o despacho do `AEECShell` para consumo automático dos applets extraídos do EFS2.
 
 ---
 
