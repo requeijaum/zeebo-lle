@@ -234,15 +234,19 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
 1. **Passo 2 (Parser C++ EFS2APPS `zeebo_efs2_fs.h` e Extração via OOB Spare)**:
-   - Layout comprovado: páginas de 2.112 B no `1.1.2_spare.bin` divididas em 4 codewords de 528 B (512 B dados + 16 B spare).
-   - O VFS do EFS2 reside em `0:EFS2APPS` (`0x3220000` em diante), enquanto os binários centrais e strings do Appmgr (`fs:/mif/brewappmgr.mif`) estão embutidos diretamente no ELF de `0:APPS` (`0x1cc0000`–`0x3220000`).
-   - Implementar leitor C++ que mapeia os dirents e extrai os assets/configurações da Z-Wheel (`274755`, `tectoy.cfg`, `.qxt`, `.qxm`).
+   - Layout físico comprovado no `1.1.2_spare.bin`: 2.112 B/página divididos em 4 codewords de 528 B (512 B dados + 16 B spare/ECC).
+   - O VFS COW do EFS2 reside em `0:EFS2APPS` (`0x3220000` em diante), enquanto os binários executáveis e recursos do Appmgr (`fs:/mif/brewappmgr.mif`, `appmgrls.bar`) residem embutidos no ELF da partição `0:APPS` (`0x1cc0000`–`0x3220000`).
+   - Implementar leitor C++ que correlaciona os dirents da Z-Wheel (`274755`, `tectoy.cfg`, `.qxt`, `.qxm`, `.qxa`) com a cadeia de extents no spare.
    - Adicionar alvo `test-efs2-fs` ao Makefile comprovando a extração dos arquivos com checksum real.
 
 2. **Passo 5 (Execução Contínua de Jogos Externos e Despacho de Applet via `AEECShell`)**:
    - Conectar o manipulador do `BrewLoader` carregado via `--applet` ou `run <app.mod>` ao laço de eventos contínuo do SDL2.
    - Fornecer mapeamento das teclas do Z-Pad (`INT_KEYSENSE #28`) para os eventos BREW (`EVT_KEY_PRESS`, `EVT_KEY_RELEASE`) permitindo que applets interativos executem draws contínuos além do primeiro frame de clear.
    - Validar a telemetria com contadores contínuos de FPS e MIPS durante a execução interativa.
+
+3. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
+   - Com o `L4_MapControl` tratado (sem crash de 4GB), diagnosticar o wait do produtor L4e em `0xb000d4a8` (`l4e_min_pagesize`/mailbox).
+   - Conectar a troca de IPC entre Iguana e o servidor de VFS nativo para alcançar o ponto de carga do executável do sistema.
 
 ---
 
