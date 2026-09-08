@@ -241,16 +241,16 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Suporte a leitura de clusters de dados de 512B (`0x3220000 + cluster*512`) e resolução encadeada de blocos indiretos `u32` com terminador `0xFFFFFFFF`.
   - Criado harness `tools/cpp/test_efs2_fs.cpp` e alvo `test-efs2-fs` no Makefile.
   - Provado por bytes reais do dump: 69.634 dirents recuperados; dirent `reksio.mod` em `0x32606ef` validado (inode `0x265e4`, reclen 15, parent `0x4abef`); cluster `0x6d11` verificado com FNV-1a `0xa0f4d11f`; bloco indireto em `0x3b1d400` encadeado para 128 clusters (64 KiB) com FNV-1a `0xd9339103`. 18/18 testes PASS.
-- [ ] **Passo 6: Avanço do Boot User-space no Iguana OS / Core 0 (Em Andamento)**:
-  - Com o `L4_MapControl` tratado (commit `6fe15b6`), investigando o laço de polling do Iguana em `0xb000d4a8` lendo a KIP (`0xf0f00000 + 0xc8`).
+- [ ] **Passo 6: Diagnóstico e Avanço do Boot User-space no Iguana OS / Core 0 (Em Andamento)**:
+  - Diagnóstico concluído: o laço `0xb000d4a8` foi superado pelo init da KIP (`47d6e6c`). O ponto de bloqueio atual está em `0xb000d860` (`L4_MapControl` chamado por `mempool_init`): a rotina espera que a syscall devolva os descritores atualizados em `MR[0]` e `MR[1]` no UTCB (`0xff000ff0`) para calcular o avanço do pool (`0xb000d868: ldr r2, [r1, #0x44]`). Sem a escrita de retorno nos MRs, o ponteiro de pool não avança.
 
 ---
 
 ## Próximos Passos Priorizados (Plano de Ação Replanejado)
 
-1. **Passo 6 (Avanço do Boot User-space no Iguana OS / Core 0)**:
-   - Identificar a semântica exata de sincronização/interrupção esperada pelo Core 0 no laço `0xb000d4a8`.
-   - Permitir que os servidores do Iguana OS progridam até o handoff para o loader de ELF/VFS.
+1. **Passo 6 (Escrever Retorno nos MRs do UTCB em `L4_MapControl`)**:
+   - Atualizar `handle_map_control` em `tools/cpp/zeebo_l4_mmu.h` para gravar o resultado da fpage mapeada/controlada de volta em `MR[0]` e `MR[1]` (`utcb_base + 0x40/0x44`).
+   - Testar o avanço do `mempool_init` além de `0xb000d860` até o próximo estágio de carga de servidores.
 
 2. **Passo 7 (Integração VFS EFS2 com Iguana / BREW Loader)**:
    - Conectar o parser `efs2::Efs2Filesystem` aos hooks de VFS para carregar dinamicamente assets e `.mod` diretamente da NAND sem depender de injeção em memória estática.
