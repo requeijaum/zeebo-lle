@@ -1699,3 +1699,55 @@ Revisados os artefatos gerados por outros agentes e integrados ao build canônic
 - **QDSP5**: apenas plano codificado em `QDSP5_TODO.md` — comando-plane mapeado (dispatcher `0x16e8cba0`, 4 engines), data plan ausente. `UnifiedAudioSink` existe mas não consome packets.
 - **Bloqueio a montante inalterado**: HashMap MAP_CONTROL (FINDINGS 5a) impede execução real de guest, logo `GuestMachine` não liga ao Unicorn e nada submete GL/áudio à vtable. Integração GPU/QDSP5 = build + provas de framebuffer antes de abrir a porta; abrir a porta é o MAP_CONTROL.
 
+
+## 2026-09-08 — Diagnóstico integrado Core0↔Core1: poll 0xb000d4a8 e barreira 0xf0017890
+
+### Execução real (`./tools/cpp/zeebo_lle_main --headless`, 250 ciclos x 10k insns)
+- **Core0 (ARM11)** entra e permanece no poll `0xb000d4a8` a partir de ~cycle 20
+  (pc oscila d4a8/d4b0/d4b8 = corpo do loop). Telemetria observada (sem forçar bits):
+  - `r0 = 0xf0f00000` → **é o KIP (Kernel Interface Page)**, não um descriptor SMD/SMEM.
+  - `[r0+0xc8] = 0x00000000` constante em TODAS as iterações (1 → 262144+).
+  - `r2(mask)=0, bit0=0` — nunca é satisfeito. Ninguém escreve em `KIP+0xc8`.
+- **Core1 (ARM9/REX)** sai do reset (0xf0000000), corre até `0xf0017544` (cycle 0),
+  e no cycle 1 já está **preso em `0xf0017890` para sempre**.
+
+### Disassembly de 0xf0017890 (seg1 VA 0xf0000000 = file off 0x8000; foff=0x1f890)
+```
+f0017890  b  0xf0017890   <-- self-loop (eafffffe)  == BARREIRA
+f0017894  b  0xf0017894   <-- segundo self-loop (trap adjacente)
+```
+- **NÃO é spinlock de handshake, SMSM, ProcComm ou espera de IRQ do Core0.**
+  É um **panic/dead-loop local do REX** (padrão `b .`). Só há UM branch externo que
+  cai nele: `f001756c: beq 0xf0017890`, precedido por:
+  ```
+  f0017560  mov  r1, r6
+  f0017564  bl   0xf0017448      ; procura um descriptor
+  f0017568  cmn  r0, #1          ; r0 == -1 ?
+  f001756c  beq  0xf0017890      ; se falhou -> panic
+  ```
+- `0xf0017448` varre uma tabela de descriptors (literais `0x00024000` / `0x000241f0`,
+  campo `[base+0x54]` = count, entradas de 8 bytes, nibble low `&0xf==0xf`), retorna
+  índice ou **-1 se não achar**. A rotina que a chama (`f00175xx`) é setup de MMU/MPU
+  do REX (loops de 1MB: `r4 += 0x100000`, `cmp r7,r4`, seções de region-attributes).
+- Conclusão: o Core1 **falha durante o próprio bring-up de memória do REX** (descriptor
+  de região não encontrado no nosso mapa de RAM/estado inicial) e cai no `b .`. É uma
+  falha INTERNA do Core1, **anterior a qualquer IPC com o Core0** — não há SMEM/MMIO de
+  handshake envolvido nesta barreira específica.
+
+### Relação com o poll do Core0
+- São **dois deadlocks independentes**, não um handshake mútuo:
+  1. Core1 morre no REX MMU-setup (0xf0017890) → nunca chega a rodar SMD/SMSM.
+  2. Core0 espera `KIP(0xf0f00000)+0xc8` bit0 — que **não é** um mailbox do Core1;
+     é um campo do KIP que deveria ser inicializado pelo microkernel/Iguana local do
+     Core0, não pelo modem. O produtor real NÃO é o Core1 REX.
+- Portanto, "destravar naturalmente" o Core0 forçando o Core1 é um beco: o bit em
+  KIP+0xc8 tem outro produtor. Confirmado que `r0` aponta pra KIP, não pra descriptor
+  SMD (a hipótese `[descriptor+0xc8]` do comentário do código está incorreta — é KIP).
+
+### Próximos passos propostos (fail-fast, sem fake progress)
+1. Core1: instrumentar `0xf0017448` (parâmetros r0/r1, base da tabela em 0x00024000)
+   para ver qual descriptor de região o REX procura e falta no estado inicial — provável
+   que precise ser semeado por um passo de bootloader do modem (AMSS OEMSBL/partition
+   table) que ainda não emulamos.
+2. Core0: identificar quem deveria escrever `KIP+0xc8` bit0 (rastrear no APPS.bin quem
+   referencia 0xf0f000c8) — é estado do microkernel local, não do Core1.
