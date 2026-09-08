@@ -116,21 +116,41 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Incorporar padrão de Save State Dual-Core (`ZeeboSaveStateManager` em `zeebo_save_state.h`) capturando CPU Unicorn context (`uc_context_save`) + regiões mapeadas de memória física/compartilhada.
 - [x] Incorporar mixer de áudio multi-stream (`UnifiedAudioSink` em `zeebo_audio_sink.h`) com controle de canais e vtable HLE/LLE limpa evitando problemas de ciclo de vida e interworking.
 
-### Fase 9: Subsistema Gráfico (Adreno 130 / IGL) — integrado ao build, aguardando MAP_CONTROL
+### Fase 9: Subsistema Gráfico (Adreno 130 / IGL) — acoplamento LLE e rasterização
 - [x] Evidência de firmware (GPU_TODO §13): 3D é offload MPU→QDSP5 atrás de fachada OpenGL ES 1.1 ATI-Imageon; **não há ring buffer PM4 A2xx observável do lado ARM11** → descartar `pm4_adreno.h` como produtor (mantido como referência de estudo §14).
 - [x] Esqueleto `IGpuRasterizer` (Citra-style) + 2 backends (software correto + GL host stub) + `rasterizer_factory`, verificado por framebuffer (`gpu_smoke` 3/3: clear, triângulo, pm4-walk).
 - [x] Produtor correto `IglHook` interceptando a vtable IGL/IEGL (80/28 slots, ABI ARMADILHA: R0=1º arg real) → `IGpuRasterizer`, verificado por framebuffer (`igl_smoke` 3/3; 40 slots gl* fixados contra gl_hle.cpp).
 - [x] **Integração no build do emulador** (`tools/cpp/Makefile`: targets `gpu`/`test-gpu`) + handoff GPU→display provado por pixels em PPM 640x480 RGB565 (`gpu_display_integration`: clear azul 0x001F e vermelho 0xF800), commit `1508115`.
 - [x] **Transform fixed-function (mvp+viewport)** implementado no `IglHook` (stacks modelview/projection, slots de matriz reais, aplicação obj→clip→NDC por vértice) + rasterizer respeitando viewport; verificado por PIXEL (`igl_transform_smoke` 2/2: triângulo desenha e `glTranslatex(+0.5)` o desloca 160px — antigo centro fica vazio, novo centro preenchido), commit `fbb094d`. `make test-gpu` = 10/10 PASS.
-- [ ] Ligar `GuestMachine` ao Unicorn no `zeebo_lle_main` (lado do core ARM) — só quando MAP_CONTROL destravar execução real de guest (bloqueio a montante, FINDINGS 5a). Sem isso, nenhuma applet submete GL à vtable.
-- [ ] Fase 2 restante: texturas/ATITC (`glTexImage2D`→upload, `glCompressedTexImage2D`→decode), multitexture+combine/dot3, backend GL host (ubershader).
+- [x] **Acoplamento do pipeline gráfico ao `zeebo_lle_main`**: `SoftRasterizer` e `IglHook` instanciados em `ZeeboLLESystem`. Framebuffer dirty do MDDI/Adreno 130 drena `rast_->end_frame()` diretamente para `sink_->update_frame(rgb565_src)` via textura SDL2 640x480 RGB565.
+- [x] **Entrada integrada de Gamepad e Teclado**: processamento de eventos `SDL_CONTROLLERBUTTONDOWN`/`UP` no `UnifiedInput` (`KEYPAD_BASE = 0xa9a00000`) para A, B, C, D, direcionais e Home, complementando o teclado.
+- [ ] Conectar os ponteiros de despacho global guest (`gpIGL`/`gpIEGL`) da vtable IGL à `GuestMachine` do `IglHook` no momento em que as tarefas BREW subirem.
+- [ ] Texturas/ATITC (`glTexImage2D`→upload, `glCompressedTexImage2D`→decode), multitexture+combine/dot3, backend GL host (ubershader).
 
-### Fase 10: Subsistema QDSP5 (multimídia) — comando mapeado, plano de integração
-- [x] Comando-plane mapeado (FINDINGS 2zz–3c): dispatcher `0x16e8cba0`, 4 task engines (VOICEPROC, VFE, JPEG, AUDPP), enfileiramento SMD/ONCRPC `0x17571748`, packet frame (+0x20 proc, +0x80 payload). Prioridade p/ jogos: **AUDPP ≫ JPEG > VFE > VOICE**.
-- [x] `UnifiedAudioSink` disponível (Fase 8) como mixer PCM — atualmente HLE/hand-fed, **não conectado aos packets QDSP5**.
-- [ ] Q0 (instrumentação): trapear o dispatcher e capturar proc-IDs reais (substituir placeholders `0x1b59`/`0x30000060`) — precisa execução de guest (bloqueio MAP_CONTROL).
-- [ ] Q1 (AUDPP→áudio): consolidar bridges SMD, parsear payload, dirigir `UnifiedAudioSink`, saída WAV/SDL, sintetizar resposta RPC+`rex_set_sigs` (senão o jogo trava em `rex_wait`). Estratégia recomendada: **Option B (RPC short-circuit)** — aguardando decisão de Rafael (documentada no QDSP5_TODO §4).
-- [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — após AUDPP.
+### Fase 10: Subsistema QDSP5 (Áudio e Multimídia) — acoplamento ONCRPC e streaming
+- [x] Comando-plane mapeado (FINDINGS 2zz–3c): dispatcher `0x16e8cba0`, 4 task engines (VOICEPROC, VFE, JPEG, AUDPP), enfileiramento SMD/ONCRPC `0x17571748`, packet frame (+0x20 proc, +0x80 payload).
+- [x] `UnifiedAudioSink` disponível (Fase 8) como mixer PCM multi-stream.
+- [x] **Acoplamento oficial do `Qdsp5Dispatcher` ao `UnifiedSMDBridge`**: IDs oficiais `prog::AUDMGR` (`0x30000013`) e `prog::ADSPRTOSATOM` (`0x3000000a`) substituindo o ID provisório `0x30000060`.
+- [x] **Hook de consumo e retorno RPC**: captura em `0x16e8cb96`/`0x16e8cba0` alimenta `qdsp_disp_->feed_raw` com memória guest Core 0 (`guest.read`). Conclusão aciona respostas nos canais de retorno `0x31000013` (`AUDMGR_CB`) e `0x3000000b` (`ADSPRTOSMTOA`) via `on_completion`.
+- [ ] Backend ao vivo `SDL_OpenAudioDevice` no `UnifiedAudioSink` para streaming contínuo durante o loop de emulação além dos testes de dump WAV.
+- [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — expansão pós-áudio funcional.
+
+### Fase 11: Execução Guest Real e Resolução dos 5 Gargalos Estruturais
+- [x] **Eliminação de saltos artificiais**: remoção de `core0_.entry = 0x1013a000` hardcoded; avanço autêntico por `uc_emu_start` nos dois núcleos.
+- [x] **MAP_CONTROL funcional**: decodificação de MRs UTCB e mapeamento via `uc_mem_map`.
+- [x] **Injetor direto de applets BREW**: flag CLI `--applet=<path>` e rotina `load_applet` alocando janela e carregando binários `.mod`/`.bar` em `0x12000000`.
+- [ ] **Item 1 (AMSS / Core 1 REX scheduler)**:
+  - Localizar o vetor de reset real do ARM9 no `1.1.2_AMSS.bin` (preâmbulo `msr cpsr_c, #0xd3` / `ldr sp`).
+  - Inicializar Core 1 com CPSR SVC (`0xD3`) e SP do modem (`0x00b16000`), eliminando o NOP-slide linear de +0x9c40/ciclo.
+  - Implementar detector de slide (stall de branches) para diagnóstico rápido de regressão.
+- [ ] **Item 2 (MAP_CONTROL / Cópia prévia de páginas)**:
+  - Instrumentar `map_one` com probe de conteúdo inicial para detectar páginas mapeadas vazias (0x00 / 0xFF) que provocam derails.
+  - Assegurar que os descritores de tarefas Iguana e ELF do guest sejam devidamente populados antes do salto.
+- [ ] **Item 3 (Core 0 loop de poll em 0xb000d4a8)**:
+  - Investigar origem do status em `[r0 + 0xc8]`; validar se a subida do REX (Item 1) e respostas IPC destravam naturalmente o laço de espera.
+- [ ] **Item 4 (Loader BREW / Dispatch de Applets)**:
+  - Mapear símbolos `ISHELL_CreateInstance`, `AEEMod_Load` e `AEEClsCreateInstance` no binário do APPS/AEECShell.
+  - Conectar o vetor de inicialização do applet injetado aos eventos da AEECShell (`EVT_APP_START`, `EVT_KEY`).
 
 ---
 
