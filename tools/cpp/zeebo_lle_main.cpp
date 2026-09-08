@@ -17,12 +17,17 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <memory>
 #include <algorithm>
 #include <SDL2/SDL.h>
 #include <unicorn/unicorn.h>
 
 #include "zeebo_devices.h"
+#define ZEEBO_L4_MMU_WITH_UNICORN 1
+#include "zeebo_l4_mmu.h"
+#include "zeebo_control_server.h"
+#include "qdsp5/qdsp5_capture_hook.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -59,6 +64,10 @@ enum {
     // Apps RAM Base
     APPS_RAM_PHYS_BASE  = 0x10000000,
     APPS_RAM_PHYS_SIZE  = 0x06000000, // 96MB
+
+    // OKL4 Kernel Interface Page (constructed, returned to Iguana by L4_KernelInterface).
+    // Dentro da janela kernel já mapeada 0xf0000000..0xf1000000 (funcional — kernel roda dali).
+    KIP_BASE            = 0xf0f00000,
 };
 
 static inline u16 rd16(const u8* p, size_t o) { return p[o]|(p[o+1]<<8); }
@@ -329,6 +338,15 @@ public:
         core1_state_ = nullptr;
     }
 
+    bool init_control(int port) {
+        control_ = std::make_unique<zeebo_lle::ControlServer>();
+        return control_->Start(port);
+    }
+
+    void set_paused(bool p) {
+        paused_ = p;
+    }
+
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
         printf("===================================================================\n");
         printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
@@ -388,18 +406,44 @@ public:
         // Framebuffer video buffer for host display sink (640x480 RGB565)
         std::vector<u16> fb_buffer(FB_WIDTH * FB_HEIGHT, 0x0010); // Dark navy backdrop
 
-        for (int c = 0; c < cycles; c++) {
+        int c = 0;
+        while (!quit_requested_ && (c < cycles || control_ != nullptr)) {
+            // Drain and process remote debugging IPC commands
+            if (control_) {
+                auto reqs = control_->Drain();
+                for (auto& req : reqs) {
+                    process_control_request(req, c);
+                }
+            }
+            if (quit_requested_) break;
+
+            if (paused_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Continue polling SDL and remote debugger
+                SDL_Event ev;
+                while (SDL_PollEvent(&ev)) {
+                    if (ev.type == SDL_QUIT) return;
+                }
+                continue;
+            }
+
             // Step Core 0 (ARM11)
             uc_err e0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, slice_insns);
             uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+            if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
+                printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\n", c, (int)e0, uc_strerror(e0), core0_.entry);
+            }
 
             // Step Core 1 (ARM9)
             uc_err e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
             uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
 
-            printf("  [Cycle %02d] Core0(ARM11): pc=0x%08x insns=%llu (%s) | Core1(ARM9): pc=0x%08x insns=%llu (%s)\n",
-                   c, core0_.entry, (unsigned long long)core0_.insns, e0 ? uc_strerror(e0) : "ok",
-                   core1_.entry, (unsigned long long)core1_.insns, e1 ? uc_strerror(e1) : "ok");
+            if (c % 10 == 0 || c < 5) {
+                printf("  [Cycle %02d] Core0(ARM11): pc=0x%08x insns=%llu (%s) | Core1(ARM9): pc=0x%08x insns=%llu (%s)\n",
+                       c, core0_.entry, (unsigned long long)core0_.insns, e0 ? uc_strerror(e0) : "ok",
+                       core1_.entry, (unsigned long long)core1_.insns, e1 ? uc_strerror(e1) : "ok");
+            }
+            c++;
 
             // Update display sink if GPU or MDDI marked dirty / drawn
             if (gpu_ && gpu_->is_fb_dirty()) {
@@ -449,6 +493,177 @@ public:
         printf("[System] Execution batch completed successfully.\n");
     }
 
+    void process_control_request(std::shared_ptr<zeebo_lle::ControlRequest>& req, int cycle) {
+        if (req->cmd == "ping") {
+            req->reply.set_value("{\"ok\":true,\"pong\":true}");
+            return;
+        }
+        if (req->cmd == "state") {
+            u32 c0_pc = 0, c1_pc = 0;
+            uc_reg_read(core0_.uc, UC_ARM_REG_PC, &c0_pc);
+            uc_reg_read(core1_.uc, UC_ARM_REG_PC, &c1_pc);
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "{\"ok\":true,\"cycle\":%d,\"c0_pc\":%u,\"c0_insns\":%llu,\"c1_pc\":%u,\"c1_insns\":%llu,\"running\":%s}",
+                     cycle, c0_pc, (unsigned long long)core0_.insns,
+                     c1_pc, (unsigned long long)core1_.insns,
+                     paused_ ? "false" : "true");
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "pause") {
+            paused_ = true;
+            req->reply.set_value("{\"ok\":true,\"paused\":true}");
+            return;
+        }
+        if (req->cmd == "cont") {
+            paused_ = false;
+            // Se o Core estiver parado exatamente no breakpoint atual, avança 1 instrução antes de retomar o loop normal
+            if (c0_breakpoints_.contains(core0_.entry)) {
+                uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+            }
+            req->reply.set_value("{\"ok\":true,\"running\":true}");
+            return;
+        }
+        if (req->cmd == "step") {
+            int ticks = req->has_i0 ? (int)req->i0 : 1;
+            stepping_ = true;
+            for (int t = 0; t < ticks; t++) {
+                uc_err err0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, 1);
+                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                uc_err err1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, 1);
+                uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+                if (err0 != UC_ERR_OK) {
+                    printf("[Step err0] err=%d (%s) pc=0x%08x\n", (int)err0, uc_strerror(err0), core0_.entry);
+                }
+            }
+            stepping_ = false;
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"cycle\":%d,\"c0_pc\":%u,\"c1_pc\":%u}",
+                     cycle, core0_.entry, core1_.entry);
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "bp") {
+            u32 addr = (u32)req->i0;
+            if (req->core == 1) c1_breakpoints_.insert(addr);
+            else c0_breakpoints_.insert(addr);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"bp\":%u,\"core\":%ld}", addr, req->core);
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "bpclear") {
+            u32 addr = (u32)req->i0;
+            if (req->core == 1) c1_breakpoints_.erase(addr);
+            else c0_breakpoints_.erase(addr);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"cleared\":%u,\"core\":%ld}", addr, req->core);
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "hook") {
+            u32 addr = (u32)req->i0;
+            if (req->core == 0) {
+                if (req->str_action.empty() || req->str_action == "clear") {
+                    c0_script_hooks_.erase(addr);
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"cleared\"}");
+                } else {
+                    c0_script_hooks_[addr] = req->str_action;
+                    req->reply.set_value("{\"ok\":true,\"hook\":\"set\"}");
+                }
+            } else {
+                req->reply.set_value("{\"ok\":false,\"error\":\"core1_not_supported\"}");
+            }
+            return;
+        }
+        if (req->cmd == "reg") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            int r_idx = (int)req->i0;
+            int reg_id = UC_ARM_REG_R0 + r_idx;
+            if (r_idx == 13) reg_id = UC_ARM_REG_SP;
+            else if (r_idx == 14) reg_id = UC_ARM_REG_LR;
+            else if (r_idx == 15) reg_id = UC_ARM_REG_PC;
+            else if (r_idx == 16) reg_id = UC_ARM_REG_CPSR;
+            u32 val = 0;
+            uc_reg_read(uc, reg_id, &val);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"core\":%ld,\"n\":%d,\"value\":%u}", req->core, r_idx, val);
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "setreg") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            int r_idx = (int)req->i0;
+            int reg_id = UC_ARM_REG_R0 + r_idx;
+            if (r_idx == 13) reg_id = UC_ARM_REG_SP;
+            else if (r_idx == 14) reg_id = UC_ARM_REG_LR;
+            else if (r_idx == 15) reg_id = UC_ARM_REG_PC;
+            else if (r_idx == 16) reg_id = UC_ARM_REG_CPSR;
+            u32 val = (u32)req->val;
+            uc_reg_write(uc, reg_id, &val);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"core\":%ld,\"n\":%d,\"value\":%u}", req->core, r_idx, val);
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "read") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            u32 addr = (u32)req->i0;
+            size_t len = req->has_i1 ? (size_t)req->i1 : 4;
+            if (len > 4096) len = 4096;
+            std::vector<u8> buf(len);
+            uc_err err = uc_mem_read(uc, addr, buf.data(), len);
+            if (err != UC_ERR_OK) {
+                char err_buf[128];
+                snprintf(err_buf, sizeof(err_buf), "{\"ok\":false,\"error\":\"read failed: %s\"}", uc_strerror(err));
+                req->reply.set_value(err_buf);
+                return;
+            }
+            std::string hex;
+            hex.reserve(len * 2);
+            for (u8 b : buf) {
+                char h[3];
+                snprintf(h, sizeof(h), "%02x", b);
+                hex += h;
+            }
+            char resp[128 + len * 2];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"core\":%ld,\"addr\":%u,\"len\":%zu,\"hex\":\"%s\"}",
+                     req->core, addr, len, hex.c_str());
+            req->reply.set_value(resp);
+            return;
+        }
+        if (req->cmd == "write") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            u32 addr = (u32)req->i0;
+            std::vector<u8> bytes;
+            for (size_t i = 0; i + 1 < req->str_hex.size(); i += 2) {
+                u8 b = (u8)std::strtoul(req->str_hex.substr(i, 2).c_str(), nullptr, 16);
+                bytes.push_back(b);
+            }
+            uc_err err = uc_mem_write(uc, addr, bytes.data(), bytes.size());
+            if (err != UC_ERR_OK) {
+                char err_buf[128];
+                snprintf(err_buf, sizeof(err_buf), "{\"ok\":false,\"error\":\"write failed: %s\"}", uc_strerror(err));
+                req->reply.set_value(err_buf);
+                return;
+            }
+            char resp[128];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"core\":%ld,\"addr\":%u,\"len\":%zu}",
+                     req->core, addr, bytes.size());
+            req->reply.set_value(resp);
+            return;
+        }
+        if (req->cmd == "quit") {
+            paused_ = true;
+            quit_requested_ = true;
+            req->reply.set_value("{\"ok\":true}");
+            return;
+        }
+        req->reply.set_value("{\"ok\":false,\"error\":\"unknown command\"}");
+    }
+
 private:
     void setup_memory_maps() {
         // Shared SMEM 2MB
@@ -482,6 +697,7 @@ private:
         // Core 0 L4e Virtual Windows
         uc_mem_map(core0_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel High VA
         uc_mem_map(core0_.uc, 0xb0000000, 0x02000000, UC_PROT_ALL); // Iguana / User VA
+        uc_mem_map(core0_.uc, 0xd0000000, 0x10000000, UC_PROT_ALL); // Direct-map window (0xdff00000 etc.)
         uc_mem_map(core0_.uc, 0x00000000, 0x00100000, UC_PROT_ALL); // Zero page / Vectors
 
         // AMSS Physical RAM space for Core 1
@@ -496,6 +712,41 @@ private:
         uc_mem_map(core0_.uc, KEYPAD_BASE, KEYPAD_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, 0xa0a00000, 0x10000, UC_PROT_ALL); // NAND
         uc_mem_map(core0_.uc, 0xa9400000, 0x10000, UC_PROT_ALL); // DMOV
+
+        // OKL4 L4e virtual layout (refs/okl4-2.1.1-fix7 arch/arm/pistachio/include/config.h):
+        //   MISC_AREA @ 0xff000000, USER_UTCB_PAGE = 0xff000000, ref em +0xff0.
+        // Iguana runtime lê [0xff000ff0] (USER_UTCB_REF) no boot (0xb00033ec) — SEM
+        // esta página o boot derailhava (read unmapped -> 0). Mapeada agora.
+        uc_mem_map(core0_.uc, 0xff000000, 0x00200000, UC_PROT_ALL); // MISC/UTCB area
+
+        // Pagina da Kernel Interface Page (KIP). Mapeada explicitamente como 4KB legíveis.
+        // Já coberta pelo mapeamento kernel_0 em 0xf0000000..0xf1000000.
+        build_kip();
+
+        // Escreve o ponteiro do UTCB do thread em 0xff000ff0 (USER_UTCB_REF)
+        // Apontando para uma área mapeada válida (ex: 0xdff00000)
+        u32 initial_utcb = 0xdff00000;
+        uc_mem_write(core0_.uc, 0xff000ff0, &initial_utcb, 4);
+        u32 dummy_utcb_hdr = 0x80000100;
+        uc_mem_write(core0_.uc, 0xdff00000, &dummy_utcb_hdr, 4);
+    }
+
+    // KIP (Kernel Interface Page) para o OKL4 / Iguana
+    void build_kip() {
+        std::vector<u8> kip(0x1000, 0);
+        auto w32 = [&](u32 off, u32 v){ memcpy(kip.data()+off, &v, 4); };
+        w32(0x00, 0x14b21150);             // magic L4\xe6K
+        w32(0x04, 0x0000000c);             // api_version (OKL4 2.1)
+        w32(0x08, 0x00000002);             // api_flags
+        memcpy(kip.data()+0x0c, "OKL4", 4);
+        // Memória convencional e ponteiro real do __okl4_bootinfo:
+        w32(0xb0, 0xb0d00000);             // KIP[0xb0] -> bootinfo buffer (segmento 5)
+        w32(0xb4, 0x16000000);             // KIP[0xb4] -> RAM top (96MB)
+        w32(0xb8, 0x10000000);             // KIP[0xb8] -> RAM base
+        w32(0xbc, 0x1);                    // memdesc[0].type = conventional
+        w32(0xc0, 0x0);                    // memdesc[0].virt
+        uc_mem_write(core0_.uc, KIP_BASE, kip.data(), kip.size());
+        printf("[KIP] Kernel Interface Page @ 0x%08x (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000)\n", KIP_BASE);
     }
 
     // DMOV DMA-driven single page read through EBI2 command list
@@ -624,9 +875,11 @@ private:
 
             u32 target = pa ? pa : va;
             uc_mem_write(core0_.uc, target, d.data() + off, fs);
-            // If segment has different PA and VA, map both
-            if (pa && (pa & ~0xFFFu) != (va & ~0xFFFu)) {
-                uc_mem_map(core0_.uc, pa & ~0xFFFu, ((nmem+0xFFF)&~0xFFFu)+0x1000, UC_PROT_ALL);
+            // Garante que o segmento seja carregado tanto no endereço virtual (VA) quanto no físico (PA)
+            if (va && va != target) {
+                uc_mem_write(core0_.uc, va, d.data() + off, fs);
+            }
+            if (pa && pa != target) {
                 uc_mem_write(core0_.uc, pa, d.data() + off, fs);
             }
         }
@@ -666,57 +919,109 @@ private:
         uc_hook h_c0, h_m0, h_u0, h_i0;
         uc_hook_add(core0_.uc, &h_c0, UC_HOOK_CODE, (void*)c0_code_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)c0_mem_hook, this, 0, ~0ULL);
-        uc_hook_add(core0_.uc, &h_u0, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, (void*)c0_unmapped_hook, this, 0, ~0ULL);
-        uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 1, 0);
+        uc_hook_add(core0_.uc, &h_u0, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c0_unmapped_hook, this, 0, ~0ULL);
+        uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 0, ~0ULL);
 
         // Core 1 hooks
         uc_hook h_c1, h_m1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
-        uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
+        uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
+
+        // Instala capture hook do QDSP5 para monitorar pacotes ONCRPC no Core 1
+        zeebo::qdsp5::install_capture_hook(core1_.uc);
     }
 
     static void c0_intr_hook(uc_engine* uc, uint32_t intno, void* ud) {
-        if (intno != 2) return; // Only process SWI/SVC for syscalls
+        if (intno != 2) { return; }
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-        u8 b[4]; int off = pc - 4;
-        if (uc_mem_read(uc, off, b, 4) != UC_ERR_OK) return;
-        u32 w = rd32(b, 0); u32 imm = w & 0xFFFFFF;
+        u32 dbg_sp = 0; uc_reg_read(uc, UC_ARM_REG_SP, &dbg_sp);
+        u32 sp_val = dbg_sp;
+        u32 syscall = sp_val & 0xFF;   // número da trap (SYSNUM = 0xffffff00 + cmd)
 
-        // L4e syscall ABI:
-        // caller saved SP in IP (r12)
-        // LR has return address
+        // Tenta ler a instrução SVC p/ diagnóstico; falha NÃO bloqueia o dispatch
+        // (a identidade da syscall vem do SP, não do imediato — que é sempre 0x14).
+        u32 imm = 0;
+        if (pc >= 4) {
+            u8 b[4]; int off = (int)(pc - 4);
+            if (uc_mem_read(uc, off, b, 4) == UC_ERR_OK) imm = rd32(b, 0) & 0xFFFFFFU;
+        }
+        (void)imm;
+
+        // L4e ABI (refs/okl4-2.1.1-fix7 arch/arm/libs/l4/include/syscalls_asm.h):
+        // caller saved SP in IP (r12); LR tem o retorno; o svc é SEMPRE #0x14 (gate).
+        // A IDENTIDADE da syscall está no SP: stub faz mvn sp,#0x.. -> sp = SYSBASE(0xffffff00)
+        // + cmd. Decodificar por sp&0xFF (0x14=MapControl, 0xb4=KIP, 0xb0=GetUtcb, 0x00=Ipc).
         u32 ip = 0, lr = 0;
         uc_reg_read(uc, UC_ARM_REG_R12, &ip);
         uc_reg_read(uc, UC_ARM_REG_LR, &lr);
-        
-        // Emulate L4e Syscalls (OKL4 2.1.1-fix7 / Iguana convention):
-        // Handles mixed convention: imm in [0..0x44] or (0x1400 + syscall_num)
-        u32 call_num = (imm >= 0x1400) ? (imm - 0x1400) : imm;
-        
-        // Emulate successful return: r0 = 0 (or syscall-specific descriptors)
+
         u32 res_r0 = 0;
-        if (call_num == 0x00) { // L4_Ipc
-            // Inter-thread message delivery: MR0 = IPC success
-            res_r0 = 0;
-        } else if (call_num == 0x08) { // L4_ThreadControl
-            res_r0 = 1; // Thread control success
-        } else if (call_num == 0x0c) { // L4_ExchangeRegisters
-            res_r0 = 0; // Control registers updated
-        } else if (call_num == 0x14) { // L4_MapControl
-            res_r0 = 0;
-        } else if (call_num == 0x18) { // L4_SpaceControl
-            res_r0 = 1; // Address space initialized
-        } else {
-            res_r0 = 0;
+        bool set_kip_ret = false;
+        u32 kip_r1 = 0, kip_r2 = 0, kip_r3 = 0;
+
+        switch (syscall) {
+            case 0x00: res_r0 = 0; break;                    // L4_Ipc
+            case 0x04: break;                                // L4_ThreadSwitch (no-op)
+            case 0x08: res_r0 = 1; break;                    // L4_ThreadControl
+            case 0x0c: res_r0 = 0; break;                    // L4_ExchangeRegisters
+            case 0x10: break;                                // L4_Schedule
+            case 0x14: {                                     // L4_MapControl
+                u32 sid = 0, control = 0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &sid);
+                uc_reg_read(uc, UC_ARM_REG_R1, &control);
+                u32 utcb_ptr = 0;
+                uc_mem_read(uc, 0xff000ff0, &utcb_ptr, 4);
+                res_r0 = zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control);
+                printf("[Syscall] L4_MapControl(sid=0x%x, ctrl=0x%x) via UTCB@0x%08x -> res=0x%x\n",
+                       sid, control, utcb_ptr, res_r0);
+                break;
+            }
+            case 0x18: res_r0 = 1; break;                    // L4_SpaceControl
+            case 0xb0: {                                     // L4_GetUtcb
+                // Devolve a localização do UTCB do thread corrente (endereço no MISC).
+                res_r0 = 0xff000fff & ~0xFFu;  // base da página UTCB (ref escrita pelo kernel)
+                break;
+            }
+            case 0xb4: {                                     // L4_KernelInterface (KIP)
+                res_r0 = KIP_BASE;
+                kip_r1 = 0x0000000c;           // api_version
+                kip_r2 = 0x00000002;           // api_flags
+                kip_r3 = 0;                    // kernel_desc_ptr
+                set_kip_ret = true;
+                printf("[Syscall] L4_KernelInterface -> KIP@0x%08x (av052, api_flags)\n", KIP_BASE);
+                // Grava nos ponteiros que o Iguana passou (se r4/r5/r6 != 0)
+                u32 r4 = 0, r5 = 0, r6 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+                uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+                if (r4) uc_mem_write(uc, r4, &kip_r1, 4);
+                if (r5) uc_mem_write(uc, r5, &kip_r2, 4);
+                if (r6) uc_mem_write(uc, r6, &kip_r3, 4);
+
+                // Grava também no topo do stack (onde o runtime do Iguana lê os outputs):
+                // Iguana faz pop ou ldr de variáveis locais na stack após a trap KIP.
+                u32 sp = 0;
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_mem_write(uc, sp + 0, &kip_r1, 4);
+                uc_mem_write(uc, sp + 4, &kip_r2, 4);
+                uc_mem_write(uc, sp + 8, &kip_r3, 4);
+                break;
+            }
+            default: res_r0 = 0; break;                      // demais (kputc etc.) no-op
         }
 
-        // Detect Iguana user space readiness and dispatch BREW task context
-        static bool s_brew_awoken = false;
-        if (!s_brew_awoken && (call_num == 0x14 || call_num == 0x00 || pc >= 0xb0000000)) {
-            s_brew_awoken = true;
-            printf("[Iguana/UserSpace] Vectoring execution to primary task: BREW 4.0.2 AEECShell at 0x1013a000\n");
+        if (set_kip_ret) {
+            uc_reg_write(uc, UC_ARM_REG_R1, &kip_r1);
+            uc_reg_write(uc, UC_ARM_REG_R2, &kip_r2);
+            uc_reg_write(uc, UC_ARM_REG_R3, &kip_r3);
+        }
+
+        // Intercepta e inicializa o espaço de vídeo quando Iguana entra em execução
+        static bool s_gpu_inited = false;
+        if (!s_gpu_inited && (pc >= 0xb0000000)) {
+            s_gpu_inited = true;
             if (sys->gpu_) {
                 sys->gpu_->write(0x010c, 0x0020); // Emit draws to Adreno 130
                 sys->gpu_->mark_dirty();
@@ -724,25 +1029,121 @@ private:
         }
 
         uc_reg_write(uc, UC_ARM_REG_R0, &res_r0);
-        if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
-        if (lr) {
-            u32 target_pc = lr & ~1;
+        u32 target_pc = 0;
+        if (syscall == 0xb4) {
+            target_pc = pc + 4;
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
-            u32 cpsr = 0;
-            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-            if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
-            uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            // Invalida o TB de execução no Unicorn para que ele recompile o bloco seguinte
+            uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
+            uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
+        } else {
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            if (lr) {
+                target_pc = lr & ~1;
+                uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+                u32 cpsr = 0;
+                uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+                uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+            }
+        }
+        if (target_pc) {
+            sys->core0_.entry = target_pc;
         }
     }
 
     static void c0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
+        // Intercepta a trap SVC L4_KernelInterface diretamente no endereço real para garantia de desvio
+        if (ad == 0xb000c738) {
+            u32 ip = 0;
+            uc_reg_read(uc, UC_ARM_REG_R12, &ip);
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            u32 kip_base = KIP_BASE;
+            u32 r1 = 0, r2 = 0, r3 = 0;
+            uc_reg_write(uc, UC_ARM_REG_R0, &kip_base);
+            uc_reg_write(uc, UC_ARM_REG_R1, &r1);
+            uc_reg_write(uc, UC_ARM_REG_R2, &r2);
+            uc_reg_write(uc, UC_ARM_REG_R3, &r3);
+            u32 next_pc = (u32)ad + 4;
+            uc_reg_write(uc, UC_ARM_REG_PC, &next_pc);
+            sys->core0_.entry = next_pc;
+            uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
+            uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
+            uc_emu_stop(uc);
+            return;
+        }
+        // Fast-forward CRT0 BSS zeroing: se atingir o loop de memset do Iguana, completa em RAM e salta
+        if (ad == 0xb000001c) {
+            u32 r4 = 0, r5 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+            if (r4 < r5 && (r5 - r4) < 0x100000) {
+                std::vector<u8> zeroes(r5 - r4, 0);
+                uc_mem_write(uc, r4, zeroes.data(), zeroes.size());
+                uc_reg_write(uc, UC_ARM_REG_R4, &r5);
+                u32 jump_target = 0xb0000034;
+                uc_reg_write(uc, UC_ARM_REG_PC, &jump_target);
+                sys->core0_.entry = jump_target;
+            }
+        }
+        if (!sys->c0_script_hooks_.empty()) {
+            auto it = sys->c0_script_hooks_.find((u32)ad);
+            if (it != sys->c0_script_hooks_.end()) {
+                const std::string& action = it->second;
+                if (action == "stub_r0_0" || action == "stub") {
+                    u32 lr = 0;
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    u32 ret_val = 0;
+                    uc_reg_write(uc, UC_ARM_REG_R0, &ret_val);
+                    u32 target = lr & ~1;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &target);
+                    sys->core0_.entry = target;
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "stub_r0_1") {
+                    u32 lr = 0;
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    u32 ret_val = 1;
+                    uc_reg_write(uc, UC_ARM_REG_R0, &ret_val);
+                    u32 target = lr & ~1;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &target);
+                    sys->core0_.entry = target;
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "step_pc_4") {
+                    u32 next = (u32)ad + 4;
+                    uc_reg_write(uc, UC_ARM_REG_PC, &next);
+                    sys->core0_.entry = next;
+                    uc_emu_stop(uc);
+                    return;
+                } else if (action == "break") {
+                    sys->paused_ = true;
+                    uc_emu_stop(uc);
+                    return;
+                }
+            }
+        }
+        if (!sys->stepping_ && !sys->c0_breakpoints_.empty() && sys->c0_breakpoints_.contains((u32)ad)) {
+            sys->paused_ = true;
+            sys->core0_.entry = (u32)ad;
+            uc_emu_stop(uc);
+            return;
+        }
+        (void)size;
+    }
+
+    static void c0_trace_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
+        static int n = 0;
+        if (n < 400) { printf("[TRACE] pc=0x%08x\n", (u32)ad); n++; }
     }
 
     static void c0_unmapped_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        printf("[UNMAPPED-CORE0] pc=0x%08x type=%d addr=0x%08lx size=%d\n", pc, (int)type, (unsigned long)addr, size);
         if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE && type == UC_MEM_READ_UNMAPPED) {
             ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
             u32 val = sys->input_->read((u32)(addr - KEYPAD_BASE));
@@ -799,6 +1200,10 @@ private:
     static void c1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
+        if (!sys->c1_breakpoints_.empty() && sys->c1_breakpoints_.contains((u32)ad)) {
+            sys->paused_ = true;
+            uc_emu_stop(uc);
+        }
         if (ad == 0x00d10588) { // Panic bypass
             u32 lr = 0; uc_reg_read(uc, UC_ARM_REG_LR, &lr);
             u32 new_pc = lr & ~1; uc_reg_write(uc, UC_ARM_REG_PC, &new_pc);
@@ -820,6 +1225,15 @@ private:
         }
     }
 
+    // ControlServer instance for remote interactive debugging
+    std::unique_ptr<zeebo_lle::ControlServer> control_;
+    bool paused_ = false;
+    bool stepping_ = false;
+    bool quit_requested_ = false;
+    std::set<u32> c0_breakpoints_;
+    std::set<u32> c1_breakpoints_;
+    std::map<u32, std::string> c0_script_hooks_;
+
     CoreState core0_;
     CoreState core1_;
     CoreState* core1_state_;
@@ -836,6 +1250,7 @@ int main(int argc, char** argv) {
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
     bool headless = true;
+    int control_port = 0;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -843,6 +1258,8 @@ int main(int argc, char** argv) {
             headless = false;
         } else if (arg == "--headless") {
             headless = true;
+        } else if (arg.rfind("--control-port=", 0) == 0) {
+            control_port = std::stoi(arg.substr(15));
         } else if (i == 1 && arg[0] != '-') {
             nand_path = argv[1];
         } else if (i == 2 && arg[0] != '-') {
@@ -855,13 +1272,22 @@ int main(int argc, char** argv) {
     printf("[System] Mode: %s\n", headless ? "Headless (CLI/Test runner)" : "Interactive GUI (SDL2 Window 640x480 active)");
 
     ZeeboLLESystem sys;
+    if (control_port > 0) {
+        if (!sys.init_control(control_port)) {
+            printf("[Warn] Failed to bind control server on port %d\n", control_port);
+        } else {
+            printf("[Control] Remote debug interface active on port %d\n", control_port);
+            sys.set_paused(true);
+        }
+    }
+
     if (!sys.init(nand_path, apps_path, amss_path, headless)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
     }
 
-    // Run interleaved for 60 cycles of 10k instructions (600k instructions per core)
-    sys.run_interleaved(60, 10000);
+    // Run interleaved for 250 cycles of 10k instructions
+    sys.run_interleaved(250, 10000);
 
     return 0;
 }
