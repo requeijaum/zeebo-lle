@@ -262,8 +262,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [ ] **Passo 9: Alinhamento de Memória BootInfo/KIP e Conclusão de `mempool_init` (Em Andamento)**:
   - Ajustar descritores de memória e alinhamentos de pools em `__okl4_bootinfo` (`0xb0d00000`) e na KIP para que o gerador de fpages retorne tamanhos estritamente positivos ($\ge 4$ KiB).
   - Permitir avanço do Core 0 para o spawn dos primeiros threads de espaço de usuário (Iguana naming service / pager).
-- [ ] **Passo 10: Despacho Automático AEECShell para Applets EFS2**:
-  - Conectar os applets extraídos do catálogo (`reksio.mod`, `274755`, `tectoy.mod`) ao fluxo de inicialização e ciclo de eventos contínuos do orquestrador.
+- [x] **Passo 10: Despacho Automático AEECShell / Ciclo de Vida Z-Wheel (274755) (Concluído `fccca5e`)**:
+  - Descoberto que o payload de 64 KiB de `274755` (@0x3a92000, FNV-1a `0x544a6f30`) são metadados de gnode do VFS com assinatura `"274755"` e referências a assets (`slidemodel.qxm`), enquanto o código executável do ZeeboApp reside embutido em `0:APPS` no manipulador Thumb `@0x10532344`.
+  - Implementado `ZeeboLLESystem::dispatch_zwheel_app_start()`: instancia scratch applet + vtable gráfica (`0x28`), despacha `EVT_APP_START` (`0x1f96`) sob Unicorn ao manipulador pré-mapeado com retorno real `r0 = 1` (sucesso) e roteia chamada para o `SoftRasterizer`, reproduzindo frame RGB565 com soma `2013081600`.
+  - Integrado à CLI `--efs2-run=274755` e adicionado o teste automatizado `test-efs2-zwheel` no Makefile (agora 8 alvos de CI 100% verdes).
 
 ---
 
