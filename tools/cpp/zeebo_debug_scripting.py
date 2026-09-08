@@ -85,7 +85,9 @@ class ZeeboDebugClient:
     def poke(self, addr, val, size=4, core=0):
         resp = self.rpc({"cmd": "poke", "core": core, "addr": addr, "val": val, "len": size})
         # QW2: poke pode ser SMC. Invalida PCs no range para reemissão no trace.
-        if self._dedup is not None:
+        # Só invalida quando o servidor confirmou a escrita (ok=true); poke
+        # rejeitado/timeout/vazio não altera código, então o PC segue suprimido.
+        if self._dedup is not None and resp.get("ok") is True:
             self._dedup.invalidate(addr, size=size)
         return resp
 
