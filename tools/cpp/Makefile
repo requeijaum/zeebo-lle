@@ -98,10 +98,13 @@ test-efs2-zwheel-loop: zeebo_lle_main
 	  && echo "PASS: --efs2-run=274755 --seconds=1 executou o loop interativo contínuo (Passo 11)." \
 	  || (echo "FAIL: loop interativo do applet 274755 não encerrou corretamente"; exit 1)
 
+test-debug-agent: zeebo_lle_main
+	python3 test_zeebo_debug_agent.py
+
 clean:
 	rm -f zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness zeebo_input_harness
 
-.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-input test-efs2-fs
+.PHONY: all test clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
