@@ -45,15 +45,32 @@ class ZeeboDebugClient:
         payload = (json.dumps(cmd_dict) + "\n").encode("utf-8")
         self.sock.sendall(payload)
         data = b""
+        start_t = time.time()
         while b"\n" not in data:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
+            try:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                if time.time() - start_t > self.sock_timeout:
+                    return {"ok": False, "error": "timeout"}
         resp_str = data.decode("utf-8").strip()
         if not resp_str:
             return {"ok": False, "error": "empty_response"}
         return json.loads(resp_str)
+
+    def backtrace(self, core=0):
+        return self.rpc({"cmd": "backtrace", "core": core})
+
+    def peek(self, addr, size=4, core=0):
+        return self.rpc({"cmd": "peek", "core": core, "addr": addr, "len": size})
+
+    def poke(self, addr, val, size=4, core=0):
+        return self.rpc({"cmd": "poke", "core": core, "addr": addr, "val": val, "len": size})
+
+    def vram_stat(self):
+        return self.rpc({"cmd": "vram_stat"})
 
     def ping(self):
         return self.rpc({"cmd": "ping"})

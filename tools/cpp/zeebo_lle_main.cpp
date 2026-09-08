@@ -1197,6 +1197,94 @@ public:
             req->reply.set_value("{\"ok\":true,\"pong\":true}");
             return;
         }
+        if (req->cmd == "backtrace") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            u32 pc = 0, lr = 0, sp = 0, r11 = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            uc_reg_read(uc, UC_ARM_REG_R11, &r11);
+
+            char buf[1024];
+            int pos = snprintf(buf, sizeof(buf),
+                     "{\"ok\":true,\"core\":%ld,\"frames\":["
+                     "{\"frame\":0,\"pc\":%u,\"lr\":%u,\"sp\":%u,\"fp\":%u}",
+                     req->core, pc, lr, sp, r11);
+
+            // Tenta walk preliminar na pilha lendo palavras alinhadas a 4 bytes
+            int frame_idx = 1;
+            for (u32 cur_sp = sp; cur_sp < sp + 256 && frame_idx < 8; cur_sp += 4) {
+                u32 val = 0;
+                if (uc_mem_read(uc, cur_sp, &val, 4) == UC_ERR_OK) {
+                    // Se o ponteiro cai em faixas de código executável conhecidas
+                    if ((val >= 0xb0000000 && val < 0xb0500000) ||
+                        (val >= 0x10000000 && val < 0x12000000) ||
+                        (val >= 0xf0000000 && val < 0xf0030000)) {
+                        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                        ",{\"frame\":%d,\"pc\":%u,\"sp\":%u}",
+                                        frame_idx++, val, cur_sp);
+                    }
+                }
+            }
+            snprintf(buf + pos, sizeof(buf) - pos, "]}");
+            req->reply.set_value(buf);
+            return;
+        }
+        if (req->cmd == "peek") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            u32 addr = (u32)req->i0;
+            size_t size = req->has_i1 ? (size_t)req->i1 : 4;
+            if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+            u64 val = 0;
+            uc_err err = uc_mem_read(uc, addr, &val, size);
+            if (err != UC_ERR_OK) {
+                char err_buf[128];
+                snprintf(err_buf, sizeof(err_buf), "{\"ok\":false,\"error\":\"peek failed: %s\"}", uc_strerror(err));
+                req->reply.set_value(err_buf);
+                return;
+            }
+            char resp[160];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"core\":%ld,\"addr\":%u,\"size\":%zu,\"val\":%llu,\"hex\":\"0x%llx\"}",
+                     req->core, addr, size, (unsigned long long)val, (unsigned long long)val);
+            req->reply.set_value(resp);
+            return;
+        }
+        if (req->cmd == "poke") {
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            u32 addr = (u32)req->i0;
+            size_t size = req->has_i1 ? (size_t)req->i1 : 4;
+            if (size != 1 && size != 2 && size != 4 && size != 8) size = 4;
+            u64 val = req->val;
+            uc_err err = uc_mem_write(uc, addr, &val, size);
+            if (err != UC_ERR_OK) {
+                char err_buf[128];
+                snprintf(err_buf, sizeof(err_buf), "{\"ok\":false,\"error\":\"poke failed: %s\"}", uc_strerror(err));
+                req->reply.set_value(err_buf);
+                return;
+            }
+            // Invalida cache de tradução se for em área de código
+            uc_ctl_remove_cache(uc, addr, size);
+            char resp[128];
+            snprintf(resp, sizeof(resp), "{\"ok\":true,\"core\":%ld,\"addr\":%u,\"size\":%zu,\"written\":true}",
+                     req->core, addr, size);
+            req->reply.set_value(resp);
+            return;
+        }
+        if (req->cmd == "vram_stat") {
+            u64 psum = 0;
+            u16 center = 0;
+            const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
+            if (fb) {
+                for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) psum += fb[i];
+                center = fb[(FB_HEIGHT / 2) * FB_WIDTH + (FB_WIDTH / 2)];
+            }
+            char resp[256];
+            snprintf(resp, sizeof(resp),
+                     "{\"ok\":true,\"width\":%u,\"height\":%u,\"format\":\"RGB565\",\"pixel_sum\":%llu,\"center\":%u,\"blank\":%s}",
+                     FB_WIDTH, FB_HEIGHT, (unsigned long long)psum, (unsigned)center, (psum == 0 ? "true" : "false"));
+            req->reply.set_value(resp);
+            return;
+        }
         if (req->cmd == "state") {
             u32 c0_pc = 0, c1_pc = 0;
             uc_reg_read(core0_.uc, UC_ARM_REG_PC, &c0_pc);
