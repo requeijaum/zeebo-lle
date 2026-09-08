@@ -43,6 +43,7 @@
 #include "gpu/igl_guest_bridge.h"
 #include "zeebo_brew_loader.h"
 #include "zeebo_efs2_fs.h"
+#include "zeebo_cli_paths.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -2921,6 +2922,8 @@ int main(int argc, char** argv) {
     const char* nand_path = "../../nand/1.1.2.bin";
     const char* apps_path = "../../nand/1.1.2_APPS.bin";
     const char* amss_path = "../../nand/1.1.2_AMSS.bin";
+    std::vector<std::string> positional_firmware_args;
+    std::string cli_nand_str, cli_apps_str, cli_amss_str;
     std::string applet_path = "";
     std::string efs2_run = "";
     bool efs2_ls_flag = false;
@@ -2990,14 +2993,21 @@ int main(int argc, char** argv) {
         } else if (arg == "--strict-unmapped") {
             strict_unmapped = true;
         } else if (arg[0] != '-') {
-            if (nand_path == nullptr || std::string(nand_path) == "../../nand/1.1.2.bin") {
-                nand_path = argv[i];
-            } else if (apps_path == nullptr || std::string(apps_path) == "../../nand/1.1.2_APPS.bin") {
-                apps_path = argv[i];
-            } else if (amss_path == nullptr || std::string(amss_path) == "../../nand/1.1.2_AMSS.bin") {
-                amss_path = argv[i];
-            }
+            positional_firmware_args.push_back(argv[i]);
         }
+    }
+
+    // Assign positional firmware paths (NAND, APPS, AMSS) by ordinal slot.
+    {
+        CliFirmwarePaths fw = resolve_cli_firmware_paths(positional_firmware_args);
+        if (fw.surplus) {
+            fprintf(stderr,
+                    "[Aviso] Argumentos posicionais em excesso ignorados "
+                    "(esperado no máximo 3: NAND APPS AMSS).\n");
+        }
+        cli_nand_str = fw.nand; nand_path = cli_nand_str.c_str();
+        cli_apps_str = fw.apps; apps_path = cli_apps_str.c_str();
+        cli_amss_str = fw.amss; amss_path = cli_amss_str.c_str();
     }
 
     if (!dump_frames_dir.empty()) {

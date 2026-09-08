@@ -154,9 +154,13 @@ test_control_server: test_control_server.cpp zeebo_control_server.h
 test_probe_registry: test_probe_registry.cpp zeebo_probe_registry.h
 	$(CXX) $(CXXFLAGS) -o $@ test_probe_registry.cpp -pthread
 
-test-cli: zeebo_lle_main
+test-cli: zeebo_lle_main test_cli_paths
 	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
 	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
+	./test_cli_paths
+
+test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
+	$(CXX) $(CXXFLAGS) -o $@ test_cli_paths.cpp
 
 # NOTA: `check` inclui APENAS o build compile-only do harness de BootInfo
 # (zeebo_bootinfo_harness), que NÃO executa nem afirma validação por bytes
@@ -179,7 +183,7 @@ clean:
 	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
