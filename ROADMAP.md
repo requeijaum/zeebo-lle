@@ -181,12 +181,20 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Constatado que `1.1.2_APPS.bin` é stripped (`e_shnum=0`) e as vtables são povoadas em runtime via `ISHELL_CreateInstance`.
   - Implementado `IglGuestBridge::resolve_from_object(uc, obj_va, is_igl)` resolvendo diretamente de `obj[0]=&vtable`.
   - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
-- [ ] **Core 0 — fechamento do BootInfo/`bi_execute` (Passo 13)**:
+- [x] **Core 0 — fechamento do BootInfo/`bi_execute` (Passo 13 — CONCLUÍDO)**:
   - QW1 parcial (`f196f14`, `b5d0766`, `433ba9c`) criou parser host-only e gate separado `test-bootinfo-real`.
-  - QW17/QW19 destravaram o `mempool_init` (96 blocos de 1 MiB atravessados). **QW23 (`b57c591`)** resolveu o panic do `thread_init` (KIP[0xc4]=18); **QW24 (`2c0873d`)** resolveu o decode do `PhysDesc` (gran 64B) — com ambos, o boot alcança `bi_execute` e aplica 98+ mapas físicos reais (0 WRITE_PROT).
-  - **Bloqueio superado (QW27, `fc4a811`)**: `L4_ExchangeRegisters` (0x0c) agora restaura `SP=ip`, eliminando o desempilhamento corrompido do PC no epílogo (`0xb000c794`).
-  - **Novo marco atingido no boot**: O firmware saiu da fase de inicialização do microkernel/BootInfo (Passo 13), concluiu `bi_execute`, criou e ativou threads, executou 756 chamadas a `L4_MapControl` (318 blocos `[aliased]` mapeados), ultrapassou 8,27 milhões de instruções e entrou com sucesso no **`iguana_server_loop`** (`0xb000aa94`), aguardando IPC em `0xb000c834` (`L4_Ipc` wait loop).
-  - **Próximo gate (QW28)**: Intercâmbio e despacho de mensagens IPC no `iguana_server_loop` para iniciar os subsistemas Iguana (naming, memsection, efs/vfs, inicialização de BREW).
+  - QW17/QW19 destravaram o `mempool_init` (96 blocos de 1 MiB atravessados). **QW23 (`b57c591`)** resolveu o panic do `thread_init` (KIP[0xc4]=18); **QW24 (`2c0873d`)** resolveu o decode do `PhysDesc` (gran 64B) — com ambos, o boot alcança `bi_execute` e aplica mapas físicos reais (0 WRITE_PROT).
+  - **QW26 (`7b570e2`)**: `ThreadControl` (0x08) e `SpaceControl` (0x18) retomados no epílogo (`pc` + `SP=ip`), eliminando panic `SpaceControl != 1`.
+  - **QW27 (`fc4a811`)**: `ExchangeRegisters` (0x0c), `ThreadSwitch` (0x04) e `Schedule` (0x10) com restauração de frame e trap-stack (`SP=ip`), eliminando salto para PC=0x00000000.
+  - **Resultado (Passo 13 Concluído)**: Core 0 completou integralmente `bi_execute`, `extensions_init` e entrou no `iguana_server_loop` (`0xb000aa94`), executando 756 chamadas MapControl e mais de 8,27 milhões de instruções orgânicas.
+
+- [ ] **Passo 14: Iguana Server Loop & Despacho IPC rumo ao BREW AppMgr, Z-Wheel e Jogos**:
+  - Tratar mensagens IPC de entrada no `iguana_server_loop` (`0xb000aa94` / `0xb000c834` L4_Ipc wait) para ativação dos servidores do sistema:
+    - **`ig_naming`** (VA `0xb0100000`, Tag 07 @ fileoff `0x57160`): registro de nomes de objetos e serviços Iguana.
+    - **`quartz_servers`** (VA `0xb0300000`, Tag 07 @ fileoff `0x573a0`): subsistemas de display/drivers.
+    - **`AMSS`** (VA `0x10137000`, Tag 07 @ fileoff `0x575d4`): entrada do ambiente BREW / modem / AEECShell.
+  - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
+  - Boot do launcher `ZeeboApp` (`AEEAppletNew`, strings `fs:/mif/brewappmgr.mif`, `fs:/mod/brewappmgr/appmgr{ls,ln}.bar` embutidas em `0:APPS` offset `0x46e2e8`, VA `0x105322e8`), depois Z-Wheel e jogos (ex: Double Dragon).
 - [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (commit `7bc384c`)**:
   - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
   - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista).
@@ -321,13 +329,18 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ### P0 — Cadeia crítica de boot real
 
-1. **Passo 13 — BootInfo/`bi_execute`** (bloqueio atual = QW26)
-   - Já provado por bytes: BootInfo @ file offset `0x57000`, magic `0x1960021d`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
-   - QW17/QW19 (mempool_init), QW23 (thread_init/KIP[0xc4]) e QW24 (decode phys gran 64B) destravaram o boot até o `bi_execute` com mapas físicos reais (98+ aliased, 0 WRITE_PROT). Bloqueio atual: retomada dos stubs `ThreadControl` (0x08) / `SpaceControl` (0x18) no handler (padrão QW19) — panic `SpaceControl != 1` no thread_create.
-   - Gate final: `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e `iguana_server_loop@0xb000aa94` com os mapas físicos reais e a criação de threads dos servers íntegra; proibido forçar registradores ou validar por instruction-count.
-2. **Passo 14 — threads/IPC Iguana → BREW**
-   - Completar semântica observada de `L4_ThreadControl(0x0c)`, `L4_Ipc(0x00)` e `L4_ExchangeRegisters(0x10)`.
-   - Gate: handoff orgânico ao AEECShell/BREW em `0x10137000`/`0x10c874f4`, com objeto IGL/IEGL vivo capturado pelo bridge.
+1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
+   - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
+   - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
+2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (bloqueio atual = QW28)
+   - O `iguana_server_loop` (`0xb000aa94`) aguarda IPC no laço `bl 0xb000c800` (`L4_Ipc` wait em `0xb000c834`).
+   - Tags de threads registradas no BootInfo identificam os alvos a serem despachados:
+     - `ig_naming` (VA `0xb0100000`, tag 7, ref 6)
+     - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
+     - `AMSS` (VA `0x10137000`, tag 7, ref 23)
+   - Tratar mensagens IPC de entrada no server loop (`mr0/mr1` e jump-table de opcodes `0x16..0x1f`) para entregar as respostas de registro de serviços e ativação dos servidores Iguana.
+   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
+   - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
 ### Quick wins independentes
 
