@@ -1389,6 +1389,38 @@ public:
             req->reply.set_value(std::move(response));
             return;
         }
+        if (req->cmd == "dstat") {
+            // Estado de diagnóstico vivo do boot (Spec-Driven): PC salvo / LR / SP /
+            // R0-R7 do core escolhido + thread atual. NOTA de precisão: o emulador
+            // executa em fatias (slice de N instruções); entre slices os registradores
+            // do Unicorn nem sempre são legíveis (PC costuma vir 0). A fonte de
+            // verdade do PC é core0_.entry/core1_.entry (salvo no fim de cada slice);
+            // r0-r7 são lidos via Unicorn e marcados "approx" (precisos logo após um
+            // slice, não garantidos no meio de execução). Usado p/ iterar sobre um
+            // stall (ex.: loop RLE 0xb0400000) sem recompilar.
+            if (req->core != 0 && req->core != 1) {
+                req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
+                return;
+            }
+            uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
+            const u32 entry_pc = (req->core == 1) ? core1_.entry : core0_.entry;
+            u32 r[8] = {0}, pc = 0, sp = 0, lr = 0, cpsr = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            for (int i = 0; i < 8; ++i) uc_reg_read(uc, UC_ARM_REG_R0 + i, &r[i]);
+            const u32 tid = thread_table_.current_tid();
+            char buf[640];
+            snprintf(buf, sizeof(buf),
+                "{\"ok\":true,\"core\":%lu,\"pc_saved\":%u,\"pc\":%u,\"sp\":%u,\"lr\":%u,\"cpsr\":%u,"
+                "\"tid\":%u,"
+                "\"r0\":%u,\"r1\":%u,\"r2\":%u,\"r3\":%u,\"r4\":%u,\"r5\":%u,\"r6\":%u,\"r7\":%u}",
+                req->core, entry_pc, pc, sp, lr, cpsr, tid,
+                r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7]);
+            req->reply.set_value(buf);
+            return;
+        }
         if (req->cmd == "peek") {
             if (req->core != 0 && req->core != 1) {
                 req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
