@@ -71,6 +71,18 @@ int main() {
     assert(tag.label() == 0x16);
     assert(!tag.is_error());
 
+    // QW32: Teste de IpcMessage para handshake AMSS
+    zeebo_l4::IpcMessage msg;
+    msg.sender_tid = 6;  // ig_naming
+    msg.target_tid = 23; // amss
+    msg.tag = tag;
+    msg.mr = {0x00000016, 0x10137000, 0x00000000, 0x00000001};
+    assert(msg.sender_tid == 6);
+    assert(msg.target_tid == 23);
+    assert(msg.mr.size() == 4);
+    assert(msg.mr[0] == 0x16);
+    assert(msg.mr[1] == 0x10137000);
+
     printf("=== Test L4 IPC Dispatch & Service Registry: PASS ===\n");
     return 0;
 }

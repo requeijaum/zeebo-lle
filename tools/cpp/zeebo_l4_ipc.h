@@ -45,6 +45,14 @@ struct ServiceDescriptor {
     uint32_t    buffer_size = 0;
 };
 
+// Mensagem IPC estruturada para troca entre threads de servidor
+struct IpcMessage {
+    uint32_t sender_tid = 0;
+    uint32_t target_tid = 0;
+    MsgTag   tag;
+    std::vector<uint32_t> mr; // Message Registers (MR1..MRn)
+};
+
 // Tabela de Nomes e Serviços de Sistema (QW31)
 class SystemServiceRegistry {
 public:
