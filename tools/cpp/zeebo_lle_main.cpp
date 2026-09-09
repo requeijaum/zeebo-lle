@@ -2186,7 +2186,11 @@ private:
         // (a identidade da syscall vem do SP, não do imediato — que é sempre 0x14).
         u32 imm = 0;
         if (pc >= 4) {
-            u8 b[4]; int off = (int)(pc - 4);
+            u8 b[4];
+            // `off` é u32 de propósito: pc pode estar em 0xb000xxxx+ (stubs L4), então
+            // pc-4 excede INT_MAX e um cast `int` viraria negativo (seria sign-estendido
+            // a u64 = endereço inválido no uc_mem_read). u32 evita a conversão negativa.
+            u32 off = pc - 4;
             if (uc_mem_read(uc, off, b, 4) == UC_ERR_OK) imm = rd32(b, 0) & 0xFFFFFFU;
         }
         (void)imm;
@@ -2244,11 +2248,10 @@ private:
                     if (nxt && nxt->ip) {
                         zeebo_l4::ThreadInfo* cur = sys->thread_table_.get_thread_mut(cur_tid);
                         if (cur) {
-                            u32 cur_pc = 0, cur_sp = 0;
-                            uc_reg_read(uc, UC_ARM_REG_PC, &cur_pc);
-                            uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
-                            cur->ip = cur_pc;
-                            cur->sp = cur_sp;
+                            // Reutiliza pc/sp_val já lidos no topo do hook (linhas
+                            // ~2180-2182): evita uc_reg_read redundantes no handoff.
+                            cur->ip = pc;
+                            cur->sp = sp_val;
                         }
                         sys->thread_table_.set_current_tid(next_tid);
                         u32 target_ip = nxt->ip;
@@ -2287,11 +2290,10 @@ private:
                         // Salva contexto da thread atual e chaveia PC/SP
                         zeebo_l4::ThreadInfo* cur = sys->thread_table_.get_thread_mut(cur_tid);
                         if (cur) {
-                            u32 cur_pc = 0, cur_sp = 0;
-                            uc_reg_read(uc, UC_ARM_REG_PC, &cur_pc);
-                            uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
-                            cur->ip = cur_pc;
-                            cur->sp = cur_sp;
+                            // Reutiliza pc/sp_val já lidos no topo do hook (linhas
+                            // ~2180-2182): evita uc_reg_read redundantes no handoff.
+                            cur->ip = pc;
+                            cur->sp = sp_val;
                         }
                         sys->thread_table_.set_current_tid(next_tid);
                         u32 target_ip = nxt->ip;
@@ -2311,6 +2313,9 @@ private:
                 }
                 break;
             }
+            // L4_ThreadControl / L4_SpaceControl: retornam r0=1 (sucesso da ABI L4). O
+            // contrato esperado pelos callers do Iguana é "thread/space criado com
+            // sucesso"; retornar 1 mantém o boot avançando sem abortar o chamador.
             case 0x08: res_r0 = 1; break;                    // L4_ThreadControl
             case 0x0c: {                                     // L4_ExchangeRegisters
                 u32 dest = 0, control = 0, new_sp = 0, new_ip = 0, flags = 0;
@@ -2342,7 +2347,6 @@ private:
                 u32 utcb_ptr = 0;
                 uc_mem_read(uc, 0xff000ff0, &utcb_ptr, 4);
                 if (getenv("ZEEBO_MC_DEBUG")) {
-                    u32 rr[6]={0}; for(int k=0;k<6;k++){uc_reg_read(uc,UC_ARM_REG_R2+ (k==0?0:0),&rr[k]);} 
                     u32 mr[8]={0};
                     for(int k=0;k<8;k++) uc_mem_read(uc, utcb_ptr+0x40+k*4, &mr[k],4);
                     u32 R2,R3,R4,R5,R6,R7,R9,PCv;
@@ -2400,7 +2404,15 @@ private:
             uc_reg_write(uc, UC_ARM_REG_R3, &kip_r3);
         }
 
-        // Intercepta e inicializa o espaço de vídeo quando Iguana entra em execução
+        // Intercepta e inicializa o espaço de vídeo quando Iguana entra em execução.
+        // HEURÍSTICA: o primeiro SVC vindo do range Iguana (pc >= 0xb0000000) marca
+        // que o kernel Iguana está ativo — é o ponto onde o boot já ultrapassou as
+        // inits e começa a despachar servidores; inicializar o espaço de vídeo aqui
+        // garante que o Adreno 130 esteja "ligado" antes do primeiro draw de um
+        // applet, sem precisar esperar um sinal explícito de frame. O valor 0x0020
+        // em 0x010c é o kick inicial de drawings do Adreno (estado esperado pelo
+        // rasterizador ao começar a receber chamadas IGL/GLES); é um hook único
+        // (s_gpu_inited), executado apenas na primeira vez.
         static bool s_gpu_inited = false;
         if (!s_gpu_inited && (pc >= 0xb0000000)) {
             s_gpu_inited = true;

@@ -176,6 +176,12 @@ private:
             ssize_t n = ::recv(fd, chunk, sizeof(chunk), 0);
             if (n <= 0) return;
             buf.append(chunk, static_cast<size_t>(n));
+            // Limite máx. do acumulador (anti-DoS): uma linha NDJSON sem '\n' jamais
+            // drena aqui — só quando o cliente mandar o terminador. O corte aceita uma
+            // linha incompleta de até ~17KB (chunk de 1024 acumulado além de 16384)
+            // antes de rejeitar, o que é intencional: é um teto de backpressure, não
+            // um limite exato de pedido. Escolha 16384 = folga confortável acima de
+            // qualquer comando NDJSON (peek/poke/set_hook são < 256B).
             if (buf.size() > 16384) {
                 WriteAll(fd, "{\"ok\":false,\"error\":\"request_too_large\"}\n");
                 return;
@@ -260,6 +266,11 @@ private:
         size_t p = c + 1;
         while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\"')) ++p;
         if (p >= s.size()) return false;
+        // Rejeita explícitamente um sinal negativo: strtoull consome o '-' e devolve
+        // ULLONG_MAX-|<valor>|, que fluiria como endereço/tamanho gigantesco e seria
+        // truncado silenciosamente com `(u32)` depois. Input de rede deve ser
+        // tratado como não confiável; um valor negativo aqui é erro de protocolo.
+        if (s[p] == '-' || s[p] == '+') return false;
         int base = 10;
         if (p + 1 < s.size() && s[p] == '0' && (s[p + 1] == 'x' || s[p + 1] == 'X')) base = 16;
         char* end = nullptr;
