@@ -209,6 +209,32 @@ int main() {
         // fpage normal de 4KB não é whole-space.
         Fpage normal(make_fpage(0xb0001000, 12, true, true, true));
         CHECK(!normal.is_whole_space());
+
+        // --- Contorno exaustivo do guard s>=32 (QW22) ---------------------
+        // size_bytes() DEVE saturar em 2^32 exato para TODO size_log2 em
+        // [32,63], e is_whole_space() DEVE ser true em toda a faixa. Sem o
+        // guard, '1 << size_log2' seria UB (deslocamento >= largura do tipo)
+        // ou truncaria em 32 bits -> 0, produzindo size=2^32 mal-formado
+        // repassado ao uc_mem_map (UC_ERR_NOMEM que travava o Core 0).
+        for (u32 s = 32; s <= 63; s++) {
+            Fpage w(make_fpage(0xb0d00000, s, false, true, true));
+            CHECK(w.size_log2() == s);
+            CHECK(w.size_bytes() == ((u64)1 << 32)); // satura, não estoura
+            CHECK(w.is_whole_space());
+            CHECK(!w.is_nil());
+        }
+        // size_log2=63 explícito (extremo do campo de 6 bits).
+        Fpage w63(make_fpage(0xb0d00000, 63, false, true, true));
+        CHECK(w63.size_log2() == 63);
+        CHECK(w63.size_bytes() == 0x100000000ull);
+        CHECK(w63.is_whole_space());
+
+        // Sub-contorno: size_log2=31 NÃO é whole-space e vale exatamente 2^31
+        // (última faixa que ainda cabe abaixo da saturação).
+        Fpage w31(make_fpage(0xb0d00000, 31, false, true, true));
+        CHECK(w31.size_log2() == 31);
+        CHECK(w31.size_bytes() == ((u64)1 << 31));
+        CHECK(!w31.is_whole_space());
     }
 
     if (g_fail == 0) {
