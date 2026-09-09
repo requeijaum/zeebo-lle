@@ -1805,6 +1805,22 @@ private:
         // MSM7201A (ARM1136/ARMv6) suporta paginas 4K/64K/1M/16M => bits 12,16,20,24.
         // rwx = 0x6 (RW). Valor conforme okl4-2.1.1 ARM (min page = 4KB).
         w32(0xc8, (1u<<12)|(1u<<16)|(1u<<20)|(1u<<24)|0x6); // PageInfo = 0x01111006
+        // KIP+0xc4 = thread_bits. O thread_init() do Iguana (0xb00070c8, casado
+        // com iguana/server/src/thread.c do OKL4 2.1.1) executa, ANTES do
+        // bi_execute:
+        //     min_threadno = (utcb[0] >> 14) + 2        (~131074 com o utcb dummy
+        //                                                 0x80000100 em 0xdff00000)
+        //     max_threadno = 1 << KIP[0xc4]             (ldrb — 1 byte: thread_bits)
+        //     rfl_insert_range(min, max)  -> se min > max => ASSERT (thread.c:134)
+        //                                    panic 0xb0007184 -> hang 0xb000b1d4.
+        // Com thread_bits=0 (KIP zerado), max = 1<<0 = 1 < min => o boot PANICA no
+        // thread_init e nunca alcança o bi_execute. Com thread_bits=18,
+        // 1<<18 = 262144 >= min => o panic some e o boot atravessa o thread_init.
+        // 18 é o valor do config ARM do OKL4 (arch/arm/pistachio/include/config.h:
+        // "256 MB de KTCBs, giving 18 valid bits for thread IDs") e o MÍNIMO que
+        // funciona com o utcb dummy atual (1<<17=131072 < min; 1<<18 >= min).
+        // Escrevemos como word: o byte lido pelo ldrb em 0xc4 fica = 0x12 (18).
+        w32(0xc4, 18);                     // thread_bits = 18 (KTCB de 256MB)
         uc_mem_write(core0_.uc, KIP_BASE, kip.data(), kip.size());
         printf("[KIP] Kernel Interface Page @ 0x%08x (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000, PageInfo[0xc8]=0x01111006 min-page=4K)\n", KIP_BASE);
     }
