@@ -37,21 +37,21 @@ from zeebo_debug_agent import _headless_env, _pick_free_port, EMU_BIN  # noqa: E
 from zeebo_debug_scripting import ZeeboDebugClient  # noqa: E402
 import subprocess  # noqa: E402
 
-PANIC_ADDR = 0xb0007184   # ASSERT do thread_init (min>max)
-HANG_ADDR = 0xb000b1d4    # loop de hang pós-panic
+# NOTEs (spec-review 2026-09-08 após integração do QW24):
+# 1) NÃO incluir 0xb000afe0 (memset) nos bps de parada: a rotina de memset
+#    (0xaf88+) roda nas inits ANTES do thread_init; um bp ali pausaria cedo e
+#    mascararia o panic em ambos os casos (KIP=0 e KIP=18).
+# 2) Marco de RED = SOMENTE o assert do thread_init (0xb0007184). O hang
+#    0xb000b1d4 é o DESTINO de TODOS os panics do kernel (função ad3c tem 98
+#    callers) e, com o QW24 integrado, o boot avança até UM OUTRO panic pós-
+#    thread_init (ex.: SpaceControl != 1) que também termina no hang. Usar o
+#    hang como marco do QW23 produziria falso negativo (o QW23 resolve o
+#    panic do thread_init; o boot pode pendurar em outro ponto após).
+PANIC_ADDR = 0xb0007184   # ASSERT do thread_init (min>max) — marco do RED
 KIP_BASE = 0xf0f00000
 THREAD_BITS_OFF = 0xc4
 EXPECTED_BITS = 18
-TIMEOUT_S = 22.0
-
-# NOTE (spec-review 2026-09-08): NÃO incluir 0xb000afe0 (memset) nos bps de
-# parada. A rotina de memset (0xaf88+) roda nas inits ANTES do thread_init
-# (0xb00070c8); um bp ali pausaria o boot cedo e mascararia o panic do
-# thread_init em ambos os casos (KIP=0 e KIP=18), tornando o RED fraco. Os
-# marcos de RED são o panic (0xb0007184) e o hang (0xb000b1d4); GREEN =
-# atravessou o thread_init sem hitar ambos dentro do timeout (timeout
-# silencioso = passou além).
-_PANIC_HANG = (PANIC_ADDR, HANG_ADDR)
+TIMEOUT_S = 25.0
 
 _RESULTS = []
 
@@ -73,7 +73,7 @@ def run_boot():
     )
     dbg = ZeeboDebugClient(port=port)
     result = {
-        "kip_bits": None, "panic_hit": False, "hang_hit": False,
+        "kip_bits": None, "panic_hit": False,
         "stopped_pc": None, "timed_out": False,
     }
     try:
@@ -84,8 +84,7 @@ def run_boot():
         pk = dbg.peek(KIP_BASE + THREAD_BITS_OFF, size=1, core=0)
         result["kip_bits"] = pk.get("val")
 
-        for a in _PANIC_HANG:
-            dbg.bp(a, core=0)
+        dbg.bp(PANIC_ADDR, core=0)
 
         dbg.cont()
 
@@ -101,9 +100,7 @@ def run_boot():
             result["timed_out"] = True
 
         result["stopped_pc"] = stopped_pc
-        if stopped_pc is not None:
-            result["panic_hit"] = (stopped_pc == PANIC_ADDR)
-            result["hang_hit"] = (stopped_pc == HANG_ADDR)
+        result["panic_hit"] = (stopped_pc == PANIC_ADDR)
         return result
     finally:
         try:
@@ -133,17 +130,17 @@ def main():
     pc = r["stopped_pc"]
     pc_hex = "None" if pc is None else f"0x{pc:08x}"
     print(f"\n[info] KIP[0xc4]={r['kip_bits']} stopped_pc={pc_hex} "
-          f"panic={r['panic_hit']} hang={r['hang_hit']} "
-          f"timed_out={r['timed_out']}", flush=True)
+          f"panic_thread_init={r['panic_hit']} timed_out={r['timed_out']}", flush=True)
 
     _check("KIP[0xc4] == 18 (thread_bits do build_kip)",
            r["kip_bits"] == EXPECTED_BITS, str(r["kip_bits"]))
     _check("boot NÃO hitou panic do thread_init (0xb0007184)",
            r["panic_hit"] is False, pc_hex)
-    _check("boot NÃO hitou hang pós-panic (0xb000b1d4)",
-           r["hang_hit"] is False, pc_hex)
-    _check("boot atravessou thread_init (timeout sem panic/hang; próximo bloqueio 0xb000afe0 está além)",
-           r["panic_hit"] is False and r["hang_hit"] is False, pc_hex)
+    # GREEN do QW23 = thread_init passou (não parou no assert 0xb0007184). O
+    # boot pode parar em seguida noutro ponto (ex.: hang 0xb000b1d4 por um
+    # panic pós-thread_init — próximo bloqueio, fora do escopo do QW23).
+    _check("boot atravessou thread_init (não parou no assert 0xb0007184)",
+           r["panic_hit"] is False, pc_hex)
 
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
     total = len(_RESULTS)
