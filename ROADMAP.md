@@ -1,12 +1,20 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, QW17-QW19 integrados)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-08, QW20-QW22 + causas raiz do Passo 13)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão consolida a resolução dos quick wins QW17, QW18 e QW19:
-- QW17 (`a88a9bd`): correção da convenção de PC-resume no `c0_intr_hook` (`target_pc = pc`), eliminando salto de instrução pós-syscall.
-- QW18: fechamento por análise causal da integridade de pilha/trap-id em interrupções fallback.
-- QW19 (`475ee1c`): correção da restauração de frame callee-saved (`push/pop {r4-r8, sb, sl, fp, lr/pc}`) no stub de `MapControl` (`0xb000c930`, syscall `0x14`), eliminando a corrupção de `r4` que causava o stall `size_log2=56` / `0xb000d708`.
-O Passo 13 avança agora para a validação do término dos 96 blocos de `mempool_init` no cold boot completo e o destravamento de `bootinfo_init` / `bi_execute`.
+Esta revisão consolida o fechamento do lote QW20-QW22 e a investigação do Passo 13 com o
+código-fonte OKL4 2.1.1 como referência (`refs/okl4-2.1.1-fix7/`, mapa completo em
+`notes/boot-investigation/okl4-source-reference-map.md`):
+- QW17 (`a88a9bd`)/QW19 (`475ee1c`): convenção de PC-resume e restauração de frame callee-saved
+  nos stubs de syscall — o mempool_init (96×1 MiB) atravessa e o boot avança além.
+- **Causa raiz 1 (validada por experimento)**: `thread_init` (0xb00070c8, casado com `thread.c`)
+  panica no assert (linha 134, `rfl_insert_range(131075, 1)`) porque o KIP sintético tem
+  `KIP[0xc4]` (thread_bits) = 0. Com `KIP[0xc4]=18` (poke via control-port, boot orgânico):
+  **`bi_execute` (0xb00001fc) é alcançado** e o boot roda código de server (0xb0400000+).
+- **Causa raiz 2**: o decode `PhysDesc::phys_base() = (raw>>6)<<10` (gran 1KB do OKL4 fix7)
+  produz endereços 16× maiores (MR cru 0x10081000 → 0x100810000, >4GB) → o handle_map_control
+  classifica os mapas físicos do bi_execute como "whole-space" e não os aplica → páginas rwx=0 →
+  memset do BSS falha com `UC_ERR_WRITE_PROT`. O Zeebo usa gran 64B (`<<6`).
 
 ## What is now KNOWN & VERIFIED (evidence from execution & disassembly)
 
@@ -175,9 +183,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Validação estrutural pura `validate_vtable()` checando alinhamento e se >=75% dos slots apontam para segmentos executáveis reais (`PF_X`). Testado sob Unicorn em `tools/cpp/gpu/igl_guest_bridge_test.cpp` (12/12 PASS).
 - [ ] **Core 0 — fechamento do BootInfo/`bi_execute` (Passo 13)**:
   - QW1 parcial (`f196f14`, `b5d0766`, `433ba9c`) criou parser host-only e gate separado `test-bootinfo-real`: bytes reais confirmam BootInfo no offset de arquivo `0x57000`, magic `0x1960021d`, 10 pools virtuais e 5 físicos; mutações provam que o parser segue os bytes.
-  - Limite comprovado: nenhum `BI_TAG_VIRT_POOLS` cobre `0xb0d00000..0xb6d00000` e `0xb6d00000` não aparece como word no firmware. As 96 fpages de 1 MiB são uma hipótese aritmética da execução de `mempool_init`, não resultado do parser e não conclusão da QW1.
-  - O boot vivo ainda apresenta descritor `size_log2>=32` e cursor estacionado em `0xb000d6dc`; não há prova de retorno `bi_execute@0xb00001fc` com `r0=0` nem de chegada a `0xb000aa94`.
-  - Próxima prova: capturar via ControlServer a sequência real de MRs/fpages e o avanço `r4/r7` até `0xb6d00000`, sem forçar registradores e sem validar por instruction-count.
+  - QW17/QW19 destravaram o `mempool_init`: os 96 blocos de 1 MiB (0xb0d00000..0xb6c00000) são atravessados no cold boot real.
+  - **Causa raiz 1** (casada com `thread.c` do OKL4): `thread_init` (0xb00070c8) panica no assert (r3=0x86/linha 134; `rfl_insert_range(min=131075, max=1)`) porque `KIP[0xc4]` (thread_bits) = 0 no KIP sintético. Experimentado: `KIP[0xc4]=18` → panic some e **`bi_execute` é alcançado** (lr=0xb0003448, r0=0xb0d00000), boot roda código de server (0xb0400000+).
+  - **Causa raiz 2**: decode do `PhysDesc` com gran 1KB (`(raw>>6)<<10`) vs gran 64B do Zeebo (`<<6`) — mapas físicos do bi_execute decodificam >4GB e viram "whole-space" no-op; páginas ficam rwx=0 e o memset do BSS falha (`UC_ERR_WRITE_PROT`). Evidência: MR cru 0x10081000 = RAM real 0x10081000.
+  - Próximo gate: fixes QW23 (KIP[0xc4]) e QW24 (gran do phys) por TDD; depois observar o avanço pós-bi_execute (extensions_init/iguana_server_loop) sem forçar registradores.
 - [x] **Core 1 CP15 Init Loop & Refinamento do Slide-Detector (commit `7bc384c`)**:
   - `0xf0017b04` é o loop de inicialização de CP15 (`bl 0xf0015d7c; cmp r4, #0xd; ble ...; mcr p15`). Falso positivo eliminado.
   - Refino aplicado ao `c1_code_hook`: o detector agora **decodifica a instrução ARM corrente** e zera a `slide_run` sempre que a insn é control-flow real (B/BL, BX/BLX, escrita de `Rd=PC` em data-proc/ldr, LDM/POP com PC na lista).
@@ -298,9 +307,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
 - [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
   - Parser host-only comprovado contra a cópia `1.1.2_APPS.bin`: BootInfo no offset `0x57000`, magic `0x1960021d`, 10 `BI_TAG_VIRT_POOLS` e 5 `BI_TAG_PHYS_POOLS`; mutações dos bytes alteram/rejeitam o parse como esperado.
-  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`), parser posicional CLI (`d137813`), correção de PC-resume QW17 (`a88a9bd`) e correção do stub MapControl QW19 (`475ee1c`).
-  - Causa raiz do stall em `0xb000d708` (`size_log2 = 56`) resolvida: a restauração do frame de callee-saved (`push/pop`) em `0xb000c930` agora preserva `r4` (ponteiro virtual do pool). Em isolamento, o laço de 96 fpages de 1 MiB conclui com `r0=1` e `r4=0xb6d00000`.
-  - Próximo gate: validar no emulador completo a saída limpa de `mempool_init` para `bootinfo_init` (`0xb0001e80`) e `bi_execute@0xb00001fc` com `r0=0`, seguido por `extensions_init@0xb00017b8`. Proibido forçar registradores ou validar por instruction-count.
+  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`), parser posicional CLI (`d137813`), correção de PC-resume QW17 (`a88a9bd`) e correção do stub MapControl QW19 (`475ee1c`) — o `mempool_init` atravessa os 96 blocos de 1 MiB no boot real.
+  - Bloqueio atual (2 causas raiz, casadas com o fonte OKL4 2.1.1 em `refs/okl4-2.1.1-fix7/`): (1) `KIP[0xc4]` (thread_bits) = 0 → `thread_init` panica (QW23); (2) decode do `PhysDesc` com gran 1KB vs 64B do Zeebo → mapas físicos no-op (QW24).
+  - Experimento (2026-09-08, poke KIP[0xc4]=18 via control-port): `bi_execute` (0xb00001fc) alcançado com `r0=0xb0d00000` (lr=0xb0003448 do main); boot avança 13k+ ciclos executando código de server (0xb0400000+) até o WRITE_PROT do memset do BSS.
+  - Próximo gate: QW23 + QW24 por TDD (RED→GREEN) e re-observar o boot: atravessar o `bi_execute` com maps físicos reais e alcançar `extensions_init@0xb00017b8`/`iguana_server_loop@0xb000aa94` sem forçar registradores.
 - [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
   - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
   - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
@@ -311,10 +321,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ### P0 — Cadeia crítica de boot real
 
-1. **Passo 13 — BootInfo/`bi_execute`**
-   - Já provado por bytes: BootInfo @ file offset `0x57000`, magic `0x1960021d`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`; o parser não contém evidência da faixa de 96 MiB.
-   - QW12 concluiu o experimento de observação: a cadeia chega a `mempool_init`/decomposição/`stuck_add`, mas retorna whole-space (`fpage=0xb0d00206`) sem avançar `r4`; classificação honesta `blocked`.
-   - Próximo experimento: harness guest vivo em que MapControl transforme os MRs de saída, para derivar o avanço real por bytes. Gate final: `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e `0xb000aa94`; proibido forçar registradores ou validar por instruction-count.
+1. **Passo 13 — BootInfo/`bi_execute`** (bloqueio atual = QW23 + QW24)
+   - Já provado por bytes: BootInfo @ file offset `0x57000`, magic `0x1960021d`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
+   - QW17/QW19 destravaram o `mempool_init` (96×1 MiB atravessados no boot real). Experimentos com o fonte OKL4 2.1.1 casaram as 2 causas raiz do bloqueio atual: `KIP[0xc4]` (thread_bits) zerado → panic do `thread_init`; e decode do `PhysDesc` com gran errada → mapas físicos do bi_execute viram no-op.
+   - Gate final: `bi_execute@0xb00001fc` com `r0=0`, `extensions_init@0xb00017b8` e `iguana_server_loop@0xb000aa94`, com os mapas físicos reais aplicados; proibido forçar registradores ou validar por instruction-count.
 2. **Passo 14 — threads/IPC Iguana → BREW**
    - Completar semântica observada de `L4_ThreadControl(0x0c)`, `L4_Ipc(0x00)` e `L4_ExchangeRegisters(0x10)`.
    - Gate: handoff orgânico ao AEECShell/BREW em `0x10137000`/`0x10c874f4`, com objeto IGL/IEGL vivo capturado pelo bridge.
@@ -345,6 +355,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW20 | **concluído** | Alinhamento do alvo `make clean` e remoção de artefatos de teste não rastreados (`83fff7f`) | baixo | gate estático `test_clean_hygiene.py` (23 alvos root + 10 gpu cobertos pelo clean do próprio Makefile); roda no check sem destruir artefatos; mutação negativa real (remover 1 nome → RED) |
 | QW21 | **concluído (análise)** | Teste de regressão para convenção de retorno de `L4_ExchangeRegisters` (syscall `0x0c` / `0x140c`) | baixo | stub 0xb000c758 comparado byte-a-byte com `exchangeregisters.spp`; 8 callers reais existem, mas bp vivo não hitou no boot atual (panica no thread_init antes); fix do case 0x0c (sp=ip + outputs em ip+0x30) necessário quando o bi_execute destravar |
 | QW22 | **concluído** | Teste de limite de fpage whole-space em `zeebo_l4_mmu.h` sem overflow de 32 bits (`280e421`) | baixo | auditoria sem gap de produção (guard s>=32 já correto); fortalecimento de contorno em `test_l4_mmu.cpp`: size_log2∈[32,63] → size_bytes()==2^32 exato + is_whole_space(); 63 explícito; sub-contorno 31 (==2^31, não whole-space) |
+| QW23 | **proposto** | Inicializar `KIP[0xc4]` (thread_bits) no `build_kip` do KIP sintético | baixo | TDD: teste que o KIP montado tem o campo 0xc4 coerente (candidato 18 — "18 valid bits" do config ARM); RED = boot vivo panica no `thread_init` (0xb0007184); GREEN = boot atravessa o `thread_init` e alcança `bi_execute` (0xb00001fc) sem poke externo |
+| QW24 | **proposto** | Corrigir decode do `PhysDesc::phys_base()` para a gran do Zeebo (`(raw>>6)<<6`, 64B) em `zeebo_l4_mmu.h` | baixo-médio | TDD host-only: MRs crus observados (0x10081000 → phys 0x10081000; 0x10000000 → 0x10000000); RED contra o decode atual (0x100810000); GREEN com `<<6`; validar no boot que os maps físicos do bi_execute são aplicados (fim do WRITE_PROT no memset do BSS) |
+| QW25 | **proposto (condicional)** | Revisar a heurística "phys_base ≥ 0x100000000 = controle de AS" do `handle_map_control` após o QW24 | baixo | junto ao QW24: se a heurística foi construída sobre o decode errado, remover/ajustar para que os maps físicos reais (0x10000000-0x16000000) não sejam classificados como whole-space; manter a proteção só para fpages com `size_log2>=32` |
 
 ### P1 — Infraestrutura após o Passo 13
 
@@ -380,10 +393,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ## Estratégia de execução paralela
 
-- **Concluído:** QW2–QW7, QW9, QW12, QW14–QW17, QW18 (análise) e QW19; todos integrados com TDD, mutações load-bearing e revisão independente. QW1/QW8 permanecem parciais honestos.
-- **Frente A — cadeia crítica:** QW17 e QW19 eliminaram o desvio espúrio e a destruição de registradores callee-saved (`r4`) no stub de `MapControl`. O laço de 96 fpages de 1 MiB agora completa sem corrupção; a frente avança para a observação da transição para `bootinfo_init` e `bi_execute`.
-- **Frente E — GL estrutural:** QW9 ATITC concluído; QW10/QW11 em execução no mesmo worktree, com RED discriminante antes da produção.
-- **Frente de hardening curto:** QW14/QW15/QW16 concluídos; `--strict-unmapped` permanece opt-in e QDSP5 não foi alterado.
+- **Concluído:** QW2–QW7, QW9, QW12, QW14–QW17, QW18 (análise), QW19, QW20, QW21 (análise) e QW22; todos integrados com TDD, mutações load-bearing e revisão independente (spec + quality). QW1/QW8 permanecem parciais honestos.
+- **Frente A — cadeia crítica (Passo 13):** QW17/QW19 destravaram o `mempool_init`; o bloqueio atual tem 2 causas raiz casadas com o fonte OKL4 2.1.1: `KIP[0xc4]` zerado (panic do `thread_init`) e decode do `PhysDesc` com gran errada (mapas físicos no-op). Próximos: QW23 (KIP thread_bits) e QW24 (gran 64B do phys) por TDD; o experimento KIP[0xc4]=18 já provou que o boot alcança `bi_execute` e roda código de server.
+- **Frente E — GL estrutural:** concluída (QW9-QW11 integrados).
+- **Frente de hardening curto:** QW14/QW15/QW16/QW20 concluídos; `--strict-unmapped` permanece opt-in e QDSP5 não foi alterado.
 - **Depois do Passo 13:** Passo 14 e P1 na ordem checkpoint → tempo híbrido → JSON-RPC → GDB; só promover objetos, extensões e applets alcançados pelo boot real.
 - **QDSP5:** congelado até liberação explícita; executar seus testes, mas não editar `tools/cpp/qdsp5/`.
 
