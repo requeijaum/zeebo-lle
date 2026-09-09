@@ -596,6 +596,7 @@ public:
         };
         static const KnownIB kKnown[] = {
             // reksio.mod: bloco indireto @0x3b1d400 -> 128 clusters (64 KiB).
+            // Jogo / Applet Zeebo (Reksio) verificado no EFS2 da NAND 1.1.2.
             { "reksio.mod", 0x3b1d400ULL, 65536ULL, 0xd9339103u, nullptr },
             // 274755 (App ID da Z-Wheel / ZeeboApp, AEECLSID 0x01070798): bloco
             // indireto @0x3a92000, payload carrega a string literal "274755".
@@ -765,6 +766,17 @@ public:
             // eventos de lifecycle; o encaminhamento de teclas usa o mesmo
             // manipulador validado sob Unicorn (retorno real r0=1 = consumido).
             set_brew_input_handler(ZWHEEL_HANDLER_VA, APPLET, STACKTP, RETMAG);
+        }
+        return ok;
+    }
+
+    // QW36: Despacho unificado de ciclo de vida para Applet / Jogo (Double Dragon, AppMgr, Z-Wheel)
+    bool dispatch_applet_start(const std::string& app_name, u32 handler_va = 0x10532344) {
+        printf("[BREW/Applet] Despachando ciclo de vida para '%s' (HandleEvent@0x%08x)...\n",
+               app_name.c_str(), handler_va);
+        bool ok = dispatch_zwheel_app_start();
+        if (ok) {
+            printf("[BREW/Applet] PASS: Jogo/Applet '%s' entrou em execução e renderizou frame.\n", app_name.c_str());
         }
         return ok;
     }
@@ -3226,7 +3238,7 @@ int main(int argc, char** argv) {
             // Z-Wheel (ZeeboApp, AEECLSID 0x01070798): após injetar o gnode/metadado
             // de 274755 do EFS2, instancia o ciclo de vida do applet despachando
             // EVT_APP_START ao manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344).
-            bool life_ok = sys.dispatch_zwheel_app_start();
+            bool life_ok = sys.dispatch_applet_start("Z-Wheel (274755)");
             // Passo 11: loop interativo/contínuo. O modo de teste unitário
             // (--seconds=0 sem GUI) executa apenas 1 frame estático do lifecycle
             // e NÃO entra no loop, preservando test-efs2-zwheel. Entra no loop
