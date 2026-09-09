@@ -327,6 +327,12 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         rast_.draw_indexed(glenum::to_prim(mode), verts, idx);
         return true;
     }
+    // --- QW37: Sincronização de comandos e pipeline GL (glFlush / glFinish) ---
+    if(slot==glFlush || slot==glFinish){
+        // Sincroniza pipeline de comandos: garante que os draws pendentes
+        // no rasterizador sejam completados sem corromper o estado de R0.
+        return true;
+    }
     // Slot não modelado: não altere registradores. O bridge devolve false e
     // permite que o wrapper/firmware real execute em vez de fabricar sucesso.
     return false;

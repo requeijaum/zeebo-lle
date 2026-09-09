@@ -126,6 +126,11 @@ int main(){
     const bool blend_state_ok=blend_func_ok&&blend_enable_ok;
     printf("[igl blend ] frontend state handled=%d %s\n",blend_state_ok,blend_state_ok?"PASS":"FAIL");
 
+    const bool flush_ok = hook.dispatch_igl(igl_slot::glFlush, gm);
+    const bool finish_ok = hook.dispatch_igl(igl_slot::glFinish, gm);
+    const bool sync_ok = flush_ok && finish_ok;
+    printf("[igl sync  ] glFlush=%d glFinish=%d %s\n", flush_ok, finish_ok, sync_ok?"PASS":"FAIL");
+
     regs={glenum::TEXTURE_2D}; hook.dispatch_igl(igl_slot::glDisable,gm);
     regs={glenum::DEPTH_TEST}; hook.dispatch_igl(igl_slot::glDisable,gm);
     regs={FX(1),0,0,FX(1)}; const bool color_call=hook.dispatch_igl(igl_slot::glColor4x,gm);

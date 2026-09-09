@@ -849,6 +849,10 @@ public:
                 rast_->clear_color(0.1f, 0.2f, 0.8f, 1.0f);
                 rast_->clear(0x4000);
                 rast_->end_frame();
+                // QW37: Sincroniza estado de framebuffer dirty e contadores Adreno 130
+                if (gpu_) {
+                    gpu_->write(0x010c, gpu_->read(0x010c) + 1); // Notifica emissão/flush de draw
+                }
                 fb = rast_->framebuffer_rgb565();
             }
             if (fb && sink_) sink_->update_frame(fb);
