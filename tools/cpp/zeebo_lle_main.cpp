@@ -77,9 +77,26 @@ enum {
     ADRENO130_SIZE      = 0x00100000, // 1MB
     CHIP_ID_YAMATO      = 0x01030000,
     
-    // Keypad / Controller
-    KEYPAD_BASE         = 0xa9a00000,
+    // Keypad / Controller — MMIO de leitura do estado de teclas. NOTA de hardware:
+    // o keypad físico do Zeebo é GPIO/keysense (INT_KEYSENSE=28), NÃO um bloco MMIO
+    // em 0xA9A00000. A base usada antes (0xA9A00000) COLIDIA com o endereço real da
+    // UART1 e engolia seu console. Movida para um slot não-conflitante apenas para
+    // manter o modelo MMIO neutro (o input real é SDL -> press_key -> VIC IRQ28; a
+    // leitura via register deste MMIO não é exercitada pelo caminho de input real).
+    KEYPAD_BASE         = 0xa9a10000,
     KEYPAD_SIZE         = 0x00010000,
+
+    // ---- UART (verificado: MSM7200/7201 tem 3 UARTs; UART1 = console serial) ----
+    // Fontes: tools/zloader/include/msm7k/uart.h (UART1 0xA9A00000, UART2 0xA9B00000,
+    // UART3 0xA9C00000) + wiki tripleoxygen (console/UART: UART1 TX=GPIO46 RX=GPIO45,
+    // 115200, sequência de setup em tools/zloader/notes.txt: LDR R4,=0xA9A00000 ...).
+    // UART1 dirige o console de boot/linux; UART2/3 ficam expostas para captura.
+    UART1_BASE          = 0xa9a00000,
+    UART2_BASE          = 0xa9b00000,
+    UART3_BASE          = 0xa9c00000,
+    UART_SIZE           = 0x00010000, // 64KB de registradores por UART
+    UART_OFF_TF         = 0x000c,     // TX FIFO / data register (UART_TF)
+    UART_OFF_SR         = 0x0008,     // status (UART_SR; bit2 = TX_READY)
     
     // Apps RAM Base
     APPS_RAM_PHYS_BASE  = 0x10000000,
@@ -1848,6 +1865,12 @@ private:
         uc_mem_map(core0_.uc, KEYPAD_BASE, KEYPAD_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, 0xa0a00000, 0x10000, UC_PROT_ALL); // NAND
         uc_mem_map(core0_.uc, 0xa9400000, 0x10000, UC_PROT_ALL); // DMOV
+        // UARTs (3 no MSM7200/7201). UART1 = console serial (boot/linux).
+        // Mapeadas antes dos periféricos vizinhos p/ expor leitura/escrita dos
+        // registradores UART (TX FIFO etc.) ao c0_mem_hook/c0_mem_read_hook.
+        uc_mem_map(core0_.uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
+        uc_mem_map(core0_.uc, UART2_BASE, UART_SIZE, UC_PROT_ALL);
+        uc_mem_map(core0_.uc, UART3_BASE, UART_SIZE, UC_PROT_ALL);
 
         // OKL4 L4e virtual layout (refs/okl4-2.1.1-fix7 arch/arm/pistachio/include/config.h):
         //   MISC_AREA @ 0xff000000, USER_UTCB_PAGE = 0xff000000, ref em +0xff0.
@@ -2186,9 +2209,12 @@ private:
     }
 
     void setup_hooks() {
-        uc_hook h_c0, h_m0, h_u0, h_i0;
+        uc_hook h_c0, h_m0, h_u0, h_i0, h_r0;
         uc_hook_add(core0_.uc, &h_c0, UC_HOOK_CODE, (void*)c0_code_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_m0, UC_HOOK_MEM_WRITE, (void*)c0_mem_hook, this, 0, ~0ULL);
+        // Leitura de registradores de periférico modelados (UART status), injetando
+        // o valor do modelo antes do fetch — sem isto, UART/MDDI reads leriam RAM crua.
+        uc_hook_add(core0_.uc, &h_r0, UC_HOOK_MEM_READ, (void*)c0_mem_read_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_u0, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c0_unmapped_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 0, ~0ULL);
 
@@ -2890,9 +2916,53 @@ private:
         else if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) {
             sys->gpu_->write((u32)(addr - ADRENO130_BASE), (u32)value);
         }
+        // UART TX FIFO write -> console: a UART1 é o console serial do boot/linux
+        // (0xA9A00000; UART2/3 também expostas). Toda escrita no registrador de
+        // dados (UART_TF, offset 0x0C) é um caractere TX. Acumulamos e imprimimos
+        // como console em stderr (linha terminal, com escape) para ler as mensagens
+        // de boot. Não afeta o estado da emulação — é um sink de diagnóstico.
+        else if ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
+                 (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
+                 (addr >= UART3_BASE && addr < UART3_BASE + UART_SIZE)) {
+            const u32 off = (u32)(addr - (addr & ~(UART_SIZE - 1)));
+            (void)off;
+            if (type == UC_MEM_WRITE) {
+                const unsigned char ch = (unsigned char)(value & 0xFF);
+                static u32 line_bytes = 0;
+                if (ch == '\n') { fprintf(stderr, "\n"); line_bytes = 0; }
+                else if (ch == '\r') { /* swallow CR */ }
+                else if (ch >= 0x20 || ch == '\t') {
+                    fputc(ch, stderr);
+                    if (++line_bytes >= 200) { fprintf(stderr, "\n"); line_bytes = 0; }
+                }
+            }
+        }
         // Keypad write
         else if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE) {
             sys->input_->write((u32)(addr - KEYPAD_BASE), (u32)value);
+        }
+    }
+
+    // Leitura de registrador de periférico no Core 0. O Unicorn lê a RAM de fundo
+    // (mapeada com uc_mem_map); para os periféricos MODELADOS (UART), injetamos o
+    // valor de status antes da leitura — análogo ao c1_heap_read_hook. UART_SR
+    // (offset 0x08) retorna TX_READY|TX_EMPTY (0x0C) para o console não travar em
+    // espera de FIFO; outros offsets mantêm a RAM (modelo neutro).
+    static void c0_mem_read_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t, void* ud) {
+        (void)ud; (void)type;
+        if (size != 4 && size != 2 && size != 1) return;
+        const bool is_uart =
+            (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
+        if (!is_uart) return;
+        const u32 base = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? UART1_BASE
+                       : (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ? UART2_BASE
+                       : UART3_BASE;
+        const u32 off = (u32)(addr - base);
+        if (off == UART_OFF_SR) {
+            // UART_SR: TX_READY(bit2) e TX_EMPTY(bit3) setados = transmissor ocioso,
+            // pronto para o guest escrever o próximo byte sem travar em poll.
+            const u32 ready = 0x000C;
+            uc_mem_write(uc, addr, &ready, (size_t)size);
         }
     }
 
