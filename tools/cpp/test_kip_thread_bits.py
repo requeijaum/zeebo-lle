@@ -39,11 +39,19 @@ import subprocess  # noqa: E402
 
 PANIC_ADDR = 0xb0007184   # ASSERT do thread_init (min>max)
 HANG_ADDR = 0xb000b1d4    # loop de hang pós-panic
-GREEN_ADDR = 0xb000afe0   # memset (próximo bloqueio conhecido — além do thread_init)
 KIP_BASE = 0xf0f00000
 THREAD_BITS_OFF = 0xc4
 EXPECTED_BITS = 18
 TIMEOUT_S = 22.0
+
+# NOTE (spec-review 2026-09-08): NÃO incluir 0xb000afe0 (memset) nos bps de
+# parada. A rotina de memset (0xaf88+) roda nas inits ANTES do thread_init
+# (0xb00070c8); um bp ali pausaria o boot cedo e mascararia o panic do
+# thread_init em ambos os casos (KIP=0 e KIP=18), tornando o RED fraco. Os
+# marcos de RED são o panic (0xb0007184) e o hang (0xb000b1d4); GREEN =
+# atravessou o thread_init sem hitar ambos dentro do timeout (timeout
+# silencioso = passou além).
+_PANIC_HANG = (PANIC_ADDR, HANG_ADDR)
 
 _RESULTS = []
 
@@ -65,8 +73,8 @@ def run_boot():
     )
     dbg = ZeeboDebugClient(port=port)
     result = {
-        "kip_bits": None, "panic_hit": None, "hang_hit": None,
-        "green_hit": False, "stopped_pc": None, "timed_out": False,
+        "kip_bits": None, "panic_hit": False, "hang_hit": False,
+        "stopped_pc": None, "timed_out": False,
     }
     try:
         dbg.connect(timeout=8.0)
@@ -76,7 +84,7 @@ def run_boot():
         pk = dbg.peek(KIP_BASE + THREAD_BITS_OFF, size=1, core=0)
         result["kip_bits"] = pk.get("val")
 
-        for a in (PANIC_ADDR, HANG_ADDR, GREEN_ADDR):
+        for a in _PANIC_HANG:
             dbg.bp(a, core=0)
 
         dbg.cont()
@@ -96,7 +104,6 @@ def run_boot():
         if stopped_pc is not None:
             result["panic_hit"] = (stopped_pc == PANIC_ADDR)
             result["hang_hit"] = (stopped_pc == HANG_ADDR)
-            result["green_hit"] = (stopped_pc == GREEN_ADDR)
         return result
     finally:
         try:
@@ -126,8 +133,8 @@ def main():
     pc = r["stopped_pc"]
     pc_hex = "None" if pc is None else f"0x{pc:08x}"
     print(f"\n[info] KIP[0xc4]={r['kip_bits']} stopped_pc={pc_hex} "
-          f"panic={r['panic_hit']} hang={r['hang_hit']} green={r['green_hit']} "
-          f"timeout={r['timed_out']}", flush=True)
+          f"panic={r['panic_hit']} hang={r['hang_hit']} "
+          f"timed_out={r['timed_out']}", flush=True)
 
     _check("KIP[0xc4] == 18 (thread_bits do build_kip)",
            r["kip_bits"] == EXPECTED_BITS, str(r["kip_bits"]))
@@ -135,8 +142,8 @@ def main():
            r["panic_hit"] is False, pc_hex)
     _check("boot NÃO hitou hang pós-panic (0xb000b1d4)",
            r["hang_hit"] is False, pc_hex)
-    _check("boot atravessou thread_init (parou no marco 0xb000afe0 ou além, não em panic/hang)",
-           r["green_hit"] is True and r["timed_out"] is False, pc_hex)
+    _check("boot atravessou thread_init (timeout sem panic/hang; próximo bloqueio 0xb000afe0 está além)",
+           r["panic_hit"] is False and r["hang_hit"] is False, pc_hex)
 
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
     total = len(_RESULTS)
