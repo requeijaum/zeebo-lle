@@ -59,6 +59,14 @@ test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
 	./test_l4_mmu_uc
 
+# L4_KernelInterface (0xb000c720): prova host-only, com os bytes reais do stub,
+# que o SP no intr hook é o SP da trap (mvn sp,#0x4b => 0xFFFFFFB4) e não o frame
+# do chamador — logo a escrita extra sp+0/4/8 era espúria e NÃO corrompe r4.
+# Mutação negativa (escrever em ip+0/4/8) fica VERMELHA (corrompe r4 -> 0xc).
+test_l4_kip_trap: test_l4_kip_trap.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_l4_kip_trap.cpp -lunicorn
+	./test_l4_kip_trap
+
 # QW13: regressão TRANSACIONAL de L4_MapControl sob Unicorn — fixa MRs iniciais,
 # entradas da syscall, transação de map (regiões criadas em ordem, escrita real
 # de página), resultado r0, skip de item malformado e whole-space sem overflow.
@@ -242,7 +250,7 @@ test-clean-hygiene:
 
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn test_l4_thread_table test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
+       test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume
 	./test_brew_timer
 	./test_audio_sink
@@ -254,7 +262,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn test_l4_thread_table test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
+	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume *.o

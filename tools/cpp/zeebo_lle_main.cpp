@@ -2338,14 +2338,13 @@ private:
                 if (r4) uc_mem_write(uc, r4, &kip_r1, 4);
                 if (r5) uc_mem_write(uc, r5, &kip_r2, 4);
                 if (r6) uc_mem_write(uc, r6, &kip_r3, 4);
-
-                // Grava também no topo do stack (onde o runtime do Iguana lê os outputs):
-                // Iguana faz pop ou ldr de variáveis locais na stack após a trap KIP.
-                u32 sp = 0;
-                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
-                uc_mem_write(uc, sp + 0, &kip_r1, 4);
-                uc_mem_write(uc, sp + 4, &kip_r2, 4);
-                uc_mem_write(uc, sp + 8, &kip_r3, 4);
+                // NOTA (test_l4_kip_trap.cpp): NÃO escrever em sp+0/4/8 aqui. No momento
+                // do intr hook o SP é o SP DA TRAP (o stub 0xb000c720 fez `mvn sp,#0x4b`
+                // => SP=0xFFFFFFB4), scratch que nenhum caminho real do firmware lê. O
+                // frame do chamador {r4,r5,r6} vive em `ip` (== SP antigo). A escrita
+                // extra era espúria (grava em 0xFFFFFFB4/B8/BC, nunca lido); só escrever
+                // em ip+0/4/8 corromperia o r4 salvo (ptr do cache de páginas) — o teste
+                // reproduz esse mutante como RED e prova o caminho atual como GREEN.
                 break;
             }
             default: res_r0 = 0; break;                      // demais (kputc etc.) no-op
