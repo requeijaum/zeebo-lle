@@ -37,6 +37,29 @@ tools/cpp/test_l4_mmu_uc
 tools/cpp/test_l4_mmu
 tools/cpp/test_l4_mmu_txn
 
+# Binários de teste/nova geração (cobertos pelo clean do Makefile; fontes rastreados)
+tools/cpp/test_brew_mif
+tools/cpp/test_brew_timer
+tools/cpp/test_cli_paths
+tools/cpp/test_control_server
+tools/cpp/test_exregs_activation
+tools/cpp/test_exregs_frame_resume
+tools/cpp/test_exregs_ig_naming
+tools/cpp/test_intr_pc_resume
+tools/cpp/test_l4_ipc_dispatch
+tools/cpp/test_l4_ipc_msgtag
+tools/cpp/test_l4_kip_trap
+tools/cpp/test_l4_thread_table
+tools/cpp/test_mapcontrol_frame_resume
+tools/cpp/test_probe_registry
+tools/cpp/test_svc_thumb_resume
+tools/cpp/test_threadspace_frame_resume
+tools/cpp/zeebo_bootinfo_harness
+tools/cpp/gpu/atitc_smoke
+tools/cpp/gpu/gl_alpha_sampler_smoke
+tools/cpp/gpu/gl_quickwins_smoke
+tools/cpp/gpu/igl_guest_bridge_test
+
 # Estado local do agente e caches Python
 .hermes/
 __pycache__/
