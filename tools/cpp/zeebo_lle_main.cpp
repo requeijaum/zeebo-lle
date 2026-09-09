@@ -2190,6 +2190,9 @@ private:
                         u32 target_sp = nxt->sp;
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        if (sys->service_registry_.is_amss_thread(next_tid)) {
+                            printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x\n", next_tid, target_ip);
+                        }
                     }
                 }
                 // Garante que o retorno do wrapper IPC em 0xb000c834 restaure r5 apontando para UTCB+0x44
@@ -2216,6 +2219,9 @@ private:
                         u32 target_sp = nxt->sp;
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        if (sys->service_registry_.is_amss_thread(next_tid)) {
+                            printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x\n", next_tid, target_ip);
+                        }
                     }
                 }
                 break;

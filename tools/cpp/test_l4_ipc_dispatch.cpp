@@ -83,6 +83,13 @@ int main() {
     assert(msg.mr[0] == 0x16);
     assert(msg.mr[1] == 0x10137000);
 
+    // QW33: Validação de identificação da thread e ponto de entrada AMSS/BREW
+    assert(reg.is_amss_thread(23));
+    assert(!reg.is_amss_thread(6));
+    assert(!reg.is_amss_thread(13));
+    assert(!reg.is_amss_thread(999));
+    assert(reg.get_amss_entry() == 0x10137000);
+
     printf("=== Test L4 IPC Dispatch & Service Registry: PASS ===\n");
     return 0;
 }

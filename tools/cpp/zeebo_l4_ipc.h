@@ -78,6 +78,17 @@ public:
 
     size_t count() const { return services_.size(); }
 
+    // QW33: Identifica se a thread informada é um ponto de entrada para o AMSS/BREW
+    bool is_amss_thread(uint32_t tid) const {
+        const auto* desc = lookup_by_tid(tid);
+        return desc && desc->name == "amss";
+    }
+
+    uint32_t get_amss_entry() const {
+        const auto* desc = lookup_by_name("amss");
+        return desc ? desc->buffer_base : 0;
+    }
+
     void clear() {
         services_.clear();
         by_tid_.clear();
