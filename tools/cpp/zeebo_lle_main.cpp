@@ -2277,10 +2277,21 @@ private:
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
-        } else if (syscall == 0x0c) { // L4_ExchangeRegisters
+        } else if (syscall == 0x0c) { // L4_ExchangeRegisters (QW27)
+            // Stub 0xb000c758: push {r4-r8,sb,sl,fp,lr}; ldr r4,[sp,#0x24];
+            //   ldr r5,[sp,#0x28]; ldr r6,[sp,#0x2c]; mov ip,sp; mvn sp,#0xf3;
+            //   svc #0x140c; add lr,sp,#0x30; ldm lr,{r7,r8,sb,sl,fp,ip};
+            //   str r1,[r7]; str r2,[r8]; str r3,[sb]; str r4,[sl]; str r5,[fp];
+            //   str r6,[ip]; pop {r4-r8,sb,sl,fp,pc} (em 0xb000c794).
+            // pc == svc+4 (0xb000c774 = add lr,sp,#0x30). Este stub tem trap-stack:
+            // o epílogo lê os 6 ponteiros de saída de [ip+0x30..0x44] e escreve r1-r6
+            // neles antes do pop final. É MANDATÓRIO restaurar SP=ip: sem isso o
+            // `add lr,sp,#0x30` soma sobre o sp de trap corrompido (mvn = 0xffffff0c)
+            // e o `pop {...,pc}` desempilha lixo, saltando para PC=0x00000000.
             target_pc = pc; // pc already == svc+4; QW17: no extra +4
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
-            uc_ctl_remove_cache(uc, pc, 16);
+            uc_ctl_remove_cache(uc, 0xb000c758, 0x40);
         } else if (syscall == 0x14) { // L4_MapControl
             // O stub de MapControl em 0xb000c930 é:
             //   0xb000c930: push {r4-r8, sb, sl, fp, lr}
