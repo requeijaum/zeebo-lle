@@ -300,10 +300,19 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
     if (it.fpage.is_nil() || size == 0) return UC_ERR_OK;
     // fpage de espaço inteiro (2^32): operação de controle, não mapeamento de RAM.
     // Não repassar ao uc_mem_map (estouraria 32 bits -> UC_ERR_NOMEM).
+    // (A justificativa completa do porquê deste critério — e da remoção do antigo
+    // guard `phys_base() >= 4GB` — está no dispatcher handle_map_control, QW24.)
     if (it.fpage.is_whole_space()) return UC_ERR_OK;
 
     u64 base = va & ~(PAGE - 1);
     u64 end  = (va + size + PAGE - 1) & ~(PAGE - 1);
+    // Clamp ao espaço endereçável de 32 bits (ARM do Zeebo é 32-bit). size_log2
+    // em [24,31] sobre base alta (ex.: 2GiB @ 0xC0000000) faz `end` ultrapassar
+    // 0x100000000; repassar esse range ao uc_mem_map cruza a fronteira de 4GB e
+    // retorna UC_ERR_NOMEM/ARG (o guard whole-space, s>=32, NÃO cobre esse caso).
+    // Trava o mapeamento no topo do espaço: mapeia o que cabe no guest.
+    if (base >= 0x100000000ull) return UC_ERR_OK;      // base fora do espaço: controle
+    if (end > 0x100000000ull) end = 0x100000000ull;    // clamp ao fim do espaço
     u64 msize = end - base;
     if (msize < PAGE) msize = PAGE;
 
@@ -361,6 +370,11 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
 
     u64 base  = va & ~(PAGE - 1);
     u64 end   = (va + size + PAGE - 1) & ~(PAGE - 1);
+    // Clamp ao espaço de 32 bits (mesmo motivo de map_one): fpage de size_log2
+    // em [24,31] sobre base alta cruzaria 0x100000000 e uc_mem_map_ptr retornaria
+    // UC_ERR_NOMEM/ARG (cobriria um range fora do guest, onde a pool não alcança).
+    if (base >= 0x100000000ull) return UC_ERR_OK;
+    if (end > 0x100000000ull) end = 0x100000000ull;
     u64 msize = end - base;
     if (msize < PAGE) msize = PAGE;
 

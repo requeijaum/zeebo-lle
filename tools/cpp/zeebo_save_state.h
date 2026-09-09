@@ -134,32 +134,43 @@ public:
             if (c1_ctx) uc_free(c1_ctx);
             return false;
         }
-        bool ok = read_exact(in, c0_ctx, expected0) && read_exact(in, c1_ctx, expected1) &&
-                  uc_context_restore(uc0, c0_ctx) == UC_ERR_OK &&
-                  uc_context_restore(uc1, c1_ctx) == UC_ERR_OK;
-        uc_free(c0_ctx); uc_free(c1_ctx);
-        if (!ok) return false;
+        // Lê os bytes de contexto SEM restaurar ainda. A restauração dos
+        // registradores dos DOIS cores só ocorre DEPOIS de validar/ler todo o
+        // payload (regiões de memória abaixo). Se uma região malformada surgir,
+        // retorna false com o estado da CPU intocado — sem restauração parcial.
+        bool ok = read_exact(in, c0_ctx, expected0) && read_exact(in, c1_ctx, expected1);
 
         std::array<uint8_t, IO_CHUNK> chunk{};
-        for (uint32_t i = 0; i < hdr.num_mem_regions; ++i) {
+        for (uint32_t i = 0; ok && i < hdr.num_mem_regions; ++i) {
             ZeeboMemRegionHeader rh{};
-            if (!read_exact(in, &rh, sizeof(rh)) || rh.core_id > 1 || rh.end < rh.begin) return false;
+            if (!read_exact(in, &rh, sizeof(rh)) || rh.core_id > 1 || rh.end < rh.begin) { ok = false; break; }
             const uint64_t expected_size = rh.end - rh.begin + 1;
             if (rh.data_size != expected_size || rh.data_size == 0 ||
-                rh.data_size > MAX_REGION_SIZE || rh.begin + rh.data_size - 1 != rh.end) return false;
+                rh.data_size > MAX_REGION_SIZE || rh.begin + rh.data_size - 1 != rh.end) { ok = false; break; }
 
             uc_engine* uc = rh.core_id == 0 ? uc0 : uc1;
             uc_err map_err = uc_mem_map(uc, rh.begin, static_cast<size_t>(rh.data_size), rh.perms);
-            if (map_err != UC_ERR_OK && map_err != UC_ERR_MAP) return false;
+            if (map_err != UC_ERR_OK && map_err != UC_ERR_MAP) { ok = false; break; }
 
             uint64_t done = 0;
-            while (done < rh.data_size) {
+            while (ok && done < rh.data_size) {
                 const size_t n = static_cast<size_t>(std::min<uint64_t>(chunk.size(), rh.data_size - done));
                 if (!read_exact(in, chunk.data(), n) ||
-                    uc_mem_write(uc, rh.begin + done, chunk.data(), n) != UC_ERR_OK) return false;
+                    uc_mem_write(uc, rh.begin + done, chunk.data(), n) != UC_ERR_OK) { ok = false; break; }
                 done += n;
             }
         }
+
+        // Todo o payload validado e as regiões de memória materializadas: agora
+        // restauramos os contextos de CPU de forma atômica. Se algo falhou acima,
+        // já retornamos false sem tocar nos registradores (estado do caller fica
+        // consistente).
+        if (ok) {
+            ok = (uc_context_restore(uc0, c0_ctx) == UC_ERR_OK) &&
+                 (uc_context_restore(uc1, c1_ctx) == UC_ERR_OK);
+        }
+        uc_free(c0_ctx); uc_free(c1_ctx);
+        if (!ok) return false;
 
         c0_insns = hdr.c0_insns;
         c0_entry = hdr.c0_entry;

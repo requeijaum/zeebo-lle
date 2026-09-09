@@ -211,6 +211,47 @@ int main(){
         CHECK(read_mr(uc,UTCB_BASE,1)==mr_fpage);
     }
 
+    // =====================================================================
+    // CASO D — fpage de tamanho intermediário (size_log2=31, 2GiB) em va ALTO
+    // que cruza a fronteira de 4GB do espaço ARM de 32 bits. O guard
+    // whole-space (size_log2>=32) NÃO cobre este caso: size_log2=31 é uma fpage
+    // legítima de 2GiB que, sobre base alta, faz `end` estourar 0x100000000 e
+    // repassa um range >4GB ao uc_mem_map -> UC_ERR_NOMEM/ARG.
+    // Exige: (a) r0 sucesso (controle/clamp, não erro), (b) NENHUMA região
+    // criada acima de 0x100000000, (c) estado UTCB não corrompido.
+    // =====================================================================
+    {
+        printf("-- D: size_log2=31 (2GiB) at high VA crossing 4GB --\n");
+        const u64 VA = 0xC0000000ull, PHYS = 0x10000000ull;
+        const u32 mr_phys  = make_phys_desc(PHYS, l4mem_cached);
+        const u32 mr_fpage = make_fpage(VA, 31, true,true,true); // 2GiB por design
+
+        write_mr(uc,UTCB_BASE,0,mr_phys);
+        write_mr(uc,UTCB_BASE,1,mr_fpage);
+
+        auto before = regions_of(uc);
+        std::vector<MapItem> items;
+        u32 r0 = handle_map_control(uc, UTCB_BASE, 0x1, make_control(1,true,false), &items);
+        auto after = regions_of(uc);
+
+        // (a) sucesso (não deve falhar com UC_ERR_NOMEM nem corromper a syscall).
+        CHECK(r0==1);
+        CHECK(items.size()==1);
+        CHECK(items[0].fpage.vaddr()==VA);
+        CHECK(items[0].fpage.size_bytes()==((u64)1<<31));
+        CHECK(!items[0].fpage.is_whole_space());
+
+        // (b) nenhuma região criada além da fronteira de 4GB (clamp/controle).
+        for (auto& r : after) {
+            CHECK(r.end <= 0xFFFFFFFFull);
+            CHECK(r.base <  0x100000000ull);
+        }
+
+        // (c) UTCB intacto.
+        CHECK(read_mr(uc,UTCB_BASE,0)==mr_phys);
+        CHECK(read_mr(uc,UTCB_BASE,1)==mr_fpage);
+    }
+
     uc_close(uc);
     if(g_fail==0){ printf("ALL TESTS PASSED\n"); return 0; }
     printf("%d CHECK(s) FAILED\n", g_fail); return 1;

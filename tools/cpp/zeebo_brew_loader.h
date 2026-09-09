@@ -129,10 +129,23 @@ public:
         if (!uc_) { printf("[BREW] inject_mod: uc não vinculado\n"); return false; }
         std::ifstream f(host_path, std::ios::binary | std::ios::ate);
         if (!f) { printf("[BREW] inject_mod: falha ao abrir '%s'\n", host_path.c_str()); return false; }
-        u32 sz = (u32)f.tellg();
+        const std::streamoff st = f.tellg();
+        // tellg() devolve -1 se o stream está em erro após open (ex.: arquivo é
+        // um diretório ou não suporta seek). Sem essa checagem, o cast `(u32)st`
+        // transforma -1 em 0xFFFFFFFF e std::vector<u8> d(sz) tenta alocar ~4GB
+        // -> std::bad_alloc não tratado (crash do host).
+        if (st < 0) { printf("[BREW] inject_mod: tellg() falhou em '%s'\n", host_path.c_str()); return false; }
+        const u32 sz = static_cast<u32>(st);
         f.seekg(0);
         std::vector<u8> d(sz);
         f.read((char*)d.data(), sz);
+        // Confirma que leu o arquivo inteiro (eof no fim do payload real), não
+        // apenas uma fração. `good()` após read de exatamente `sz` bytes.
+        if (static_cast<size_t>(f.gcount()) != d.size()) {
+            printf("[BREW] inject_mod: leitura incompleta de '%s' (%zu/%u bytes)\n",
+                   host_path.c_str(), static_cast<size_t>(f.gcount()), sz);
+            return false;
+        }
         return inject_bytes(d, load_va, clsid, host_path);
     }
 
@@ -169,8 +182,19 @@ public:
         }
         // Espelho na LUT (aliasing host-backed) quando disponível: garante que
         // telemetria/leituras diretas enxerguem os bytes injetados sem uc_mem_read.
-        if (lut_ && lut_->is_mapped(load_va)) {
-            if (lut_->write(load_va, d.data(), d.size()))
+        // Valida a COBERTURA de [load_va, load_va+size) — não só a 1ª página —
+        // porque lut_->write() copia o payload inteiro cruzando várias páginas;
+        // se alguma página posterior não estiver na LUT, o espelho ficaria PARCIAL
+        // e a divergência RAM-real × LUT passaria silenciosa. Só espelha se todas
+        // as páginas cobertas existirem na LUT.
+        if (lut_) {
+            const u64 last_page = (static_cast<u64>(load_va) + d.size() - 1) >> 12;
+            const u64 first_page = static_cast<u64>(load_va) >> 12;
+            bool cov = true;
+            for (u64 pg = first_page; pg <= last_page; ++pg) {
+                if (!lut_->is_mapped(pg << 12)) { cov = false; break; }
+            }
+            if (cov && lut_->write(load_va, d.data(), d.size()))
                 printf("[BREW]   (espelhado na VTLB LUT host-backed @0x%08x)\n", load_va);
         }
         mod_ = AppletModule{};
@@ -229,6 +253,10 @@ public:
                ret == 1 ? "(consumido ✓)" : "(não tratado)",
                clean ? "OK" : uc_strerror(e));
         if (ok) *ok = clean;
+        // `ret` (r0) é lido do guest MESMO quando clean==false (uc_emu_start !=
+        // UC_ERR_OK ou PC não pousou no ret_magic); nesse caso o valor pode ser
+        // lixo. O caller DEVE checar *ok antes de confiar no retorno — clean é o
+        // único critério de execução limpa do applet (regra de ouro).
         return ret;
     }
 
@@ -239,7 +267,10 @@ private:
     AppletModule mod_{};
 
     static u32 rd32(const std::vector<u8>& d, u32 off) {
-        if (off + 4 > d.size()) return 0;
+        // Guarda contra overflow de u32: `off + 4` estoura se off for perto de
+        // 0xFFFFFFFF, transformando a checagem em falso-negativo e lendo fora do
+        // buffer. A forma `off > size - 4` (com size >= 4 garantido) é imune.
+        if (d.size() < 4 || off > (d.size() - 4)) return 0;
         u32 v; std::memcpy(&v, d.data() + off, 4); return v;
     }
 
@@ -264,6 +295,11 @@ private:
 
     // AEECShell atingiu 0x10c874f4: entrega o contexto do módulo à Shell. Se há
     // um .mod injetado, garante que os args de CreateInstance apontem para ele.
+    // NOTA de honestidade (regra de ouro): `mod_.loaded = true` aqui significa APENAS
+    // que o dispatcher da Shell atingiu o VA de entrega — NÃO é prova de que o
+    // AEEMod_Load / applet executou de fato. `loaded` é um sinal de "shell chegou ao
+    // handoff", não um milestone de execução de jogo; o orquestrador não deve
+    // promovê-lo a `executed`.
     void on_aeecshell_dispatch() {
         printf("[BREW] AEECShell dispatch @0x%08x\n", sym_.aeecshell_dispatch_va);
         if (!mod_.injected) {
