@@ -1196,7 +1196,15 @@ public:
             }
 
             // Step Core 0 (ARM11)
-            uc_err e0 = uc_emu_start(core0_.uc, core0_.entry, 0, 0, slice_insns);
+            // QW41: uc_reg_read(PC) nunca retorna o LSB setado (Unicorn reporta
+            // o endereço já alinhado), então reconstituir o T-bit a partir do
+            // CPSR real antes de retomar a fatia seguinte — senão toda
+            // uc_emu_start após a primeira reinicia sempre em modo ARM,
+            // mesmo que a execução estivesse correndo em Thumb.
+            u32 cpsr0 = 0;
+            uc_reg_read(core0_.uc, UC_ARM_REG_CPSR, &cpsr0);
+            u32 start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u);
+            uc_err e0 = uc_emu_start(core0_.uc, start_addr0, 0, 0, slice_insns);
             uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
             if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
                 printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\n", c, (int)e0, uc_strerror(e0), core0_.entry);
@@ -2245,7 +2253,19 @@ private:
                         sys->thread_table_.set_current_tid(next_tid);
                         u32 target_ip = nxt->ip;
                         u32 target_sp = nxt->sp;
-                        uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
+                        // QW41: o entry point AMSS/BREW (0x10137000) só é válido
+                        // como Thumb (bytes ARM decodificam lixo). O firmware não
+                        // marca o LSB do endereço (convenção BX) neste ExchangeRegisters,
+                        // então o T-bit precisa ser inferido: qualquer thread cujo IP
+                        // caia no range AMSS/BREW arranca em modo Thumb (ABI real do
+                        // shell BREW nesse firmware, confirmado por disassembly).
+                        // NOTA: escrever CPSR diretamente (bit 5) NAO e confiavel no
+                        // Unicorn para trocar o modo de decodificacao; a unica forma
+                        // deterministica e escrever o PC com o bit 0 setado (convencao
+                        // BX real de hardware), que o Unicorn interpreta corretamente.
+                        bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
+                        u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
+                        uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
                         did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
@@ -2276,7 +2296,11 @@ private:
                         sys->thread_table_.set_current_tid(next_tid);
                         u32 target_ip = nxt->ip;
                         u32 target_sp = nxt->sp;
-                        uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
+                        // QW41: mesmo ajuste de T-bit do case 0x00 (ver comentário lá) —
+                        // escrita direta de PC com bit0, não CPSR (não confiável no Unicorn).
+                        bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
+                        u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
+                        uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
                         did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
@@ -2388,10 +2412,30 @@ private:
 
         uc_reg_write(uc, UC_ARM_REG_R0, &res_r0);
         u32 target_pc = 0;
+        // QW41: quando o SVC dispara a partir de código FORA dos stubs L4 fixos
+        // do kernel (0xb0000000-0xb0020000, todos ARM), a exceção real de
+        // hardware zera o T-bit no CPSR — mas o AMSS/BREW é 100% Thumb. Sem
+        // restaurar o T-bit ao retomar, o Unicorn decodifica o próximo bloco
+        // como ARM e falha com UC_ERR_INSN_INVALID assim que o svc não é dos
+        // stubs L4 (ex.: 0x103dcd18, chamada real do AMSS). Os stubs do
+        // kernel continuam ARM (T=0); qualquer outro chamador retoma em Thumb.
+        // NOTA: setar CPSR aqui não sobrevive, pois cada branch abaixo
+        // reescreve PC via uc_reg_write logo em seguida — o Unicorn deriva
+        // o T-bit do LSB do PC escrito (convenção BX real), não do CPSR
+        // setado manualmente antes. Por isso o bit é aplicado diretamente em
+        // cada `target_pc = pc;` abaixo, não como side-effect de CPSR aqui.
+        bool caller_is_kernel_stub = (pc >= 0xb0000000u && pc < 0xb0020000u);
+        // QW41: helper que injeta o bit T (LSB, convenção BX) em target_pc antes
+        // de cada retomada. Deve ser chamado logo antes de CADA
+        // `uc_reg_write(uc, UC_ARM_REG_PC, &target_pc)` neste bloco (os stubs L4
+        // continuam ARM; qualquer retomada fora deles é Thumb no AMSS/BREW).
+        auto apply_tbit = [&](u32 v) -> u32 {
+            return caller_is_kernel_stub ? (v & ~1u) : (v | 1u);
+        };
         if (syscall == 0xb4) {
             // UC_HOOK_INTR delivers pc already at svc+4; resume at pc (not pc+4),
             // otherwise we double-advance to svc+8 and skip one guest instruction (QW17).
-            target_pc = pc;
+            target_pc = apply_tbit(pc);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             // Invalida o TB de execução no Unicorn para que ele recompile o bloco seguinte
@@ -2405,7 +2449,7 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_PC, &target_pc);
                 uc_ctl_remove_cache(uc, target_pc, 0x40);
             } else {
-                target_pc = pc; // pc already == svc+4 (0xb000c834: pop {r1, r2}); QW17: no extra +4
+                target_pc = apply_tbit(pc); // pc already == svc+4 (0xb000c834: pop {r1, r2}); QW17: no extra +4
                 if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
                 uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
                 uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
@@ -2421,7 +2465,7 @@ private:
             // neles antes do pop final. É MANDATÓRIO restaurar SP=ip: sem isso o
             // `add lr,sp,#0x30` soma sobre o sp de trap corrompido (mvn = 0xffffff0c)
             // e o `pop {...,pc}` desempilha lixo, saltando para PC=0x00000000.
-            target_pc = pc; // pc already == svc+4; QW17: no extra +4
+            target_pc = apply_tbit(pc); // pc already == svc+4; QW17: no extra +4
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c758, 0x40);
@@ -2435,7 +2479,7 @@ private:
             // UC_HOOK_INTR entrega pc == svc+4 (0xb000c940).
             // Retomar em pc (com SP restaurado para ip) executa o pop e restaura
             // perfeitamente todos os registradores do chamador (r4-r8, sb, sl, fp, pc).
-            target_pc = pc;
+            target_pc = apply_tbit(pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c930, 0x40);
@@ -2446,7 +2490,7 @@ private:
             // UC_HOOK_INTR entrega pc == svc+4 (0xb000c7b4 = o pop). Retomar em pc
             // (SP=ip) executa o epílogo pop e restaura os callee-saved do chamador,
             // ao contrário do else (target_pc=lr) que pula o pop e corrompe r4-r11.
-            target_pc = pc;
+            target_pc = apply_tbit(pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c798, 0x24);
@@ -2457,7 +2501,7 @@ private:
             // pc == svc+4 (0xb000c954) = ldr/cmp/strne (writeback do output em [ip+0x24])
             // seguido do pop. Retomar em pc (SP=ip) roda o writeback e o epílogo pop;
             // o else pularia ambos, corrompendo callee-saved e descartando o output.
-            target_pc = pc;
+            target_pc = apply_tbit(pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c944, 0x20);
@@ -2473,7 +2517,7 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_PC, &target_pc);
                 uc_ctl_remove_cache(uc, target_pc, 0x40);
             } else {
-                target_pc = pc;
+                target_pc = apply_tbit(pc);
                 if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
                 uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
                 uc_ctl_remove_cache(uc, 0xb000c7b8, 0x14);
@@ -2486,19 +2530,17 @@ private:
             // pc == svc+4 (0xb000c7e4) = ldr/cmp/strne writebacks + pop. Retomar em
             // pc (SP=ip) roda os dois writebacks e o pop; o else pularia tudo,
             // corrompendo callee-saved e descartando as saídas.
-            target_pc = pc;
+            target_pc = apply_tbit(pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c7cc, 0x34);
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
-                target_pc = lr & ~1;
+                // QW41: LSB de lr já indica o T-bit real (convenção BX); preservar
+                // no próprio PC escrito, não via CPSR (não confiável no Unicorn).
+                target_pc = lr;
                 uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
-                u32 cpsr = 0;
-                uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-                if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
-                uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
             }
         }
         if (target_pc) {

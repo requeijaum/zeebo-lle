@@ -233,6 +233,18 @@ test-exregs-frame-resume: test_exregs_frame_resume
 	  echo "FAIL: buggy convention unexpectedly passed"; exit 1; \
 	else echo "OK: buggy convention fails as expected (RED reproduced)"; fi
 
+# QW41: isolated regression for T-bit preservation on SVC resume when the
+# caller is outside the fixed L4 kernel-stub range (AMSS/BREW Thumb code).
+test_svc_thumb_resume: test_svc_thumb_resume.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_svc_thumb_resume.cpp -lunicorn
+
+test-svc-thumb-resume: test_svc_thumb_resume
+	./test_svc_thumb_resume
+	@# Negative mutation: buggy convention (T-bit never restored) MUST fail.
+	@if ./test_svc_thumb_resume buggy >/dev/null 2>&1; then \
+	  echo "FAIL: buggy convention unexpectedly passed"; exit 1; \
+	else echo "OK: buggy convention fails as expected (RED reproduced)"; fi
+
 test-cli: zeebo_lle_main test_cli_paths
 	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
 	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
@@ -255,7 +267,7 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume
 	./test_brew_timer
 	./test_audio_sink
 	./test_control_server
@@ -269,7 +281,7 @@ clean:
 	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
