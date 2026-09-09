@@ -43,8 +43,8 @@ using namespace zeebo_l4;
 static int g_fail = 0;
 #define CHECK(c) do{ if(!(c)){ printf("  FAIL: %s (line %d)\n",#c,__LINE__); g_fail++; } }while(0)
 
-// Encoders idênticos aos headers OKL4 (espelham test_l4_mmu.cpp).
-static u32 make_phys_desc(u64 phys, l4attrib_e a){ return (((u32)(phys>>10))<<6)|((u32)a&0x3f); }
+// Encoders idênticos ao GUEST do Zeebo (phys_desc gran 64B; espelham test_l4_mmu.cpp).
+static u32 make_phys_desc(u64 phys, l4attrib_e a){ return (((u32)(phys>>6))<<6)|((u32)a&0x3f); }
 static u32 make_fpage(u64 va,u32 sz,bool r,bool w,bool x){
     u32 raw=0; raw|=(x?1u:0)<<0; raw|=(w?1u:0)<<1; raw|=(r?1u:0)<<2;
     raw|=(sz&0x3f)<<4; raw|=((u32)(va>>10)&0x3fffff)<<10; return raw;

@@ -91,8 +91,14 @@ struct PhysDesc {
     explicit PhysDesc(u32 v = 0) : raw(v) {}
 
     l4attrib_e attributes() const { return (l4attrib_e)(raw & 0x3fu); }
-    // base field = bits [6..31]; endereço físico = base << 10.
-    u64 phys_base() const { return ((u64)(raw >> 6)) << 10; }
+    // base field = bits [6..31]; endereço físico = base << 6 (granularidade 64B
+    // do guest do Zeebo). Diverge do OKL4 fix7 (pistachio/include/map.h, <<10 /
+    // gran 1KB): os MRs crus observados no bi_execute (ZEEBO_MC_DEBUG=1) —
+    // 0x10081000 -> 0x10081000 (RAM real no pool 0x10000000-0x16000000) e
+    // 0x10000000 -> 0x10000000 (RAM base) — só fecham com <<6. Com <<10 dariam
+    // 0x100810000/0x100000000 (>4GB), classificando maps de RAM reais como
+    // controle de AS (no-op). O hardware real funciona, logo o kernel usa <<6.
+    u64 phys_base() const { return ((u64)(raw >> 6)) << 6; }
     bool is_device() const {
         l4attrib_e a = attributes();
         return a == l4mem_io || a == l4mem_io_combined;
@@ -439,14 +445,21 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
             continue;
         }
 
-        // fpage de espaço inteiro (size_log2 >= 32, size=2^32) OU phys_base fora
-        // da faixa física de 32 bits (>= 4GB): em L4e/OKL4 2.1.1 isto NÃO é um
-        // mapeamento literal de RAM, e sim uma operação de controle sobre todo o
-        // address space (flush/unmap global de mappings ou concessão/revogação de
-        // permissão de espaço). Não há RAM de host correspondente a mapear; tratar
-        // como no-op de sucesso evita o UC_ERR_NOMEM (2^32 estoura o range de 32
-        // bits do uc_mem_map) que travava o Core 0 no loop de mempool_init.
-        if (it.fpage.is_whole_space() || it.phys.phys_base() >= 0x100000000ull) {
+        // fpage de espaço inteiro (size_log2 >= 32, size=2^32): em L4e/OKL4
+        // 2.1.1 isto NÃO é mapeamento literal de RAM, e sim controle sobre todo o
+        // address space (flush/unmap global ou concessão/revogação de permissão).
+        // Não há RAM de host a mapear; no-op de sucesso evita o UC_ERR_NOMEM (2^32
+        // estoura o range de 32 bits do uc_mem_map) que travava o Core 0.
+        //
+        // QW24: o antigo guard `phys_base() >= 0x100000000` foi REMOVIDO. Ele foi
+        // construído sobre o decode errado (<<10 / gran 1KB), que inflava bases de
+        // RAM reais (0x10081000 -> 0x100810000) acima de 4GB e as classificava como
+        // controle — o no-op mascarava os maps físicos do bi_execute e deixava as
+        // páginas sem permissão (WRITE_PROT no memset do BSS). Com o decode correto
+        // (<<6 / gran 64B), phys_base() de um raw u32 é sempre < 4GB (máx
+        // 0xFFFFFFC0): o guard seria código morto. O único critério de whole-space
+        // é a fpage.
+        if (it.fpage.is_whole_space()) {
             printf("  [ctl %u] whole-space op: va=0x%08llx phys=0x%llx size=%llu "
                    "rwx=%u -> address-space control (flush/perm), no RAM map\n",
                    i, (unsigned long long)it.fpage.vaddr(),

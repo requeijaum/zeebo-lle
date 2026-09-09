@@ -17,9 +17,10 @@ static int g_fail = 0;
 
 // --- Encoders espelhando exatamente os headers OKL4 ------------------------
 
-// phys_desc_t: attr[0..5], base[6..31] onde base = phys >> 10.
+// phys_desc_t (GUEST do Zeebo): attr[0..5], base[6..31] com gran 64B => raw
+// carrega phys alinhado a 64B nos bits altos. base = phys >> 6.
 static u32 make_phys_desc(u64 phys, l4attrib_e attr) {
-    u32 base = (u32)(phys >> 10);
+    u32 base = (u32)(phys >> 6);
     return (base << 6) | ((u32)attr & 0x3f);
 }
 
@@ -73,6 +74,28 @@ int main() {
         PhysDesc io(make_phys_desc(0xaa600000, l4mem_io_combined));
         CHECK(io.phys_base() == 0xaa600000);
         CHECK(io.is_device());
+    }
+
+    // 2b) QW24 — decode com a granularidade REAL do Zeebo (64B): phys = raw & ~0x3f.
+    //     Raws CRUS observados no dump [MC-DBG] do bi_execute (ZEEBO_MC_DEBUG=1):
+    //       MR[0]=0x10081000 -> phys 0x10081000 (RAM real dentro do pool 0x10000000)
+    //       MR[0]=0x10000000 -> phys 0x10000000 (RAM base)
+    //     O decode fix7 <<10 produziria 0x100810000/0x100000000 (>4GB), mascarando
+    //     os maps físicos reais como controle de AS (no-op). Gran do Zeebo = <<6.
+    {
+        CHECK(PhysDesc(0x10081000u).phys_base() == 0x10081000ull);
+        CHECK(PhysDesc(0x10000000u).phys_base() == 0x10000000ull);
+        // attr nos bits [0..5] não afeta a base (alinhada a 64B).
+        CHECK(PhysDesc(0x10081000u | (u32)l4mem_cached).phys_base() == 0x10081000ull);
+        // u32 raw => phys_base() SEMPRE < 4GB (máx 0xFFFFFFC0). O guard phys>=4GB
+        // do handle_map_control é, portanto, código morto com o decode correto.
+        CHECK(PhysDesc(0xFFFFFFFFu).phys_base() == 0xFFFFFFC0ull);
+        CHECK(PhysDesc(0xFFFFFFFFu).phys_base() < 0x100000000ull);
+        // Round-trip com o encoder do GUEST do Zeebo.
+        u64 phys = 0x10081000;
+        PhysDesc rt(make_phys_desc(phys, l4mem_cached));
+        CHECK(rt.phys_base() == phys);
+        CHECK(rt.attributes() == l4mem_cached);
     }
 
     // 3) fpage_t — página de 4KB (size_log2=12) rwx, VA de usuário Iguana.
@@ -202,9 +225,13 @@ int main() {
         CHECK(ws.is_whole_space());
         CHECK(!ws.is_nil());
 
-        // phys_desc com base física de 4GB (0x100000000).
-        PhysDesc php(make_phys_desc(0x100000000ull, l4mem_io));
-        CHECK(php.phys_base() == 0x100000000ull);
+        // phys_desc com raw de 32 bits NÃO consegue codificar base >= 4GB com o
+        // decode correto (gran 64B): phys_base() satura em 0xFFFFFFC0. A antiga
+        // asserção phys==0x100000000 era artefato do decode errado (<<10). O
+        // critério real de whole-space é a fpage (size_log2>=32), não a base física.
+        PhysDesc php(PhysDesc(0xFFFFFFFFu));
+        CHECK(php.phys_base() == 0xFFFFFFC0ull);
+        CHECK(php.phys_base() < 0x100000000ull);
 
         // fpage normal de 4KB não é whole-space.
         Fpage normal(make_fpage(0xb0001000, 12, true, true, true));
