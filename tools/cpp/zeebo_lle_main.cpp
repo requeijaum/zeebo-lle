@@ -2317,6 +2317,28 @@ private:
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c944, 0x20);
+        } else if (syscall == 0x04) { // L4_ThreadSwitch (QW27)
+            // Stub 0xb000c7b8: push {r4-r8,sb,sl,fp,lr}; mov ip,sp; mvn sp,#0xfb;
+            //   svc #0x1404; pop {r4-r8,sb,sl,fp,pc} (em 0xb000c7c8).
+            // pc == svc+4 (0xb000c7c8 = pop). Retomar em pc (SP=ip) executa o pop
+            // e restaura os callee-saved; o else (target_pc=lr) pularia o pop e
+            // corromperia r4-r11 do chamador (mesmo padrão QW19/QW26).
+            target_pc = pc;
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c7b8, 0x14);
+        } else if (syscall == 0x10) { // L4_Schedule (QW27)
+            // Stub 0xb000c7cc: push {r4-r8,sb,sl,fp,lr}; ldr r4,[sp,#0x24];
+            //   ldr r5,[sp,#0x28]; mov ip,sp; mvn sp,#0xef; svc #0x1410;
+            //   ldr r7,[sp,#0x2c]; ldr r8,[sp,#0x30]; cmp r7,#0; strne r1,[r7];
+            //   cmp r8,#0; strne r2,[r8]; pop {r4-r8,sb,sl,fp,pc} (em 0xb000c7fc).
+            // pc == svc+4 (0xb000c7e4) = ldr/cmp/strne writebacks + pop. Retomar em
+            // pc (SP=ip) roda os dois writebacks e o pop; o else pularia tudo,
+            // corrompendo callee-saved e descartando as saídas.
+            target_pc = pc;
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c7cc, 0x34);
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
