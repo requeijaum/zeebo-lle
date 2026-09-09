@@ -551,3 +551,99 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 - **QDSP5:** congelado até liberação explícita; executar seus testes, mas não editar `tools/cpp/qdsp5/`.
 
 Gate de toda frente: alvo afetado RED→GREEN, `make check`, `test-bootinfo-real` quando houver afirmação sobre BootInfo, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
+
+
+**QW43 — sessão de análise estática (2026-09-09, sem execução de binários) — 3 achados confirmados por disassembly+simulação Python, hipóteses (a)/(b) documentadas**
+
+Metodologia: 100% análise estática. Nenhum binário compilado (`arm-none-eabi-*`, `zeebo_lle_main`)
+foi executado nesta sessão. Todo o trabalho usou `python3` + `capstone` (ARM/Thumb) lendo
+diretamente `nand/1.1.2_APPS.bin` (ELF real, intacto, MD5 preservado) e simulação manual do
+decoder RLE em Python puro replicando byte-a-byte a lógica Thumb desassemblada.
+
+**1. Caller do dispatcher 0xb0400000 — CONFIRMADO por parse do Program Header ELF**
+O segmento PT_LOAD #4 do ELF real cobre exatamente essa região: `p_offset=0x41000,
+p_vaddr=0xb0400000, p_filesz=0x152a0, p_memsz=0x244d8, flags=W+X (0x80000007)`. O prólogo em
+`0xb0400000-0xb0400034` (ARM puro) é um dispatcher genérico de tabela de "procedimentos
+instalados": lê ponteiro base via `add r0,pc,#0x28` (PC-relative, literal pool em `0xb0400038`
+contém dois offsets relativos que resolvem para `sl=0xb041516c` / `fp=0xb041519c` — a JANELA da
+tabela real é `[0xb0415174, 0xb04151a4)`, 3 entradas de 16 bytes cada, EXATAMENTE
+`(0x1a4-0x174)/16 = 3` — o loop termina por `cmp sl,fp; beq` de forma limpa e determinística
+quando a tabela se esgota, **não por corrupção nem truncamento**.
+
+**2. Estrutura da tabela de 3 entradas (16B: src,dst,len,fn) — bytes lidos diretamente do ELF**
+```
+entry0 @0xb0415174: src=0xb04151a4 dst=0xb04155b4 len=0xfc   fn=0xb040009c  (ARM,  memcpy 4/2/1-word chunks)
+entry1 @0xb0415184: src=0xb04155b4 dst=0xb04151a4 len=0x410  fn=0xb0400040  (Thumb, o "decoder RLE" já mapeado)
+entry2 @0xb0415194: src=0xb04152a0 dst=0xb04155b4 len=0xef24 fn=0xb04000c4  (ARM,  memset-zero em loop STM)
+```
+`entry2.fn=0xb04000c4` é disassembly-confirmado como rotina `mov r3,r4,r5,r6,#0` + `stmhs {r3-r6}`
+em loop condicionado por `subs r2,#0x10` — **um memset/zero-fill**, não uma segunda fonte de dados
+comprimidos. O "len" gigante (`0xef24`=61220) é o TAMANHO A ZERAR, coerente com limpar um buffer
+BSS grande, não um payload RLE adicional.
+
+**3. Byte real após o blob de 252 bytes — CONFIRMADO: são zeros do próprio ELF estático, não runtime**
+`entry0` copia exatamente `len=0xfc=252` bytes de `src=0xb04151a4` (o blob comprimido real, bytes
+confirmados na sessão anterior como strings ARM/OKL4 decodificáveis) para o buffer de scratch
+`dst=0xb04155b4`. Inspecionando o ELF estático logo após o fim desse blob real
+(`0xb04151a4+0xfc = 0xb04152a0`), os 64 bytes seguintes são **`0x00` no próprio arquivo do
+firmware** — ou seja, não existe MAIS dado comprimido real reservado para esse stream em lugar
+nenhum do binário estático; qualquer leitura além do byte 252 (pelo decoder de `entry1`, que
+tenta produzir `len=0x410=1040` bytes de SAÍDA a partir de só 252 bytes de ENTRADA) cai
+necessariamente em zeros do BSS estático.
+
+**4. Simulação Python do decoder Thumb (`0xb0400040-0xb0400096`) contra os 252 bytes reais**
+Reimplementei a lógica exata instrução-a-instrução (control byte: bits[0:2]=contagem de
+literais via `lsls/lsrs #0x1d`, bits[4:7]=contagem de fill/backref via `asrs #4`, bit[3]=modo
+fill-vs-backref via `lsls #0x1c`/`bmi`, extra bytes lidos quando os campos vêm zero do control
+byte). Rodando contra os 252 bytes reais do firmware (sem forçar nada, sem pular bytes):
+- Consumo do input: **252 de 252 bytes reais** (o decoder usa TODO o blob real disponível).
+- Saída produzida: 962 bytes de um alvo de 1040 (`0x410`).
+- Parada: falta o próximo control-byte/byte-extra exatamente no limite do blob real — ou seja,
+  a simulação reproduz de forma consistente o "underflow" já documentado: **o decoder precisa
+  de mais bytes de controle do que os 252 reais fornecem para preencher os 1040 bytes de saída
+  esperados**.
+
+**Hipótese (a) — bug real de tamanho/razão de compressão no firmware/dispatcher (favorecida)**
+O par `(len_entrada_real=252, len_saída_esperada=1040)` implica uma razão de compressão ~4.1x.
+Isso é plausível para um decoder RLE bem alimentado, mas os últimos ~10-15 tokens de controle
+decodificados pela simulação ficam com padrões degenerados (ex.: sequências longas de `0x01`
+repetido, fills grandes) que sugerem os ÚLTIMOS bytes reais do blob de 252 já estão sendo
+consumidos em um regime de "esticar" a saída via fills grandes, não mais dados literais novos —
+consistente com o decoder ter sido escrito para operar com um limite (`len=0x410`) que o
+PRODUTOR (quem grava o dispatch table / o zloader upstream) não estava efetivamente honrando
+com dados reais suficientes nesta imagem NAND específica. Sem o código-fonte do encoder (AMSS
+fechado), não é possível provar se 0x410 é o `len` correto esperado pelo firmware real rodando
+em hardware, ou se nossa leitura do campo `len` da entrada (offset+8, 4 bytes) está semanticamente
+errada (ex.: talvez não seja "tamanho de saída" mas outro parâmetro ainda não identificado).
+
+**Hipótese (b) — leitura incorreta do papel do `len` do dispatch table pelo nosso RE (não descartada)**
+Como não confirmamos via nenhuma fonte independente (OKL4 upstream não cobre este dispatcher —
+é código AMSS fechado da Qualcomm) o significado exato do 3º word de cada entrada de 16 bytes,
+é possível que `len` não seja "bytes de saída esperados pelo decoder" e sim outro campo (ex.:
+tamanho do buffer de trabalho, ou tamanho MÁXIMO permitido, não o tamanho que o decoder deve
+necessariamente preencher até o fim antes de retornar). Nesse caso o "underflow" seria um
+artefato da nossa suposição sobre a ABI da tabela, não um bug real do firmware. Não foi possível
+descartar via análise estática pura — requer ou (i) mais dispatch tables similares em outras
+partes do firmware para comparar padrões de `len` vs. saída real observada em execução (que
+sessões futuras podem investigar sem tocar neste blob específico), ou (ii) uma fonte externa
+sobre o formato deste codec proprietário (inexistente publicamente).
+
+**Conclusão QW43 (honesta, sem promover falso progresso)**
+1. O caller do dispatcher 0xb0400000 está confirmado por bytes do ELF: é um mini-dispatcher de
+   3 procedimentos instalados (memcpy → decode RLE → zero-fill), não uma tabela truncada nem
+   corrompida — o loop de 3 entradas termina exatamente onde deveria.
+2. O "underflow" documentado nas sessões anteriores foi REPRODUZIDO por simulação Python pura
+   (sem executar nenhum binário) contra os bytes reais do firmware: o decoder de fato precisa
+   de mais bytes de controle do que os 252 bytes reais disponíveis para preencher os 1040 bytes
+   de saída declarados pela entrada da tabela.
+3. As duas hipóteses (a) bug/limite real do firmware nesta imagem NAND específica vs. (b) nosso
+   entendimento do campo `len` da ABI do dispatch table estar errado permanecem ambas em aberto;
+   nenhuma prova estática decisiva as separa nesta sessão.
+4. Recomendação: não investir mais tempo tentando "consertar" o decoder sem antes decidir entre
+   (a)/(b) — um workaround forçado (como o já testado e revertido em sessão anterior) mascara o
+   sintoma sem resolver a causa raiz, e o próprio ROADMAP já documenta esse risco. Próximo passo
+   de maior valor: procurar OUTRAS tabelas de dispatch do mesmo formato em `0xb0000000+` cujo
+   par (len_entrada, len_dst) possa ser cruzado com saída REALMENTE observada em execução viva
+   (via debug agent / control-port, não terminal direto) para decidir (a) vs (b) com evidência
+   cruzada, antes de qualquer nova tentativa de correção.
+
