@@ -2173,7 +2173,31 @@ private:
                 // Garante que o retorno do wrapper IPC em 0xb000c834 restaure r5 apontando para UTCB+0x44
                 break;
             }
-            case 0x04: break;                                // L4_ThreadSwitch (no-op)
+            case 0x04: {                                     // L4_ThreadSwitch
+                // Cede quantum cooperativo para outra thread pronta se houver
+                u32 cur_tid = sys->thread_table_.current_tid();
+                u32 next_tid = sys->thread_table_.pick_next_thread(cur_tid);
+                if (next_tid && next_tid != cur_tid) {
+                    const zeebo_l4::ThreadInfo* nxt = sys->thread_table_.get_thread(next_tid);
+                    if (nxt && nxt->ip) {
+                        // Salva contexto da thread atual e chaveia PC/SP
+                        zeebo_l4::ThreadInfo* cur = sys->thread_table_.get_thread_mut(cur_tid);
+                        if (cur) {
+                            u32 cur_pc = 0, cur_sp = 0;
+                            uc_reg_read(uc, UC_ARM_REG_PC, &cur_pc);
+                            uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
+                            cur->ip = cur_pc;
+                            cur->sp = cur_sp;
+                        }
+                        sys->thread_table_.set_current_tid(next_tid);
+                        u32 target_ip = nxt->ip;
+                        u32 target_sp = nxt->sp;
+                        uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
+                        if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                    }
+                }
+                break;
+            }
             case 0x08: res_r0 = 1; break;                    // L4_ThreadControl
             case 0x0c: {                                     // L4_ExchangeRegisters
                 u32 dest = 0, control = 0, new_sp = 0, new_ip = 0, flags = 0;

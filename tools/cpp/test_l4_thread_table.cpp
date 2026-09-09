@@ -43,6 +43,17 @@ int main() {
     assert(tt.pick_next_thread(dest) == t2);
     assert(tt.pick_next_thread(t2) == dest);
 
+    // Teste negativo: se t2 for marcada inativa, pick_next_thread deve retornar dest
+    zeebo_l4::ThreadInfo* t2_info = tt.get_thread_mut(t2);
+    assert(t2_info != nullptr);
+    t2_info->active = false;
+    assert(tt.pick_next_thread(dest) == dest);
+    assert(tt.pick_next_thread(t2) == dest);
+
+    // Restaura e valida wrap-around
+    t2_info->active = true;
+    assert(tt.pick_next_thread(dest) == t2);
+
     printf("=== Test L4 Thread Table: PASS ===\n");
     return 0;
 }

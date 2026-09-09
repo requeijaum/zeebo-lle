@@ -332,14 +332,14 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
    - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
    - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
-2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (bloqueio atual = QW30)
+2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW30 concluído, avanço para QW31)
    - O `iguana_server_loop` (`0xb000aa94`) aguarda IPC no laço `bl 0xb000c800` (`L4_Ipc` wait em `0xb000c834`).
    - Tags de threads registradas no BootInfo identificam os alvos a serem despachados:
      - `ig_naming` (VA `0xb0100000`, tag 7, ref 6)
      - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
      - `AMSS` (VA `0x10137000`, tag 7, ref 23)
-   - QW28 (estrutura e tipos MsgTag) e QW29 (tabela de threads e captura via ExchangeRegisters) foram CONCLUÍDOS.
-   - Bloqueio atual = QW30: Chaveamento cooperativo em `L4_Ipc` / `ThreadSwitch` para despachar threads filhas dos servidores e entregar requisições de registro de interfaces/memsections.
+   - QW28 (estrutura e tipos MsgTag), QW29 (tabela de threads e captura via ExchangeRegisters) e QW30 (chaveamento cooperativo em `L4_ThreadSwitch` / `L4_Ipc`) foram CONCLUÍDOS.
+   - Bloqueio atual = QW31: Entrega de registros de serviços/buffers no `ig_naming` e `quartz_servers`.
    - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
    - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
@@ -376,7 +376,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW27 | **concluído** | Retomar stubs de syscall com frame `ExchangeRegisters` (0x0c), `ThreadSwitch` (0x04) e `Schedule` (0x10) em `pc`+`SP=ip` (`fc4a811`) | baixo-médio | TDD isolado `test_exregs_frame_resume.cpp` (bytes reais do firmware); GREEN exit 0; RED com `buggy` (exit 1); elimina salto para PC=0x00000000; boot avança de 378k para 8.27M instruções e entra no `iguana_server_loop` (`0xb000aa94` / `0xb000c834` L4_Ipc wait) |
 | QW28 | **concluído** | Servidores Iguana / IPC dispatch inicial & MsgTag em `iguana_server_loop` | médio | tratar mensagens IPC de entrada no server loop rumo à inicialização do EFS/VFS e BREW (`test_l4_ipc_msgtag.cpp`) |
 | QW29 | **concluído** | Tabela de Threads L4 & Captura de Ativação via `ExchangeRegisters` | baixo-médio | registrar SP/IP/ThreadID em `thread_start` (0x0c) para chaveamento de threads nos servidores (`zeebo_l4_thread.h` + teste TDD) |
-| QW30 | **em andamento** | Scheduler Cooperativo L4 (Chaveamento de Contexto no `L4_Ipc`/`ThreadSwitch`) | médio | comutar execução para as threads dos servidores (`ig_naming`, `quartz_servers`, `AMSS`) quando a thread atual ceder no IPC wait (`pick_next_thread` em `zeebo_l4_thread.h` e chaveamento no c0_intr_hook) |
+| QW30 | **concluído** | Scheduler Cooperativo L4 (Chaveamento de Contexto no `L4_Ipc`/`ThreadSwitch`) | médio | comutar execução para as threads dos servidores (`ig_naming`, `quartz_servers`, `AMSS`) quando a thread atual ceder no IPC wait (`pick_next_thread` em `zeebo_l4_thread.h` e chaveamento no c0_intr_hook case 0x04) |
+| QW31 | **proposto** | Entrega de registros de serviços/buffers no `ig_naming` e `quartz_servers` | médio | protocolar o envio de registro de interfaces/memsections no `iguana_server_loop` rumo ao handshake com AMSS (`0x10137000`) |
 
 ### P1 — Infraestrutura após o Passo 13
 
