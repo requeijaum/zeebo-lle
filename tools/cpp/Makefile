@@ -34,6 +34,10 @@ test_l4_mmu: test_l4_mmu.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -o $@ test_l4_mmu.cpp
 	./test_l4_mmu
 
+test_l4_thread_table: test_l4_thread_table.cpp zeebo_l4_thread.h
+	$(CXX) $(CXXFLAGS) -o $@ test_l4_thread_table.cpp
+	./test_l4_thread_table
+
 # Integração de aliasing via uc_mem_map_ptr (requer libunicorn).
 test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
@@ -222,7 +226,7 @@ test-clean-hygiene:
 
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
+       test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn test_l4_thread_table zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume
 	./test_audio_sink
 	./test_control_server
@@ -233,7 +237,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn \
+	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn test_l4_thread_table \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume *.o

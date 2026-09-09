@@ -33,6 +33,7 @@
 #include "zeebo_devices.h"
 #define ZEEBO_L4_MMU_WITH_UNICORN 1
 #include "zeebo_l4_mmu.h"
+#include "zeebo_l4_thread.h"
 #include "zeebo_control_server.h"
 #include "zeebo_probe_registry.h"
 #include "qdsp5/qdsp5_capture_hook.h"
@@ -2182,6 +2183,7 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R3, &new_ip);
                 uc_reg_read(uc, UC_ARM_REG_R4, &flags);
                 res_r0 = dest; // L4_ExchangeRegisters retorna o dest ThreadId
+                sys->thread_table_.on_exchange_registers(dest, control, new_sp, new_ip, flags);
                 break;
             }
             case 0x10: break;                                // L4_Schedule
@@ -2882,6 +2884,7 @@ private:
     // A pool é dona da RAM de host de 96MB mapeada em APPS_RAM_PHYS_BASE via
     // uc_mem_map_ptr; map_one_aliased faz outros VAs apontarem para a MESMA RAM.
     zeebo_l4::PhysPool  apps_pool_;
+    zeebo_l4::ThreadTable thread_table_;
     zeebo_l4::VtlbLut   vtlb_;
     std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
