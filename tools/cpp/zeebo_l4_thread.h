@@ -37,6 +37,14 @@ class ThreadTable {
 public:
     ThreadTable() = default;
 
+    void set_current_tid(uint32_t tid) {
+        current_tid_ = tid;
+    }
+
+    uint32_t current_tid() const {
+        return current_tid_;
+    }
+
     bool on_exchange_registers(uint32_t dest, uint32_t control, uint32_t new_sp, uint32_t new_ip, uint32_t flags) {
         if (dest == 0) return false;
 
@@ -67,12 +75,37 @@ public:
         return nullptr;
     }
 
+    ThreadInfo* get_thread_mut(uint32_t tid) {
+        auto it = threads_.find(tid);
+        if (it != threads_.end()) {
+            return &it->second;
+        }
+        return nullptr;
+    }
+
+    uint32_t pick_next_thread(uint32_t current) {
+        if (threads_.empty()) return 0;
+        // Procura próxima thread ativa em round-robin
+        auto it = threads_.upper_bound(current);
+        for (auto cur = it; cur != threads_.end(); ++cur) {
+            if (cur->second.active && cur->first != current) return cur->first;
+        }
+        for (auto cur = threads_.begin(); cur != it; ++cur) {
+            if (cur->second.active && cur->first != current) return cur->first;
+        }
+        // Se nenhuma outra ativa, mantém a atual se ativa
+        auto self = threads_.find(current);
+        if (self != threads_.end() && self->second.active) return current;
+        return 0;
+    }
+
     size_t count() const {
         return threads_.size();
     }
 
     void clear() {
         threads_.clear();
+        current_tid_ = 0;
     }
 
     std::vector<uint32_t> get_active_threads() const {
@@ -84,6 +117,7 @@ public:
     }
 
 private:
+    uint32_t current_tid_ = 0;
     std::map<uint32_t, ThreadInfo> threads_;
 };
 

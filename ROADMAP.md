@@ -376,7 +376,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW27 | **concluído** | Retomar stubs de syscall com frame `ExchangeRegisters` (0x0c), `ThreadSwitch` (0x04) e `Schedule` (0x10) em `pc`+`SP=ip` (`fc4a811`) | baixo-médio | TDD isolado `test_exregs_frame_resume.cpp` (bytes reais do firmware); GREEN exit 0; RED com `buggy` (exit 1); elimina salto para PC=0x00000000; boot avança de 378k para 8.27M instruções e entra no `iguana_server_loop` (`0xb000aa94` / `0xb000c834` L4_Ipc wait) |
 | QW28 | **concluído** | Servidores Iguana / IPC dispatch inicial & MsgTag em `iguana_server_loop` | médio | tratar mensagens IPC de entrada no server loop rumo à inicialização do EFS/VFS e BREW (`test_l4_ipc_msgtag.cpp`) |
 | QW29 | **concluído** | Tabela de Threads L4 & Captura de Ativação via `ExchangeRegisters` | baixo-médio | registrar SP/IP/ThreadID em `thread_start` (0x0c) para chaveamento de threads nos servidores (`zeebo_l4_thread.h` + teste TDD) |
-| QW30 | **proposto** | Scheduler Cooperativo L4 (Chaveamento de Contexto no `L4_Ipc`/`ThreadSwitch`) | médio | comutar execução para as threads dos servidores (`ig_naming`, `quartz_servers`, `AMSS`) quando a thread atual ceder no IPC wait |
+| QW30 | **em andamento** | Scheduler Cooperativo L4 (Chaveamento de Contexto no `L4_Ipc`/`ThreadSwitch`) | médio | comutar execução para as threads dos servidores (`ig_naming`, `quartz_servers`, `AMSS`) quando a thread atual ceder no IPC wait (`pick_next_thread` em `zeebo_l4_thread.h`) |
 
 ### P1 — Infraestrutura após o Passo 13
 

@@ -36,6 +36,13 @@ int main() {
     assert(updated_zero == false);
     assert(tt.count() == 1);
 
+    // Teste de seleção de próxima thread (round-robin cooperativo)
+    uint32_t t2 = 0x20;
+    tt.on_exchange_registers(t2, control, 0xb02ffff0, 0xb0200000, flags);
+    assert(tt.count() == 2);
+    assert(tt.pick_next_thread(dest) == t2);
+    assert(tt.pick_next_thread(t2) == dest);
+
     printf("=== Test L4 Thread Table: PASS ===\n");
     return 0;
 }
