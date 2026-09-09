@@ -2193,7 +2193,21 @@ private:
 
         u32 res_r0 = 0;
         bool set_kip_ret = false;
+        bool did_handoff = false;  // set quando um chaveamento cooperativo reescreveu PC/SP
         u32 kip_r1 = 0, kip_r2 = 0, kip_r3 = 0;
+
+        // [PROBE-SYSCALL-HIST] diagnóstico temporário: conta cada syscall disparada.
+        if (getenv("ZEEBO_SYSCALL_HIST")) {
+            static std::map<u32,u64> s_hist;
+            static u64 s_total = 0;
+            s_hist[syscall]++; s_total++;
+            if ((s_total & (s_total-1)) == 0 || s_hist[syscall] == 1) {
+                fprintf(stderr, "[SYSHIST] pc=0x%08x syscall=0x%02x count=%llu total=%llu | ",
+                        pc, syscall, (unsigned long long)s_hist[syscall], (unsigned long long)s_total);
+                for (auto& kv : s_hist) fprintf(stderr, "0x%02x=%llu ", kv.first, (unsigned long long)kv.second);
+                fprintf(stderr, "\n");
+            }
+        }
 
         switch (syscall) {
             case 0x00: {                                     // L4_Ipc
@@ -2233,6 +2247,7 @@ private:
                         u32 target_sp = nxt->sp;
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
                             printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
                                    next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
@@ -2263,6 +2278,7 @@ private:
                         u32 target_sp = nxt->sp;
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
                             printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
                                    next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
@@ -2280,6 +2296,10 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R3, &new_ip);
                 uc_reg_read(uc, UC_ARM_REG_R4, &flags);
                 res_r0 = dest; // L4_ExchangeRegisters retorna o dest ThreadId
+                if (getenv("ZEEBO_SYSCALL_HIST")) {
+                    fprintf(stderr, "[EXREGS] dest=0x%08x control=0x%08x new_sp=0x%08x new_ip=0x%08x flags=0x%08x DELIVER=%d\n",
+                            dest, control, new_sp, new_ip, flags, (control & zeebo_l4::EXREGS_CTRL_DELIVER) ? 1 : 0);
+                }
                 sys->thread_table_.on_exchange_registers(dest, control, new_sp, new_ip, flags);
                 if (new_ip >= 0xb0100000 && new_ip < 0xb0120000) {
                     sys->service_registry_.register_service("ig_naming", dest, 1, 0xb0100000, 0x20000);
@@ -2378,10 +2398,18 @@ private:
             uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
             uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
         } else if (syscall == 0x00) {
-            target_pc = pc; // pc already == svc+4 (0xb000c834: pop {r1, r2}); QW17: no extra +4
-            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
-            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
-            uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
+            if (did_handoff) {
+                // Handoff cooperativo já reescreveu PC/SP para a thread alvo
+                // (ex.: AMSS/BREW @0x10137000). NÃO sobrescrever de volta para
+                // o wrapper IPC (0xb000c834), senão o servidor fica preso no wait.
+                uc_reg_read(uc, UC_ARM_REG_PC, &target_pc);
+                uc_ctl_remove_cache(uc, target_pc, 0x40);
+            } else {
+                target_pc = pc; // pc already == svc+4 (0xb000c834: pop {r1, r2}); QW17: no extra +4
+                if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+                uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+                uc_ctl_remove_cache(uc, 0xb000c800, 0x100);
+            }
         } else if (syscall == 0x0c) { // L4_ExchangeRegisters (QW27)
             // Stub 0xb000c758: push {r4-r8,sb,sl,fp,lr}; ldr r4,[sp,#0x24];
             //   ldr r5,[sp,#0x28]; ldr r6,[sp,#0x2c]; mov ip,sp; mvn sp,#0xf3;
@@ -2439,10 +2467,17 @@ private:
             // pc == svc+4 (0xb000c7c8 = pop). Retomar em pc (SP=ip) executa o pop
             // e restaura os callee-saved; o else (target_pc=lr) pularia o pop e
             // corromperia r4-r11 do chamador (mesmo padrão QW19/QW26).
-            target_pc = pc;
-            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
-            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
-            uc_ctl_remove_cache(uc, 0xb000c7b8, 0x14);
+            if (did_handoff) {
+                // Handoff cooperativo já reescreveu PC/SP para a thread alvo;
+                // não sobrescrever de volta o wrapper do ThreadSwitch.
+                uc_reg_read(uc, UC_ARM_REG_PC, &target_pc);
+                uc_ctl_remove_cache(uc, target_pc, 0x40);
+            } else {
+                target_pc = pc;
+                if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+                uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+                uc_ctl_remove_cache(uc, 0xb000c7b8, 0x14);
+            }
         } else if (syscall == 0x10) { // L4_Schedule (QW27)
             // Stub 0xb000c7cc: push {r4-r8,sb,sl,fp,lr}; ldr r4,[sp,#0x24];
             //   ldr r5,[sp,#0x28]; mov ip,sp; mvn sp,#0xef; svc #0x1410;

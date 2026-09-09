@@ -22,6 +22,12 @@ constexpr uint32_t EXREGS_CTRL_IP       = (1u << 4);
 constexpr uint32_t EXREGS_CTRL_FLAGS    = (1u << 5);
 constexpr uint32_t EXREGS_CTRL_UHANDLE  = (1u << 6);
 constexpr uint32_t EXREGS_CTRL_TLS      = (1u << 7);
+// Bits de halt/resume da fonte OKL4 2.1.1-fix7 (pistachio/include/syscalls.h
+// + src/exregs.cc): HALTFLAG (1<<8) = "aplicar bit HALT"; se HALTFLAG setado e
+// HALT (1<<0) limpo, a thread halted é RESUMIDA (start). thread_start usa
+// exatamente isso (control observado no firmware = 0x11e). DELIVER (1<<9) é o
+// caminho alternativo de entrega direta; o firmware do Zeebo não o usa aqui.
+constexpr uint32_t EXREGS_CTRL_HALTFLAG = (1u << 8);
 constexpr uint32_t EXREGS_CTRL_DELIVER  = (1u << 9);
 
 struct ThreadInfo {
@@ -60,9 +66,18 @@ public:
         if (control & EXREGS_CTRL_FLAGS) {
             th.flags = flags;
         }
-        if (control & EXREGS_CTRL_DELIVER) {
+        // Ativação real: o kernel OKL4 (exregs.cc:326-338) trata "resume" quando
+        // HALTFLAG está setado e HALT limpo — é assim que thread_start inicia os
+        // servidores iniciais (control=0x11e no firmware). DELIVER é o caminho
+        // legado de entrega direta. Ambos ativam a thread.
+        bool resume = (control & EXREGS_CTRL_HALTFLAG) && !(control & EXREGS_CTRL_HALT);
+        bool halt   = (control & EXREGS_CTRL_HALTFLAG) &&  (control & EXREGS_CTRL_HALT);
+        if ((control & EXREGS_CTRL_DELIVER) || resume) {
             th.started = true;
             th.active = true;
+        }
+        if (halt) {
+            th.active = false;
         }
         return true;
     }
