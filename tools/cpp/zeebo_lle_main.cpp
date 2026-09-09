@@ -2465,7 +2465,22 @@ private:
             // neles antes do pop final. É MANDATÓRIO restaurar SP=ip: sem isso o
             // `add lr,sp,#0x30` soma sobre o sp de trap corrompido (mvn = 0xffffff0c)
             // e o `pop {...,pc}` desempilha lixo, saltando para PC=0x00000000.
-            target_pc = apply_tbit(pc); // pc already == svc+4; QW17: no extra +4
+            // QW42: full-trace (ZEEBO_FULL_TRACE) confirmou que o T-bit muda
+            // de 0 (ARM) para 1 (Thumb) exatamente na transição
+            // 0xb0102c28->0xb0102c2c — ou seja, DENTRO desta mesma svc
+            // #0x140c, mas disparada por uma CÓPIA LOCAL do trap-stack
+            // embutida em ig_naming (região 0xb0100000-0xb0120000, ARM puro),
+            // não pelo stub fixo 0xb000c758. apply_tbit(pc) força Thumb
+            // porque pc cai fora de 0xb0000000-0xb0020000, mas essa cópia
+            // local também é ARM. Fix restrito a este case: tratar a faixa
+            // ig_naming (0xb0100000-0xb0120000) como ARM também, sem alterar
+            // o comportamento fora dela (preserva o handoff cooperativo real
+            // que usa o stub fixo em 0xb000c758..0xb000c794). PROVADO por
+            // execução real: o boot passa a avançar de fato até 0xb0358bb4,
+            // 0xb03ba634 e um loop de memcpy legítimo em 0xb0400064
+            // (ldrb/strb/subs/bne — código válido copiando dados, não bug).
+            bool local_arm_copy = (pc >= 0xb0100000u && pc < 0xb0120000u);
+            target_pc = (caller_is_kernel_stub || local_arm_copy) ? (pc & ~1u) : (pc | 1u);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c758, 0x40);
