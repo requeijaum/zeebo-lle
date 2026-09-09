@@ -35,6 +35,7 @@
 #include "zeebo_l4_mmu.h"
 #include "zeebo_l4_thread.h"
 #include "zeebo_l4_ipc.h"
+#include "zeebo_brew_mif.h"
 #include "zeebo_control_server.h"
 #include "zeebo_probe_registry.h"
 #include "qdsp5/qdsp5_capture_hook.h"
@@ -650,7 +651,17 @@ public:
             return false;
         }
         std::string origin = "efs2:" + path_or_name;
-        if (!brew_->inject_bytes(payload, base_addr, /*clsid=*/0, origin)) {
+        // QW35: Se o arquivo for um MIF (.mif), efetua o parse dos metadados e do CLSID
+        uint32_t clsid = 0;
+        if (path_or_name.size() >= 4 && path_or_name.substr(path_or_name.size() - 4) == ".mif") {
+            auto mif_info = zeebo::brew::MifParser::parse(payload);
+            if (mif_info.valid) {
+                clsid = mif_info.clsid;
+                printf("[EFS2/MIF] MIF '%s' validado: AEECLSID=0x%08x mod='%s'\n",
+                       path_or_name.c_str(), clsid, mif_info.mod_file.c_str());
+            }
+        }
+        if (!brew_->inject_bytes(payload, base_addr, clsid, origin)) {
             printf("[EFS2/Applet] BrewLoader falhou ao injetar '%s'.\n", path_or_name.c_str());
             return false;
         }
