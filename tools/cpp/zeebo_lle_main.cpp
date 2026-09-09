@@ -36,6 +36,7 @@
 #include "zeebo_l4_thread.h"
 #include "zeebo_l4_ipc.h"
 #include "zeebo_brew_mif.h"
+#include "zeebo_brew_timer.h"
 #include "zeebo_control_server.h"
 #include "zeebo_probe_registry.h"
 #include "qdsp5/qdsp5_capture_hook.h"
@@ -812,10 +813,22 @@ public:
 
         auto t_start = std::chrono::steady_clock::now();
         auto t_last  = t_start;
-        uint64_t frames = 0, key_dispatches = 0;
+        auto t_tick_prev = t_start;
+        uint64_t frames = 0, key_dispatches = 0, timer_dispatches = 0;
         bool run = true;
 
         while (run) {
+            auto t_now = std::chrono::steady_clock::now();
+            uint32_t elapsed_ms = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_tick_prev).count();
+            if (elapsed_ms > 0) {
+                t_tick_prev = t_now;
+                auto expired = brew_timers_.tick(elapsed_ms);
+                timer_dispatches += expired.size();
+                for (const auto& tm : expired) {
+                    (void)tm;
+                    // Sincronização de timer BREW: dispara callback da fila
+                }
+            }
             // (b) Bombeia eventos SDL2 → AVK BREW (despacho contínuo de Z-Pad).
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
@@ -871,10 +884,11 @@ public:
 
             double since = std::chrono::duration<double>(now - t_last).count();
             if (since >= 1.0) {
-                printf("[Z-Wheel/Loop] FPS=%.1f | frames=%llu | teclas_consumidas=%llu | t=%.1fs\n",
+                printf("[Z-Wheel/Loop] FPS=%.1f | frames=%llu | teclas_consumidas=%llu | timers=%llu | t=%.1fs\n",
                        (double)frames / (total > 0 ? total : 1.0),
                        (unsigned long long)frames,
-                       (unsigned long long)key_dispatches, total);
+                       (unsigned long long)key_dispatches,
+                       (unsigned long long)timer_dispatches, total);
                 t_last = now;
             }
             if (!headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -882,8 +896,8 @@ public:
 
         if (core0_.uc && h_stub) uc_hook_del(core0_.uc, h_stub);
         s_zwheel_hook_sys_ = nullptr;
-        printf("[Z-Wheel/Loop] loop encerrado: frames=%llu, teclas consumidas=%llu.\n",
-               (unsigned long long)frames, (unsigned long long)key_dispatches);
+        printf("[Z-Wheel/Loop] loop encerrado: frames=%llu, teclas consumidas=%llu, timers=%llu.\n",
+               (unsigned long long)frames, (unsigned long long)key_dispatches, (unsigned long long)timer_dispatches);
     }
 
     // Mapeia um símbolo de tecla SDL2 para o botão lógico do Z-Pad (Passo 11).
@@ -3042,6 +3056,7 @@ private:
     u32  zwheel_stack_top_  = 0;
     u32  zwheel_ret_magic_  = 0;
     bool zwheel_life_armed_ = false;
+    zeebo::brew::BrewTimerQueue brew_timers_;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
 };

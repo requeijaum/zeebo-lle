@@ -332,14 +332,14 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
    - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
    - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
-2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW35, QW36 e QW37 concluídos, avanço para Passo 15 / QW38)
+2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW35, QW36, QW37 e QW38 concluídos, avanço para Passo 15 / QW39)
    - O `iguana_server_loop` (`0xb000aa94`) aguarda IPC no laço `bl 0xb000c800` (`L4_Ipc` wait em `0xb000c834`).
    - Tags de threads registradas no BootInfo identificam os alvos a serem despachados:
      - `ig_naming` (VA `0xb0100000`, tag 7, ref 6)
      - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
      - `AMSS` (VA `0x10137000`, tag 7, ref 23)
-   - QW28 a QW37 foram CONCLUÍDOS (MsgTag, ThreadTable, scheduler cooperativo em `ThreadSwitch` e `L4_Ipc`, SystemServiceRegistry, handoff AMSS/BREW, roteamento FIRSTAPP, parsing/resolução de MIFs, despacho de ciclo de vida e sincronização de comandos GPU / Adreno 130).
-   - Bloqueio atual = QW38: Mapeamento de canais de áudio QDSP5 e resposta de timers para applets comerciais.
+   - QW28 a QW38 foram CONCLUÍDOS (MsgTag, ThreadTable, scheduler cooperativo em `ThreadSwitch` e `L4_Ipc`, SystemServiceRegistry, handoff AMSS/BREW, roteamento FIRSTAPP, parsing/resolução de MIFs, despacho de ciclo de vida, sincronização GPU Adreno 130 e motor de timers BREW IShell).
+   - Bloqueio atual = QW39: Integração de canais de áudio de baixo nível e renderização completa de Double Dragon.
    - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
    - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
@@ -384,7 +384,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW35 | **concluído** | Carregamento e parsing do MIF/MIF2 do AppMgr via partição EFS2 | médio | integrar parser de MIFs do BREW com o pipeline EFS2 da NAND para instanciar applets (`brewappmgr.mif`) (`zeebo_brew_mif.h` + `test_brew_mif.cpp`) |
 | QW36 | **concluído** | Despacho de ciclo de vida e renderização de jogos/applets (Reksio / Double Dragon) | alto | vincular eventos de entrada e pipeline IGL/GLES na execução autônoma de jogos |
 | QW37 | **concluído** | Sincronização de comandos Adreno 130 e ring buffer GPU no frame loop de jogos | alto | garantir flushing e sincronização do rasterizer com swap buffers nos jogos |
-| QW38 | **proposto** | Mapeamento de canais de áudio QDSP5 e resposta de timers para applets comerciais | médio-alto | integrar temporizadores BREW (AEE_SetTimer) e retorno assíncrono de som |
+| QW38 | **concluído** | Mapeamento de canais de áudio QDSP5 e resposta de timers para applets comerciais | médio-alto | integrar temporizadores BREW (AEE_SetTimer) e retorno assíncrono de som |
+| QW39 | **proposto** | Integração de canais de áudio de baixo nível e renderização completa de Double Dragon | alto | validar execução orgânica e renderização com áudio do primeiro jogo comercial |
 
 ### P1 — Infraestrutura após o Passo 13
 
