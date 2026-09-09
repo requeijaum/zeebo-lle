@@ -1,4 +1,4 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-09, QW40-QW44 fechados; bloqueio do ig_naming destravado)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-09b, QW44-QW47 fechados; scatterload do kernel resolvido, UARTs modeladas)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
@@ -339,7 +339,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
      - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
      - `AMSS` (VA `0x10137000`, tag 7, ref 23)
    - QW28 a QW43 concluídos (MsgTag, ThreadTable, scheduler cooperativo, SystemServiceRegistry, handoff AMSS/BREW, roteamento FIRSTAPP, parser de MIFs, dispatch de lifecycle, GPU Adreno 130, timers BREW, ativação real de thread QW40, preservação de T-bit QW41, fix da cópia local ARM do ExchangeRegisters QW42, generalização do T-bit p/ todos os syscalls QW43/QW44 `9ca92a6`).
-   - **Estado atual (verificado por execução, 2026-09-09)**: Core 0 avança além do stall `0xb010333a` (decode drift por Thumb forçado no retorno do `L4_Ipc` da cópia local ARM do ig_naming — RESOLVIDO), executa o dispatcher `0xb040000x`, e o sink SDL2 reporta **frame 14 / 32 draws do Adreno renderizados**. **Limite atual: o frame é TODO PRETO** (draws não conectados ao sink — frame initializado zerado), e o scheduler ainda injeta o primeiro IPC sinteticamente (MR fake, linhas 2232-2237) em vez de agendar um remetente real.
+   - **Estado atual (verificado por execução, 2026-09-09)**: Core 0 avança além do stall `0xb010333a` (decode drift por Thumb forçado no retorno do `L4_Ipc` da cópia local ARM do ig_naming — RESOLVIDO). O sink SDL2 reporta **frame 14 / 32 draws do Adreno** — mas isso é o scatterload descomprimindo o segmento, não render real.
+   - **RESOLUÇÃO QW43/44 (2026-09-09, RE + execução viva)**: o `0xb0400000` NÃO é um codec/problema — é o **`__scatterload` do runtime ARM RVCT** (auto-terminante: tabela de 3 entries `{src,dst,len,fn}`, `cmp sl,fp; beq 0xb0410070`; fn = copy/RLE/zeroinit). O kernel Iguana **completa o scatterload corretamente** (beq tomado, Z=1, `0xb0410070`=`__rt_entry` alcançado — verificado vivo). O loop RLE que "travava" (`src=0xb0515xxx ctrl=0x00`) é **re-entrada indevida do emulador** (2ª imagem, ex.: quartz_servers via `lr=0xb0302dd1`, ou tabela corrompida por aliasing), não defeito de firmware. Os "underflows" QW43/44 eram artefato de simulação host.
+   - **Auditoria de memória/IRQ (2026-09-09)**: confirmados e documentados 4 bugs de modelo — (1) IRQ do Core1 entregue (doorbell seta VIC 0xc0000000) mas NUNCA processada (sem `uc_intr`/UC_HOOK_INTR no Core1, CPSR mascarado); (2) GPT (0xc5000000) só ticker hack (sem match/IRQ); (3) MMIO READ do Core0 lê RAM crua (sem UC_HOOK_MEM_READ → periférico modelado ignorado nas leituras); (4) `map_one_aliased` sem guarda `is_peripheral` (VTLB pode apontar VA de periférico → pool RAM). Endereçado/UART neste lote; ver ROADMAP P1 e skill.
    - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
 ### QW43 — ATUALIZAÇÃO: causa raiz é truncamento do buffer FONTE, não bug no decoder (2026-09-09)
@@ -510,6 +512,8 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 | QW44 | **concluído** | Guard T-bit generalizado p/ TODOS os syscalls quando o retorno cai na cópia local ARM do ig_naming (`9ca92a6`); hipótese de truncamento por DMA descartada via Program Header ELF | médio | boot avança além do stall, `ig_naming` mapeado rwx, **14 frames / 32 draws do Adreno renderizados**; frame ainda **PRETO** (draws não conectados ao sink) |
 | QW45 | **proposto** | Conectar os draws do Adreno 130 ao framebuffer p/ produzir pixels reais (frames pretos) | médio-alto | `vram_blank=False` com `pixel_sum` determinístico ≠ 0 sob boot real; evidenciar que os 32 draws alimentam o SoftRasterizer |
 | QW46 | **proposto** | Scheduler real na ordem OKL4: instanciar os servers (`iguana`→`timer`→…→`appmgr`) e retirar a injeção sintética de IPC (MR fake, linhas 2232-2237) | alto | `naming_insert` real chega ao ig_naming (não MR fake); `pick_next_thread` escolhe remetente real; lookup/register subsequente de BREW/AMSS funcionam |
+| QW47 | **concluído** | Modelar as 3 UARTs do MSM7201A (UART1 `0xA9A00000` console, UART2 `0xA9B00000`, UART3 `0xA9C00000`) + captura de TX FIFO no stderr como console de boot (`aea313d`); corrige colisão KEYPAD_BASE (0xA9A00000 era UART1 real) | baixo-médio | TX FIFO acumulado → console em stderr; read-hook fornece TX_READY (UART_SR=0x0C); boot preservado (frame 14/32 draws, `make check` verde) |
+| QW48 | **proposto** | Resolver a re-entrada indevida da 2ª imagem no `__scatterload` (quartz_servers via `lr=0xb0302dd1` ou tabela corrompida por aliasing) — o kernel Iguana completa o scatterload corretamente, o travamento é host | alto | kernel termina reach `0xb0410070` __rt_entry (já verificado); 2ª imagem completa sem `ctrl=0x00`/loop; boot avança para `iguana_server_loop` pós-scatterload |
 
 **QW42 — 3ª hipótese testada e descartada, com localização exata do SVC**: instrumentação `ZEEBO_DEBUG_SYSCALL_NEAR` (temporária) confirmou que o ÚNICO SVC disparado na faixa `0xb0102000-0xb0104000` antes do stall é `syscall=0x0c` (L4_ExchangeRegisters) em `pc=0xb0102c2c` — não `0x00`/L4_Ipc como hipotetizado antes. Confirmado por disassembly (Capstone) que `0xb0103338` é um `bl 0xb0102cb8` (função ARM que por sua vez faz `svc #0x1400`); o retorno real é reconstruído incorretamente pelo classificador `apply_tbit` genérico, mas a correção precisa (detecção de formato por bytes, halfword em `pc-2`==`0xDFxx`⇒Thumb) aplicada SÓ no branch do case `0x0c` (`else`, sem `did_handoff`) causou REGRESSÃO para o stall antigo `0x10137000` — ou seja, esse mesmo case/branch é usado pelo caminho normal que já FUNCIONA para chegar até dentro do `ig_naming`; a heurística "errada" (`apply_tbit` por faixa fixa) coincidentemente acerta esse caso mais comum, então substituí-la ali quebra o handoff que já funcionava. Revertido com segurança (`git checkout HEAD --`); HEAD confirmado em `d0c8edf`, suite/boot idênticos ao baseline. Conclusão: o bug do QW42 não está isolado num único ponto de retorno de SVC — é necessário identificar e diferenciar CADA call site específico (não por case de syscall nem por faixa de PC do chamador), possivelmente rastreando o LR do chamador de `0xb0102cb8` (visto no trace: `lr=0xb0046fa8`, fora de qualquer stub conhecido) para achar de onde realmente vem essa chamada.
 
@@ -519,15 +523,21 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 
 ### P1 — Infraestrutura após o Passo 13
 
-1. **Checkpoint v3 de máquina completa**
+1. **Modelo de interrupção real (IRQ/timer)** [da auditoria 2026-09-09]
+   - O Core1 (ARM9/AMSS) não tem `UC_HOOK_INTR`/`uc_intr`: o doorbell A2M só seta o bit no VIC (0xc0000000), nunca entregue ao core (CPSR sobe mascarado). GPT (0xc5000000) é só um ticker hack (sem match/compare/IRQ). Timer/IRQ-driven scheduling não funciona.
+   - Gate: `uc_intr`/UC_HOOK_INTR no Core1 com salvamento de contexto IRQ e vetor 0x18; timer deve gerar tick IRQ; verificação por execução viva de um loop que espira IRQ.
+2. **Guard `is_peripheral` no aliasing L4** [da auditoria 2026-09-09]
+   - `map_one_aliased` não valida se `fpage.vaddr()` cai numa faixa de periférico já mapeada (0xa0000000+, 0xc0000000+...); `uc_mem_map_ptr` → UC_ERR_MAP → `uc_mem_protect` sobre MMIO, e no sucesso o VTLB registra VA de periférico → pool RAM.
+   - Gate: fpage cujo VA é periférico não mapa para aliasing da pool; não registra no VTLB.
+3. **Checkpoint v3 de máquina completa**
    - Primeiro vertical slice: CPU/memória + MMU + IRQ/timers, com validação integral antes da restauração; depois GPU/GL, EFS/VFS e filas/eventos.
    - Gate: save→run→restore→rerun produz os mesmos bytes, pixels, registradores e eventos.
-2. **Tempo híbrido ARM11/ARM9/periféricos**
+4. **Tempo híbrido ARM11/ARM9/periféricos**
    - Contador relativo/dívida entre os dois cores; sync-on-access nas janelas IPC/SMD; deadlines absolutos para timers, IRQ, GPU e futuro QDSP5.
    - Gate: variar quantum sem alterar a sequência observável de bytes/eventos nos harnesses.
-3. **JSON-RPC tipado sem quebrar NDJSON**
+5. **JSON-RPC tipado sem quebrar NDJSON**
    - Envelope `id/method/params/result/error` e notificações assíncronas de break/watch/probe; compatibilidade temporária com comandos atuais.
-4. **GDB RSP ARM11**
+6. **GDB RSP ARM11**
    - Adaptador sobre pause/step/breakpoints/memória/registradores existentes; NDJSON/Python continua sendo a API principal dos agentes.
 
 ### Itens deliberadamente não classificados como quick win

@@ -576,6 +576,16 @@ slots verificado vs AEEGL.h genuíno). Achados:
 VERIFICADO POR EXECUÇÃO: igl_smoke 3/3 PASS (draw centro=0xFFFF; GLfixed=-0.80;
   clear vermelho=0xF800). gpu_smoke antigo intacto.
 
+AUDITORIA GPU 2026-09-09 (commit 19782c7) — defaults normativos GLES1 corrigidos:
+  - RenderState agora inicializa blend (ONE,ZERO), depth_func LESS (0x0201), alpha_func
+    ALWAYS (0x0207) — antes 0 (ZERO/NEVER) → guest que habilita teste/func sem chamá-lo
+    renderizava preto. Regressão TDD no gl_quickwins_smoke (QWd default-blend/clear).
+  - glClear(0) agora é no-op (removido `mask==0||`); o gpu_smoke usava mask=0 como
+    sentinela de clear — corrigido para 0x4100 (COLOR|DEPTH) no próprio teste.
+  - Otimização: textura ligada resolvida UMA vez por triângulo (rase o hash lookup
+    per-pixel do sample_texture); comentários de barycentric/blend da/frustum.
+  - Próximo: transform fixed-function (mvp+viewport) segue a maior lacuna (Fase 2).
+
 PENDÊNCIAS ATUALIZADAS:
   - [ ] Transform fixed-function (mvp+viewport) — a maior lacuna, Fase 2.
   - [ ] Índices IEGL (28 slots) — não extraídos ainda; ler array IEGL do gl_hle.cpp.
