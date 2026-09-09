@@ -343,7 +343,46 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
    - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
-### Quick wins independentes
+### QW43 — ATUALIZAÇÃO: causa raiz é truncamento do buffer FONTE, não bug no decoder (2026-09-09)
+
+Reimplementei o decodificador RLE completo em Python (literais + run-length de repetição do
+último byte + back-reference com offset, disassembly completo de `0xb0400044-0xb040009a`) e
+rodei sobre o stream real capturado em runtime (`ZEEBO_DUMP_STREAM2`, fonte=`0xb04155b4`,
+1056 bytes lidos). Resultado da decodificação: **os primeiros ~250 bytes do stream comprimido
+são dados reais e decodificam corretamente para strings ASCII legíveis do kernel ARM/OKL4**
+("spinlock", "arm.ss", "Invalid argument" — nomes de arquivo/mensagens de debug típicas do
+kernel), confirmando que o algoritmo RLE está correto e bem entendido. A partir do byte 250,
+**o restante do buffer fonte é zero puro** (`all(b==0 for b in data[250:1056]) == True`) — não
+há mais dados comprimidos válidos ali. O decoder consome o padrão `ctrl=0x00,extra=0x00`
+(zero real do buffer, não um valor de controle intencional) e sofre underflow em `subs r4,#1`
+com `r4=0`, exatamente como documentado antes — mas agora sabemos que a causa é **o stream de
+entrada estar truncado/zerado prematuramente**, faltando ~55 bytes (985/1040 destino escrito)
+para completar a tabela de strings. O guard de término real do laço (`cmp r1,r2; blo` em
+`0xb0400096-0xb0400098`, r2 constante `0xb04155b4` = mesmo endereço do buffer fonte, ou seja,
+destino e limite de fonte coincidem por design) só é verificado POR SÍMBOLO completo, nunca
+por byte — não é o bug em si, mas explica por que o decoder não para graciosamente ao ficar
+sem dados.
+
+Hipótese revisada (linha com o apontamento do usuário para o zloader): o buffer fonte
+comprimido em `0xb04155b4` foi copiado da NAND/AMSS para essa posição de RAM por uma rotina
+de carregamento anterior (possivelmente relacionada a `load_amss_dmov`/`DMA_PAGE_BUF` já
+mapeados no emulador, linhas ~1928/1961 de `zeebo_lle_main.cpp`) — se essa cópia for
+incompleta (menos bytes copiados do que o comprimento real do blob comprimido na NAND), o
+decoder RLE recebe um stream truncado e cai no mesmo padrão de zero observado. Investigação
+do `firmware/openzeebo-zloader.bin` (projeto openzeebo, código-fonte em
+`~/projects/zeebo/research/openzeebo-repo/tools/zloader/`) mostrou que esse zloader é um
+carregador ARM9 de boot que copia AMSS/APPS da NAND para RAM (via `memcpy` em `main.c`, sem
+qualquer rotina de descompressão) — ou seja, o zloader real da Qualcomm NÃO contém o
+decodificador RLE; esse decodificador pertence ao próprio AMSS/kernel OKL4 carregado (código
+fechado da Qualcomm, sem fonte disponível — buscas em `refs/okl4-2.1.1-fix7` por
+`rle|lzss|lz77|decompress` não encontraram nada relevante).
+
+Próximo passo recomendado: rastrear o código que copia o blob comprimido para
+`0xb04155b4` (watchpoint em escritas nesse endereço, análogo ao `ZEEBO_WATCH_SLOT` já usado)
+para confirmar se a cópia é truncada por um tamanho incorreto (ex.: comprimento fixo/errado
+usado no `memcpy`/DMA em vez do tamanho real do blob comprimido na NAND).
+
+
 
 | Ordem | Estado | Quick win | Esforço | Prova obrigatória |
 |---|---|---|---:|---|
