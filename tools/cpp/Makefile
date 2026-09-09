@@ -177,6 +177,17 @@ test-mapcontrol-frame-resume: test_mapcontrol_frame_resume
 	  echo "FAIL: buggy convention unexpectedly passed"; exit 1; \
 	else echo "OK: buggy convention fails as expected (RED reproduced)"; fi
 
+# QW26: isolated regression for ThreadControl (0x08) + SpaceControl (0x18) stub frame restoration.
+test_threadspace_frame_resume: test_threadspace_frame_resume.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_threadspace_frame_resume.cpp -lunicorn
+
+test-threadspace-frame-resume: test_threadspace_frame_resume
+	./test_threadspace_frame_resume
+	@# Negative mutation: buggy convention MUST fail (corrupts callee-saved / drops writeback).
+	@if ./test_threadspace_frame_resume buggy >/dev/null 2>&1; then \
+	  echo "FAIL: buggy convention unexpectedly passed"; exit 1; \
+	else echo "OK: buggy convention fails as expected (RED reproduced)"; fi
+
 test-cli: zeebo_lle_main test_cli_paths
 	./zeebo_lle_main --cycles=abc >/dev/null 2>&1; test $$? -eq 2
 	./zeebo_lle_main --control-port=70000 >/dev/null 2>&1; test $$? -eq 2
@@ -199,7 +210,7 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume
 	./test_audio_sink
 	./test_control_server
 	./test_probe_registry
@@ -212,7 +223,7 @@ clean:
 	      test_save_state test_audio_sink test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 

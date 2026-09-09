@@ -2295,6 +2295,28 @@ private:
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             uc_ctl_remove_cache(uc, 0xb000c930, 0x40);
+        } else if (syscall == 0x08) { // L4_ThreadControl (QW26)
+            // Stub 0xb000c798: push {r4-r8,sb,sl,fp,lr}; ldr r4,[sp,#0x24];
+            //   ldr r5,[sp,#0x28]; ldr r6,[sp,#0x2c]; mov ip,sp; mvn sp,#0xf7;
+            //   svc #0x1408; pop {r4-r8,sb,sl,fp,pc} (em 0xb000c7b4).
+            // UC_HOOK_INTR entrega pc == svc+4 (0xb000c7b4 = o pop). Retomar em pc
+            // (SP=ip) executa o epílogo pop e restaura os callee-saved do chamador,
+            // ao contrário do else (target_pc=lr) que pula o pop e corrompe r4-r11.
+            target_pc = pc;
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c798, 0x24);
+        } else if (syscall == 0x18) { // L4_SpaceControl (QW26)
+            // Stub 0xb000c944: push {r4-r8,sb,sl,fp,lr}; mov ip,sp; mvn sp,#0xe7;
+            //   svc #0x1418; ldr r2,[sp,#0x24]; cmp r2,#0; strne r1,[r2];
+            //   pop {r4-r8,sb,sl,fp,pc} (em 0xb000c960).
+            // pc == svc+4 (0xb000c954) = ldr/cmp/strne (writeback do output em [ip+0x24])
+            // seguido do pop. Retomar em pc (SP=ip) roda o writeback e o epílogo pop;
+            // o else pularia ambos, corrompendo callee-saved e descartando o output.
+            target_pc = pc;
+            if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
+            uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
+            uc_ctl_remove_cache(uc, 0xb000c944, 0x20);
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
