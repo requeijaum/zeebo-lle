@@ -16,9 +16,11 @@ int main(){
     if(!ras->init()){ printf("init FAIL\n"); return 1; }
 
     // Test 1: clear to pure red -> expect 0xF800 everywhere.
+    // (mask 0x4100 = GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT; glClear(0) é no-op por
+    //  GL, então "limpar tudo" precisa do mask real — não usar 0 como sentinela.)
     ras->begin_frame();
     ras->clear_color(1.f,0.f,0.f,1.f);
-    ras->clear(0);
+    ras->clear(0x4100);
     ras->end_frame();
     u16 c = px(*ras, 320,240);
     const bool t1 = c==0xF800;
@@ -26,7 +28,7 @@ int main(){
 
     // Test 2: draw a green triangle covering center -> center becomes green-ish.
     ras->begin_frame();
-    ras->clear_color(0,0,0,1); ras->clear(0);
+    ras->clear_color(0,0,0,1); ras->clear(0x4100);
     std::vector<Vertex> tri(3);
     for(auto&v:tri){ v.r=0;v.g=1;v.b=0; }
     tri[0].x=-0.8f; tri[0].y=-0.8f;
