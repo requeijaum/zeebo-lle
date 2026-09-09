@@ -332,14 +332,14 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
    - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
    - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
-2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW33 concluído, avanço para QW34)
+2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW34 concluído, avanço para QW35)
    - O `iguana_server_loop` (`0xb000aa94`) aguarda IPC no laço `bl 0xb000c800` (`L4_Ipc` wait em `0xb000c834`).
    - Tags de threads registradas no BootInfo identificam os alvos a serem despachados:
      - `ig_naming` (VA `0xb0100000`, tag 7, ref 6)
      - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
      - `AMSS` (VA `0x10137000`, tag 7, ref 23)
-   - QW28 a QW33 foram CONCLUÍDOS (MsgTag, ThreadTable, scheduler cooperativo em `ThreadSwitch` e `L4_Ipc`, SystemServiceRegistry e handoff de execução para AMSS/BREW).
-   - Bloqueio atual = QW34: Iniciação do subsistema BREW (`AEECShell` em `0x10c874f4`) e loop de applets.
+   - QW28 a QW34 foram CONCLUÍDOS (MsgTag, ThreadTable, scheduler cooperativo em `ThreadSwitch` e `L4_Ipc`, SystemServiceRegistry, handoff AMSS/BREW e roteamento do boot target via `FIRSTAPP`).
+   - Bloqueio atual = QW35: Carregamento do binário/MIF do aplicativo selecionado via EFS2 (`brewappmgr.mif` ou `zwheel.mif`).
    - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
    - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
 
@@ -380,7 +380,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW31 | **concluído** | Entrega de registros de serviços/buffers no `ig_naming` e `quartz_servers` | médio | protocolar o envio de registro de interfaces/memsections no `iguana_server_loop` rumo ao handshake com AMSS (`0x10137000`) (`test_l4_ipc_dispatch.cpp`) |
 | QW32 | **concluído** | Handshake do Iguana com AMSS (`0x10137000`) e comutação em `L4_Ipc` wait | médio-alto | despachar IPC cooperativo no `c0_intr_hook` case 0x00 para permitir avanço dos servidores e AMSS (`zeebo_lle_main.cpp`) |
 | QW33 | **concluído** | Handoff para o processo de espaço de usuário do `AEECShell` / BREW | médio-alto | transferir execução do Iguana OS para o ponto de entrada do shell BREW (`0x10137000`) (`zeebo_l4_ipc.h` + `zeebo_lle_main.cpp`) |
-| QW34 | **proposto** | Loop de ciclo de vida do `AEECShell` e ativação do `ZeeboApp` / AppMgr | alto | orquestrar o disparo de eventos `EVT_APP_START` no espaço virtual integrado e instanciar appmgr |
+| QW34 | **concluído** | Roteamento do boot target (`FIRSTAPP`) e ciclo de vida do `AEECShell` | médio | conectar flag CLI / boot target (`0 = AppMgr`, `3 = Z-Wheel`) à transição L4/IPC do AMSS e despacho de applets |
+| QW35 | **proposto** | Carregamento e parsing do MIF/MIF2 do AppMgr via partição EFS2 | médio | integrar parser de MIFs do BREW com o pipeline EFS2 da NAND para instanciar applets (`brewappmgr.mif`) |
 
 ### P1 — Infraestrutura após o Passo 13
 

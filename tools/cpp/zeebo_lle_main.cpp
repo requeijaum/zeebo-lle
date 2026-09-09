@@ -923,6 +923,8 @@ public:
     }
 
     void set_efs2_nand_path(const std::string& p) { efs2_nand_path_ = p; }
+    void set_boot_target(int firstapp) { boot_firstapp_ = firstapp; }
+    int boot_target() const { return boot_firstapp_; }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
         printf("===================================================================\n");
@@ -2191,7 +2193,8 @@ private:
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
-                            printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x\n", next_tid, target_ip);
+                            printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                                   next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
                         }
                     }
                 }
@@ -2220,7 +2223,8 @@ private:
                         uc_reg_write(uc, UC_ARM_REG_PC, &target_ip);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
-                            printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x\n", next_tid, target_ip);
+                            printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                                   next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
                         }
                     }
                 }
@@ -2995,6 +2999,7 @@ private:
     // Integração EFS2: parser da partição 0:EFS2APPS sobre a cópia da NAND.
     std::unique_ptr<efs2::Efs2Filesystem> efs2_;
     std::string efs2_nand_path_ = "../../nand/1.1.2.bin";
+    int boot_firstapp_ = 0;
     bool efs2_ready_ = false;
     // Passo 5: encaminhamento contínuo de EVT_KEY_* do Z-Pad/SDL2 ao HandleEvent.
     u32  brew_handler_va_ = 0;
@@ -3186,6 +3191,7 @@ int main(int argc, char** argv) {
     }
     // Aponta o parser EFS2 para a mesma cópia de trabalho da NAND usada no boot.
     sys.set_efs2_nand_path(nand_path);
+    sys.set_boot_target(boot_firstapp);
 
     // QW14: opt-in strict-unmapped. Off by default => boot unchanged.
     if (strict_unmapped) {
