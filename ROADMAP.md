@@ -382,6 +382,81 @@ Próximo passo recomendado: rastrear o código que copia o blob comprimido para
 para confirmar se a cópia é truncada por um tamanho incorreto (ex.: comprimento fixo/errado
 usado no `memcpy`/DMA em vez do tamanho real do blob comprimido na NAND).
 
+**Watchpoint em `0xb04155b4-0xb04159d4` (2026-09-09, sessão seguinte) — resultado**: existem
+dois writers na região. (1) `pc=0xb04000a4` escreve 120 words (480 bytes, mas o padrão real
+via `objdump`/emulador mostra ~240 bytes de payload útil) trazidos de endereços de código
+`0xb0401xxx` — **para de escrever após ~240-250 bytes**, exatamente onde o decoder RLE
+encontra o padrão `ctrl=0x00,extra=0x00` e sofre underflow. (2) `pc=0xb0400068` é o próprio
+loop de literais do decoder RLE reescrevendo a MESMA região com zeros ao decodificar run-length
+de repetição (ele usa a região fonte como buffer de trabalho/destino simultaneamente — decoder
+"in-place", fonte e destino compartilham o mesmo range de memória por design, o que é normal
+em decoders RLE compactos, não um bug).
+
+**Disassembly do zloader real (2026-09-09)**: `arm-none-eabi-objdump -D -b binary -m arm
+--adjust-vma=0xa0000000 firmware/openzeebo-zloader.bin` (2.356 linhas, `/tmp/zloader_disasm.txt`).
+Entry em `0xa0000028` (setup de registradores r7-r10, stack em modo SVC/0xd3, zera uma região
+de BSS via loop `str r0,[r1],#4 / cmp r1,r2 / ble`, seta flag em `0xb8000108+0x10c` — registrador
+de hardware MSM — e salta via `blx r4` para o código de aplicação carregado). Rotina de cópia
+em `0xa00000a0-0xa00000c0`: `ldm/stm` de blocos de 4 words (`{r3,r4,r5,r6}`) em loop condicional
+(`bhi`), completando com halfword/byte residual — **memcpy genérico simples**, sem qualquer
+lógica de descompressão (sem shifts de 3 bits + escape byte, sem run-length, sem back-reference
+por offset). Busquei especificamente o padrão do decoder RLE identificado no AMSS (`lsrs r3,r3,
+#29` equivalente ao `lsls/lsrs #0x1d` visto no Thumb do AMSS) — encontrei DOIS usos desse shift
+no zloader (`0xa0000690`, `0xa00006e8`), mas o contexto é **extração de bits de status/flags de
+um registro de erro/exceção** (checagem `tst r2,#2`, dispatch para rotinas de log/printf via
+`bl 0xa000169c`), não descompressão de dados — **falso positivo, mesmo padrão de shift usado
+para propósito diferente**. Outro candidato (`bl 0xa0001358`) é uma rotina de I/O bit-a-bit
+(usa registrador de hardware `0xb8000000` + delay loop `mov ip,#100`) — bit-banging de
+GPIO/UART, não descompressão.
+
+**Conclusão (revisão da hipótese do zloader)**: o `firmware/openzeebo-zloader.bin` é
+confirmado como um bootloader ARM9 minimalista (init de hardware/stack/BSS + memcpy simples +
+jump para o código de aplicação/AMSS) — **não contém nenhuma rotina de descompressão RLE**.
+Isso é consistente com a análise anterior do código-fonte C do projeto openzeebo
+(`main.c` usa apenas `memcpy`, sem chamadas a rotinas de unpack). A hipótese do usuário levou a
+uma verificação rigorosa e NEGATIVA: **a descompressão RLE não acontece no zloader** — ela
+acontece dentro do próprio AMSS/kernel OKL4 já carregado em RAM (código fechado da Qualcomm,
+sem fonte disponível), como já havia sido mapeado via disassembly do runtime do emulador
+(`0xb0400044-0xb040009a`). O zloader real provavelmente só copia os blocos comprimidos da NAND
+para RAM sem processá-los — a descompressão ocorre depois, já em contexto do AMSS.
+
+O achado mais relevante permanece: **o writer #1 (pc=`0xb04000a4`) para de preencher o buffer
+fonte após ~240-250 bytes**, e é essa cópia truncada — não o zloader — que causa o underflow no
+decoder RLE do AMSS. Próximo passo: identificar o CALLER de `0xb04000a4` (a rotina que decide
+quantos bytes copiar) para achar por que ela usa um tamanho menor que o necessário (~1040 bytes
+esperados vs. ~240-250 copiados).
+
+**Caller de `0xb04000a4` identificado**: `lr=0xb040001c`, dentro do próprio dispatcher ARM já
+mapeado em `0xb0400000-0xb0400034` (entradas de 16 bytes, `ldm sl!,{r0,r1,r2,r3}` / `bx r3`).
+5 chamadas capturadas: `src=0xb04151a4→dst=0xb04155b4,len=0xec`; depois
+`src=0xb04151b4→dst=0xb04155c4,len=0xdc`; `...len=0xcc`; `...len=0xbc`; `...len=0xac` — **src e
+dst avançam em passos de 0x10 (16) e `len` decresce em 0x10 a cada chamada**, indicando que o
+próprio dispatcher está iterando sobre a tabela de 16 bytes e chamando essa cópia por entrada,
+com `len` sendo o "tamanho restante da tabela", não o tamanho do blob comprimido isolado. Ou
+seja, **não é uma cópia NAND→RAM feita pelo zloader** — é lógica interna do dispatcher/AMSS já
+carregado, disparada após o handoff do zloader. O primeiro `len=0xec=236` bate com precisão com
+o ponto onde os dados reais do stream comprimido terminam (byte ~240-250, confirmado pela
+decodificação RLE bem-sucedida das strings "spinlock"/"arm.ss"/"Invalid argument"). Isso sugere
+que **236 bytes é o tamanho ESPERADO e correto da primeira entrada copiada** — o problema não é
+truncamento por parâmetro errado nessa chamada, e sim que o CONSUMIDOR (decoder RLE) espera
+consumir até preencher 0x410 (1040) bytes de destino, mas o produtor só fornece dados para uma
+fração disso nesta tabela/entrada, e o restante do buffer fica com zero residual (não
+inicializado com stream comprimido válido) — possivelmente porque a tabela tem MAIS ENTRADAS
+com deslocamentos aumentando (implicando MAIS regiões de dados comprimidos: até
+`0xb04151e4→0xb04155f4`, i.e., offset 0x40=64 bytes acumulados de tabela) e essas próximas
+entradas nunca são alcançadas/copiadas por outra razão (loop externo termina cedo, guard
+incorreto, ou índice de iteração truncado) — não confirmado; requer mais uma rodada de captura
+completa das ~15+ chamadas restantes até o dispatcher esgotar a tabela.
+
+**Resumo executivo QW43 (estado atual, 2026-09-09)**: (1) zloader real (openzeebo,
+`firmware/openzeebo-zloader.bin`) NÃO contém rotina de descompressão — é bootstrap ARM9 puro
+(confirmado por disassembly binário via `arm-none-eabi-objdump`); (2) a rotina RLE que trava
+está dentro do AMSS/OKL4 já carregado (código fechado, sem fonte); (3) o algoritmo RLE está
+corretamente entendido e decodifica ~240 bytes reais em strings de debug legíveis do kernel
+ARM; (4) a causa do underflow é a produção incompleta do stream fonte por um mecanismo de
+cópia em 16-byte chunks interno ao próprio dispatcher (não ao zloader) — ainda não se sabe por
+que esse mecanismo para de fornecer dados válidos após a primeira entrada da tabela.
+
 
 
 | Ordem | Estado | Quick win | Esforço | Prova obrigatória |
