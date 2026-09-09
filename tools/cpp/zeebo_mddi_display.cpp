@@ -114,6 +114,13 @@ private:
 
 static VirtualMDDI* g_mddi = nullptr;
 
+// MMIO do MDDI. `size` (largura de acesso 1/2/4 do Unicorn) é deliberadamente
+// ignorado: todos os registradores do MDDI são modelados como words de 32 bits
+// (acesso ao registrador por word), então um acesso de 8/16 bits a um offset
+// de registrador é lido/escrito como 32 bits — comportamento do modelo, não
+// largura de barramento real. É suficiente para o boot (firmware usa ldr/str
+// de 32 bits aos registradores MDDI); se um byte-granular register for exigido
+// no futuro, este callback deve despachar por `size`.
 static uint64_t mmio_read_cb(uc_engine* uc, uint64_t offset, unsigned size, void* user_data) {
     return g_mddi->read((u32)offset);
 }

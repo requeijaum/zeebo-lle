@@ -34,6 +34,22 @@ int main(int argc,char** argv){
         expect((nc.read(R_FLASH_STATUS,4)&FS_READY),"status READY after read");
     }
 
+    // 1.5. Leitura 32-bit perto do fim do page-buffer: deve devolver os bytes
+    // VÁLIDOS (bytes altos ausentes = 0), não 0 por completo. O antigo loop
+    // `for(k=3; k>=0 && i+k<size; k--)` abortava no 1º byte fora do range,
+    // descartando os bytes válidos i..i+2 (bug de leitura parcial no fim).
+    {
+        NandController nc(data,spare);
+        // grava 2 bytes válidos (endreço -2 e -1 do buffer, i.e. penúltimo e último)
+        nc.write(R_FLASH_BUFFER + PAGE_FULL - 2, 0x0000A1B2, 4);
+        // leitura 32-bit no mesmo offset: esperado = B2 | (A1<<8), altos zerados
+        const u32 got_lo = nc.read(R_FLASH_BUFFER + PAGE_FULL - 2, 4);
+        expect(got_lo == 0x0000A1B2u, "partial 32b read near buffer end returns valid low bytes");
+        // leitura no último byte individual (1 byte) deve devolver só ele
+        const u32 got_hi = nc.read(R_FLASH_BUFFER + PAGE_FULL - 1, 1);
+        expect(got_hi == 0xA1u, "single-byte read at last buffer word");
+    }
+
     // 2. full DMA page read through DMOVModel (page 11712 = APPSBL), like mini_boot
     {
         uc_engine* uc; uc_open(UC_ARCH_ARM,UC_MODE_ARM,&uc);

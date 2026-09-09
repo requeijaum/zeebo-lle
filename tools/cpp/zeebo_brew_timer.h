@@ -55,18 +55,20 @@ public:
     }
 
     // Advances time by elapsed_ms, collecting and removing all expired timers in registration order.
+    // Sem alocação por chamada: os timers vivos são decrementados e mantidos no
+    // lugar; os expirados são removidos in-place (std::erase_if) — o vetor `active`
+    // intermediário anterior causava uma alocação por tick (hot path por slice).
     std::vector<ExpiredTimer> tick(uint32_t elapsed_ms) {
         std::vector<ExpiredTimer> expired;
-        std::vector<TimerEntry> active;
-        for (auto& t : timers_) {
+        auto it = std::remove_if(timers_.begin(), timers_.end(), [&](TimerEntry& t) {
             if (t.remaining_ms <= elapsed_ms) {
                 expired.push_back({t.callback, t.user_data, t.r0_override});
-            } else {
-                t.remaining_ms -= elapsed_ms;
-                active.push_back(t);
+                return true; // expirado: remover
             }
-        }
-        timers_ = std::move(active);
+            t.remaining_ms -= elapsed_ms; // vivo: decrementa e mantém
+            return false;
+        });
+        timers_.erase(it, timers_.end());
         return expired;
     }
 

@@ -61,6 +61,9 @@ enum SmdEdge : u8 { SMD_APPS_MODEM=0 };
 // Nomes reais dos canais de dados/bridge (extraídos do binário, na ordem do dump).
 // DATA5..DATA20 = streams de pacote (1 por PDP/iface); BRG_x = SMD_BRIDGE;
 // CS_* = circuit-switched/control; RPCCALL/RPCRPY = transporte ONCRPC.
+// NOTA: DATA11 está AUSENTE de propósito — o dump não o lista entre DATA10 e
+// DATA12; não é erro de digitação da tabela verificada por RE (canal reservado
+// ou de uso interno); a enumeração segue a ordem exata do binário.
 inline constexpr std::array<const char*, 16> kDataChannels = {
     "DATA5","DATA6","DATA7","DATA8","DATA9","DATA10","DATA12","DATA13",
     "DATA14","DATA15","DATA16","DATA17","DATA18","DATA19","DATA20","BRG_5"

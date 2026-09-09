@@ -54,10 +54,21 @@ public:
         if(off==R_BUFFER_STATUS) return 0;
         if(off==R_READ_ID) return id_latched_;
         if(off==R_CONFIG_STATUS) return 1;
+        // `size` é ignorado de propósito: todos os regs do controlador NAND são
+        // lidos como words de 32 bits (o firmware usa ldr/str de 32 bits aos MMIO
+        // NAND); um acesso de 8/16 bits a um reg NÃO muda a leitura modelada.
         if(off>=R_FLASH_BUFFER&&off<R_FLASH_BUFFER+PAGE_FULL){
             u32 i=off-R_FLASH_BUFFER;
             u32 v=0;
-            for(int k=3;k>=0 && (int)(i+k)<(int)buffer_.size();k--) v=(v<<8)|buffer_[i+k];
+            // Leitura de até 4 bytes (32-bit) a partir de i. Bytes cuja posição
+            // i+k cai além do fim do buffer contribuem 0 (alto), preservando os
+            // válidos de menor índice — o antigo loop `k>=0 && i+k<size` abortava
+            // no 1º byte fora do range e descartava todos os bytes anteriores.
+            for(int k=3;k>=0;k--){
+                const int idx=(int)i+k;
+                if(idx>=0 && idx<(int)buffer_.size()) v=(v<<8)|buffer_[idx];
+                else v<<=8; // byte ausente: shift de 0
+            }
             return v;
         }
         auto it=reg_.find(off); return it==reg_.end()?0:it->second;
@@ -81,6 +92,14 @@ private:
         if(cmd==CMD_FETCH_ID){ id_latched_=nand_id_; status_=FS_READY; return; }
         if(cmd==CMD_PAGE_READ||cmd==CMD_PAGE_READ_ECC||cmd==CMD_PAGE_READ_ALL){
             u32 addr0=reg_[R_ADDR0], addr1=reg_[R_ADDR1];
+            // Decodificação do endereço NAND (EBI2): o endereço físico da página é
+            // montado a partir de ADDR0/ADDR1 conforme o formato de endereçamento.
+            // ADDR0 >= 0x10000 indica o modo coluna|linha (ADDR0 = coluna >> bits
+            // de endereço de coluna deslocados para cima, ADDR1 carga/baixa da
+            // linha); senão ADDR0 já é o endereço linear de página (0..npages).
+            // O limiar 0x10000 separa os dois porque o campo de coluna cabe abaixo
+            // de 16 bits numa página de 2048B + spare (64B = 0x40) — valores
+            // >= 0x10000 só surgem quando a linha é acumulada no mesmo reg.
             u32 page = addr0>=0x10000 ? (addr0>>16)|((addr1&0xFF)<<8) : addr0;
             size_t npages = data_blob_.size()/PAGE_DATA;
             if(page<npages){

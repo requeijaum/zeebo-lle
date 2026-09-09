@@ -106,6 +106,10 @@ public:
             if (d[i] != DIRENT_MARKER) { i++; continue; }
             u8 reclen = d[i + 5];
             if (reclen < 6 || reclen > 200) { i++; continue; }
+            // name_len = reclen - 5: o reclen conta apenas [type(1) + parent_ref(4)]
+            // como cabeçalho de nome, NÃO o byte de pad em i+11. O pad é um byte de
+            // alinhamento separado (validado abaixo == 0x00), fora da contagem do
+            // reclen. É a fonte de confusão clássica ao reimplementar este parser.
             u32 name_len = (u32)reclen - 5;
             if (i + 12 + name_len > L) { i++; continue; }
             if (d[i + 11] != 0x00) { i++; continue; } // pad

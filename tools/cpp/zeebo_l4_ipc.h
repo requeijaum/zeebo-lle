@@ -22,6 +22,13 @@ struct MsgTag {
 
     uint32_t untyped() const { return raw & 0x3fu; }
     uint32_t label() const { return (raw >> 16) & 0xffffu; }
+    // ATENÇÃO (semântica dual do OKL4 — NÃO é bug): o msg_tag_t real em
+    // pistachio/include/ipc.h é uma union { send / recv } com o MESMO bit
+    // físico partilhado: bit 14 = rcvblock (send) / xcpu (recv), bit 15 =
+    // sndblock (send) / error (recv). É interpretação DUPLA do mesmo campo
+    // conforme o contexto — igual ao hardware/firmware. Portanto is_error()
+    // (recv) e sndblock (send) convivem no bit 15 por design; alterar para
+    // bits distintos quebraria a compatibilidade byte-a-byte com o firmware.
     bool is_error() const { return (raw & (1u << 15)) != 0; }
     bool is_notify() const { return (raw & (1u << 13)) != 0; }
 
