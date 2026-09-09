@@ -2425,12 +2425,18 @@ private:
         // setado manualmente antes. Por isso o bit é aplicado diretamente em
         // cada `target_pc = pc;` abaixo, não como side-effect de CPSR aqui.
         bool caller_is_kernel_stub = (pc >= 0xb0000000u && pc < 0xb0020000u);
+        // QW43: ig_naming (0xb0100000-0xb0120000) mantém UMA CÓPIA LOCAL ARM dos stubs
+        // de trap L4 (confirmada por disassembly svc #0x1400/0x140c e por source OKL4).
+        // Aplicando o guard aqui (uma vez, p/ TODOS os syscalls) em vez de só no 0x0c,
+        // o retorno de L4_Ipc (0x00) do ig_naming volta a decodificar ARM — stall 0xb010333a
+        // era decode drift por Thumb forçado, não deadlock.
+        bool caller_is_ig_naming_arm = (pc >= 0xb0100000u && pc < 0xb0120000u);
         // QW41: helper que injeta o bit T (LSB, convenção BX) em target_pc antes
         // de cada retomada. Deve ser chamado logo antes de CADA
         // `uc_reg_write(uc, UC_ARM_REG_PC, &target_pc)` neste bloco (os stubs L4
         // continuam ARM; qualquer retomada fora deles é Thumb no AMSS/BREW).
         auto apply_tbit = [&](u32 v) -> u32 {
-            return caller_is_kernel_stub ? (v & ~1u) : (v | 1u);
+            return (caller_is_kernel_stub || caller_is_ig_naming_arm) ? (v & ~1u) : (v | 1u);
         };
         if (syscall == 0xb4) {
             // UC_HOOK_INTR delivers pc already at svc+4; resume at pc (not pc+4),
