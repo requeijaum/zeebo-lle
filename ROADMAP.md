@@ -373,7 +373,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 | QW25 | **absorbido (QW24)** | Revisar a heurística "phys_base ≥ 4GB = controle de AS" do `handle_map_control` | baixo | removido dentro do QW24 — era código morto sob o decode correto; critério whole-space ficou exclusivamente `fpage.is_whole_space()` (size_log2>=32) |
 | QW26 | **concluído** | Retomar os stubs de syscall com frame `ThreadControl` (0x08, 0xb000c798) e `SpaceControl` (0x18, 0xb000c944) em `pc`+`SP=ip` (epílogo), como o QW19 fez para MapControl (`7b570e2`) | baixo | padrão QW19/microteste (`test_threadspace_frame_resume.cpp`, RED: epílogo pulado corrompe callee-saved e descarta writeback; GREEN: retomada em pc+SP=ip restaura frame e writeback); elimina panic `SpaceControl != 1` (linha 244) |
 | QW27 | **concluído** | Retomar stubs de syscall com frame `ExchangeRegisters` (0x0c), `ThreadSwitch` (0x04) e `Schedule` (0x10) em `pc`+`SP=ip` (`fc4a811`) | baixo-médio | TDD isolado `test_exregs_frame_resume.cpp` (bytes reais do firmware); GREEN exit 0; RED com `buggy` (exit 1); elimina salto para PC=0x00000000; boot avança de 378k para 8.27M instruções e entra no `iguana_server_loop` (`0xb000aa94` / `0xb000c834` L4_Ipc wait) |
-| QW28 | **proposto** | Servidores Iguana / IPC dispatch inicial em `iguana_server_loop` | médio | tratar mensagens IPC de entrada no server loop rumo à inicialização do EFS/VFS e BREW |
+| QW28 | **em andamento** | Servidores Iguana / IPC dispatch inicial em `iguana_server_loop` | médio | tratar mensagens IPC de entrada no server loop rumo à inicialização do EFS/VFS e BREW |
+| QW29 | **proposto** | Tabela de Threads L4 & Captura de Ativação via `ExchangeRegisters` | baixo-médio | registrar SP/IP/ThreadID em `thread_start` (0x0c) para chaveamento de threads nos servidores |
 
 ### P1 — Infraestrutura após o Passo 13
 
