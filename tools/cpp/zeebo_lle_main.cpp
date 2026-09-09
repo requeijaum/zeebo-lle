@@ -34,6 +34,7 @@
 #define ZEEBO_L4_MMU_WITH_UNICORN 1
 #include "zeebo_l4_mmu.h"
 #include "zeebo_l4_thread.h"
+#include "zeebo_l4_ipc.h"
 #include "zeebo_control_server.h"
 #include "zeebo_probe_registry.h"
 #include "qdsp5/qdsp5_capture_hook.h"
@@ -2208,6 +2209,13 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R4, &flags);
                 res_r0 = dest; // L4_ExchangeRegisters retorna o dest ThreadId
                 sys->thread_table_.on_exchange_registers(dest, control, new_sp, new_ip, flags);
+                if (new_ip >= 0xb0100000 && new_ip < 0xb0120000) {
+                    sys->service_registry_.register_service("ig_naming", dest, 1, 0xb0100000, 0x20000);
+                } else if (new_ip >= 0xb0300000 && new_ip < 0xb0330000) {
+                    sys->service_registry_.register_service("quartz_servers", dest, 2, 0xb0300000, 0x30000);
+                } else if (new_ip >= 0x10137000 && new_ip < 0x10200000) {
+                    sys->service_registry_.register_service("amss", dest, 3, 0x10137000, 0x100000);
+                }
                 break;
             }
             case 0x10: break;                                // L4_Schedule
@@ -2909,6 +2917,7 @@ private:
     // uc_mem_map_ptr; map_one_aliased faz outros VAs apontarem para a MESMA RAM.
     zeebo_l4::PhysPool  apps_pool_;
     zeebo_l4::ThreadTable thread_table_;
+    zeebo_l4::SystemServiceRegistry service_registry_;
     zeebo_l4::VtlbLut   vtlb_;
     std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
