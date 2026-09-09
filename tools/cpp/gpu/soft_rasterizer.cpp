@@ -27,7 +27,11 @@ public:
     }
     void clear_color(f32 r,f32 g,f32 b,f32 a) override { cr_=r; cg_=g; cb_=b; (void)a; }
     void clear(u32 mask) override {
-        if(mask==0 || (mask&0x4000)){
+        // GL: glClear(0) é no-op obrigatório. O antigo `mask==0 || (` tratava um
+        // mask==0 como clear de cor — um guest que chama glClear(0) (0 = path de
+        // "não limpar nada") sobrescrevia o framebuffer. Só limpa cor quando o
+        // GL_COLOR_BUFFER_BIT (0x4000) está setado.
+        if(mask&0x4000){
             const u16 c=pack565(cr_,cg_,cb_);
             std::fill(fb_.begin(),fb_.end(),c);
         }
@@ -107,27 +111,26 @@ private:
         auto c=[](f32 x){ return (u32)std::lround(std::clamp(x,0.f,1.f)*255.f); };
         u32 R=c(r)>>3, G=c(g)>>2, B=c(b)>>3; return (u16)((R<<11)|(G<<5)|B);
     }
-    std::array<f32,4> sample_texture(f32 u,f32 v) const {
-        const u32 unit=std::min<u32>(st_.active_unit,1);
-        const auto it=textures_.find(bound_tex_[unit]);
-        if(it==textures_.end() || it->second.rgba.empty()) return {1,1,1,1};
-        const Texture& t=it->second;
+    // Amostra a textura. `t` já é a textura ligada (resolvida por triângulo no
+    // raster_clipped_tri para evitar o hash lookup per-pixel); nullptr = sem tex.
+    static std::array<f32,4> sample_texture(const Texture* t,f32 u,f32 v){
+        if(!t || t->rgba.empty()) return {1,1,1,1};
         auto addr=[](int i,int n,bool clamp){
             if(clamp) return std::clamp(i,0,n-1);
             i%=n; return i<0?i+n:i; };
         auto texel=[&](int x,int y){
-            x=addr(x,t.w,t.clamp_s); y=addr(y,t.h,t.clamp_t);
-            const size_t p=(static_cast<size_t>(y)*t.w+x)*4;
-            return std::array<f32,4>{t.rgba[p]/255.f,t.rgba[p+1]/255.f,
-                                     t.rgba[p+2]/255.f,t.rgba[p+3]/255.f};
+            x=addr(x,t->w,t->clamp_s); y=addr(y,t->h,t->clamp_t);
+            const size_t p=(static_cast<size_t>(y)*t->w+x)*4;
+            return std::array<f32,4>{t->rgba[p]/255.f,t->rgba[p+1]/255.f,
+                                     t->rgba[p+2]/255.f,t->rgba[p+3]/255.f};
         };
         // NEAREST: snap sample point to nearest texel center (no interpolation).
-        if(t.mag_nearest){
-            const int xi=static_cast<int>(std::floor(u*t.w));
-            const int yi=static_cast<int>(std::floor(v*t.h));
+        if(t->mag_nearest){
+            const int xi=static_cast<int>(std::floor(u*t->w));
+            const int yi=static_cast<int>(std::floor(v*t->h));
             return texel(xi,yi);
         }
-        const f32 x=u*t.w-0.5f, y=v*t.h-0.5f;
+        const f32 x=u*t->w-0.5f, y=v*t->h-0.5f;
         const int x0=static_cast<int>(std::floor(x)), y0=static_cast<int>(std::floor(y));
         const f32 fx=x-x0, fy=y-y0;
         const auto p00=texel(x0,y0), p10=texel(x0+1,y0);
@@ -256,7 +259,23 @@ private:
             if((is_front && cull_front) || (!is_front && cull_back)) return;
         }
         const bool tex_on = st_.tex_enabled[std::min<u32>(st_.active_unit,1)] != 0;
+        // Resolve a textura LIGADA uma vez por triângulo: o hash lookup em
+        // textures_.find() e o min(active_unit,1) são invariantes do triângulo —
+        // resolvê-los por PIXEL (como o antigo sample_texture fazia) adicionava um
+        // lookup de unordered_map no hot path per-pixel. nullptr = sem textura.
+        const Texture* tex = nullptr;
+        if (tex_on) {
+            const u32 unit=std::min<u32>(st_.active_unit,1);
+            const auto it=textures_.find(bound_tex_[unit]);
+            if (it!=textures_.end() && !it->second.rgba.empty()) tex=&it->second;
+        }
         for(int y=miny;y<=maxy;++y) for(int x=minx;x<=maxx;++x){
+            // Edge functions / barycentric. Cada wN é o DOBRO da área assinada do
+            // subtriângulo (vértice oposto -> pixel), e `area` é a área assinada total
+            // do triângulo, usada como denominador: (fa,fb,fc) = coordenadas
+            // barycentricas com fa+fb+fc=1. O teste de cobertura com os DOIS sinais
+            // `(o>=0)||(o<=0)` torna o fill winding-agnostic (não importa se o CCW ou
+            // CW) — ambos os lados do plano passam; é a técnica clássica de precisa.
             const int64_t w0=int64_t(x1-x)*(y2-y)-int64_t(x2-x)*(y1-y);
             const int64_t w1=int64_t(x2-x)*(y0-y)-int64_t(x0-x)*(y2-y);
             const int64_t w2=int64_t(x0-x)*(y1-y)-int64_t(x1-x)*(y0-y);
@@ -279,7 +298,7 @@ private:
             if(tex_on){
                 const f32 u=persp(a.u,b.u,c.u);
                 const f32 v=persp(a.v,b.v,c.v);
-                const auto texel=sample_texture(u,v);
+                const auto texel=sample_texture(tex,u,v);
                 r*=texel[0]; g*=texel[1]; bl*=texel[2]; alpha*=texel[3];
             }
             if(st_.alpha_test && !alpha_pass(st_.alpha_func,alpha,st_.alpha_ref)) continue;
@@ -287,6 +306,9 @@ private:
             if(st_.blend){
                 const u16 dst=fb_[pixel];
                 const f32 dr=((dst>>11)&31)/31.f, dg=((dst>>5)&63)/63.f, db=(dst&31)/31.f, da=1.f;
+                // da=1.f de propósito: o framebuffer é RGB565 (sem canal de alpha
+                // armazenado), então DST_ALPHA / ONE_MINUS_DST_ALPHA são aproximados
+                // como destino totalem opaco. Impacta exatamente esses dois fatores.
                 const f32 sr=std::clamp(r,0.f,1.f),sg=std::clamp(g,0.f,1.f),
                           sb=std::clamp(bl,0.f,1.f),sa=std::clamp(alpha,0.f,1.f);
                 r  = sr*blend_factor(st_.blend_src,0,sr,sg,sb,sa,dr,dg,db,da)

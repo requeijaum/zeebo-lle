@@ -93,7 +93,15 @@ inline void mat_mul(Mat4& o, const Mat4& a, const Mat4& b){
     for(int i=0;i<16;i++) o.m[i]=t[i];
 }
 inline void mat_frustum(Mat4& o, float l,float r,float b,float t,float n,float f){
-    // GL column-major perspective + ortho (clip space). Zeno no [-n,-f]->NDC[-1,1].
+    // GL column-major perspective (clip space). PORQUÊ dos termos não-óbvios:
+    //  - m[11]=-1 coloca -z no componente w do clip space, de modo que o divide
+    //    perspective (x,y,z)/w do rasterizador produz a foreshortening 1/z
+    //    (objetos distantes encolhem). É este -1 em w que faz a 3ª linha do
+    //    produto resultar em w'=-z_e.
+    //  - o par m[10]=-(f+n)/(f-n) e m[14]=-(2fn)/(f-n) mapeia o eye-z em
+    //    [-n,-f] para NDCD z em [-1,1]: em z_e=-n → -1, em z_e=-f → +1. As
+    //    premissas são z_e negativo em frente à câmera e n,f positivos do
+    //    argumento glFrustumx.
     o.m[0]=2*n/(r-l); o.m[1]=0;        o.m[2]=0;                       o.m[3]=0;
     o.m[4]=0;         o.m[5]=2*n/(t-b);o.m[6]=0;                       o.m[7]=0;
     o.m[8]=(r+l)/(r-l); o.m[9]=(t+b)/(t-b); o.m[10]=-(f+n)/(f-n);      o.m[11]=-1;

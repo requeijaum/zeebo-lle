@@ -26,9 +26,13 @@ struct Vertex {
 };
 
 struct RenderState {
-    bool blend=false;   u32 blend_src=0, blend_dst=0;
-    bool depth_test=false; u32 depth_func=0; bool depth_write=true;
-    bool alpha_test=false; u32 alpha_func=0; f32 alpha_ref=0;
+    bool blend=false;   u32 blend_src=0x0001 /*GL_ONE*/ , blend_dst=0x0000 /*GL_ZERO*/;
+    bool depth_test=false; u32 depth_func=0x0201 /*GL_LESS*/; bool depth_write=true;
+    bool alpha_test=false; u32 alpha_func=0x0207 /*GL_ALWAYS*/; f32 alpha_ref=0;
+    // Os defaults seguem GLES1 §4.1.7/§4.3/§4.1.5: blend = (ONE,ZERO) = "fonte
+    // substitui"; depth func = LESS; alpha func = ALWAYS. NÃO inicializar a 0
+    // (0 = GL_ZERO/GL_NEVER) causaria preto/descarte quando um guest habilita
+    // o teste/estado sem chamar a func correspondente.
     bool cull=false;    u32 cull_face=0x0405; // GLES1 default GL_CULL_FACE_MODE = GL_BACK
     u32  shade_model=0; // flat/smooth
     std::array<u32,2> tex_enabled{0,0};

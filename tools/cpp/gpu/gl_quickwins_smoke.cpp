@@ -245,6 +245,35 @@ int main(){
         printf("[safety] malformed args handled without crash PASS\n");
     }
 
+    // ---------- Default-state: GL_BLEND enabled WITHOUT glBlendFunc ----------
+    // GLES1 §4.1.7: default blend function is (GL_ONE, GL_ZERO) => src*1 + dst*0
+    // (source replaces). If RenderState.blend_src/dst default to (0,0) instead,
+    // every fragment computes src*0+dst*0 = black — visible corruption for any
+    // title that enables blending and relies on the default.
+    {
+        Harness h; h.clear_black();
+        h.put_tri();
+        h.regs={h.FX(1),h.FX(1),h.FX(1),h.FX(1)}; h.call(igl_slot::glColor4x); // white src
+        h.regs={glenum::BLEND}; h.call(igl_slot::glEnable);                    // NO glBlendFunc
+        h.regs={glenum::TRIANGLES,0,3}; h.call(igl_slot::glDrawArrays);
+        // Default (ONE,ZERO) = "src substitui": src branco sobre dst preto => branco
+        // 0xFFFF (o bug 0/0 -> ZERO/ZERO daria preto 0x0000).
+        check("QWd default blend (ONE,ZERO) keeps src white",h.center(),0xFFFF);
+    }
+    // ---------- Default-state: glClear(0) is a no-op ----------
+    // GL: glClear(0) must not touch the buffer. The impl used `mask==0 || mask&0x4000`
+    // which turns glClear(0) into a full color clear. Test: fill red, then set the
+    // clear color to green and call glClear(0) — a true no-op keeps red; the bug
+    // (mask==0 treated as color clear) would overwrite it green.
+    {
+        Harness h;
+        h.regs={h.FX(1),0,0,h.FX(1)}; h.call(igl_slot::glClearColorx); // red clear
+        h.regs={COLOR_BIT|DEPTH_BIT}; h.call(igl_slot::glClear);       // fill red
+        h.regs={0,h.FX(1),0,h.FX(1)}; h.call(igl_slot::glClearColorx); // now green
+        h.regs={0}; h.call(igl_slot::glClear);                          // glClear(0): must be no-op
+        check("QWd glClear(0) is no-op (keeps red)",h.center(),0xF800);
+    }
+
     printf(fails==0?"DONE ALL PASS\n":"DONE %d FAIL\n",fails);
     return fails==0?0:1;
 }
