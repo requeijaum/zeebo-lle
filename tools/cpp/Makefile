@@ -190,7 +190,13 @@ test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
 # reais. O gate real que exige a NAND proprietária é `test-bootinfo-real` e
 # fica FORA do agregado de propósito, para que um clone limpo (sem NAND) rode
 # `check` verde sem jamais alegar validação real-byte que não ocorreu.
-check: test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
+# QW20: gate de higiene do clean (estático, NÃO destrói artefatos). Garante que
+# todo binário produzido por alvo de link nos Makefiles esteja coberto pelo
+# alvo clean. Mutação negativa (remover 1 nome do clean) torna o gate VERMELHO.
+test-clean-hygiene:
+	python3 test_clean_hygiene.py
+
+check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_l4_mmu_txn zeebo_bootinfo_harness test_audio_sink test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume
@@ -210,7 +216,7 @@ clean:
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
