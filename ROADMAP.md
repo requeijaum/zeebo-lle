@@ -507,6 +507,43 @@ o resto foi descartado. Nada de código de terceiros foi copiado.
   explicitamente** as partes intratáveis (RF/L1/DSP). Aplica-se diretamente ao Zeebo,
   que é "um celular sem rádio".
 
+### config.page_table do Dynarmic — verificado, e a decisão de NÃO ligar agora
+
+Batelada de pesquisa (`deleg_7d00ff0c`) recomendou como item nº1 eliminar a
+"segunda fonte de verdade" passando nossa LUT ao `config.page_table` do Dynarmic
+(modelo Citra/Azahar). Verifiquei na fonte, e a parte factual **confere**:
+
+- `interface/A32/config.h:158` — `std::array<std::uint8_t*, NUM_PAGE_TABLE_ENTRIES>* page_table`,
+  `PAGE_BITS = 12`, `NUM_PAGE_TABLE_ENTRIES = 1 << 20` (`:156-157`).
+- Semântica default (`absolute_offset_page_table = false`, `:165`):
+  `page_table[addr >> bits][addr & mask]` — **idêntica** à da nossa `VtlbLut`
+  (`zeebo_l4_mmu.h:183-190`, mesmo 4KB/2^20, `translate()` faz `base + (va & PAGE_MASK)`).
+- A invariante "MMIO nunca tem ponteiro" **já vale** aqui: `zeebo_l4_mmu.h:416` só
+  chama `lut->map()` quando o Unicorn aceitou o host_ptr; MMIO nunca entra na LUT.
+
+Também descobri **código morto**: `DynarmicCore::enable_page_table()` existe
+(`zeebo_dynarmic_core.cpp:566`, declarada em `.h:111`) e **nunca é chamada**.
+Hoje todo acesso do JIT vai por callback.
+
+**Decisão: NÃO ligar agora.** O `config.page_table` é um fast-path inline no
+código recompilado: ele serve loads/stores direto do ponteiro de página, sem
+passar pela nossa bridge (`zeebo_lle_main.cpp:1271-1329`). É justamente na bridge
+que vive o vigia VTLB↔Unicorn que capturou a causa raiz de `#181306`
+(`READ16 ... origem=VTLB uc_diz=...`). Ligar o fast-path hoje **cegaria o
+lockstep de memória** — nossa única defesa contra falha silenciosa — em troca de
+performance que não é o gargalo (o boot para por panic do Core1, não por lentidão).
+
+Impedimento adicional, menor: nossa LUT é `std::vector<u8*>` (`zeebo_l4_mmu.h:253`)
+e a API exige `std::array` — mudança de tipo, não de arquitetura.
+
+**Pré-condição para reconsiderar**: o boot chegar ao AppMgr e a performance virar
+gargalo medido. Aí a troca certa é ligar `page_table` **e** mover o vigia para um
+modo de verificação opcional, não removê-lo.
+
+*(Nota: a premissa do subagente de que temos "duas fontes de verdade" está
+desatualizada — isso foi corrigido em `45e6bb1`. Hoje a VTLB só é atualizada
+quando o Unicorn adota o mesmo host_ptr.)*
+
 ### qemu-ios (devos50) — o precedente mais próximo que existe
 
 Auditado no fonte (branch `ipod_touch_2g`, clonado e lido; **GPLv2** — só arquitetura,
