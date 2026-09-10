@@ -504,8 +504,39 @@ o resto foi descartado. Nada de código de terceiros foi copiado.
   **mais de um** dump de firmware boota sem hacks específicos. Distingue "emulo o
   MSM7201A" de "fiz este dump andar". Vale como gate futuro do boot LLE.
 - **Estratégia validada por FirmWire (BSD-3)**: rodar firmware real e **stubar
-  explicitamente** as partes intratáveis (rádio/L1/DSP). Aplica-se diretamente ao Zeebo,
+  explicitamente** as partes intratáveis (RF/L1/DSP). Aplica-se diretamente ao Zeebo,
   que é "um celular sem rádio".
+
+### qemu-ios (devos50) — o precedente mais próximo que existe
+
+Auditado no fonte (branch `ipod_touch_2g`, clonado e lido; **GPLv2** — só arquitetura,
+não copiar). É o parente técnico mais próximo do zeebo-lle encontrado até agora:
+
+- **`hw/arm/ipod_touch_2g.c:544` → `ARM_CPU_TYPE_NAME("arm1176")`** — a MESMA CPU que
+  configuramos. iPod touch 1G/2G são ARMv6 (S5L8900/S5L8720), SoC móvel da mesma era do
+  MSM7201A. E, diferente de Azahar/Citra/Ryujinx, **é LLE de verdade**: boota bootloader
+  e kernel reais sem modificar os binários.
+- **27 periféricos modelados** para chegar à interface gráfica. Dá a escala honesta do
+  que falta: nosso alvo não é "mais uma correção", é um conjunto de periféricos.
+- **Padrão do periférico desconhecido (adotar)**: existe um device chamado literalmente
+  `ipod_touch_unknown1.c` (56 linhas, `0x3D700000`) — um bloco de MMIO cuja função o
+  autor NÃO descobriu, mas que virou device nomeado: loga todo offset acessado, devolve
+  `0` por padrão e só tem valor mágico onde o firmware exigiu (`0x140→0x2`, `0x144→0x3`).
+  **Dar nome e endereço ao desconhecido, em vez de esperar entendê-lo, é o que destrava
+  o boot.** 6 dos 27 periféricos logam todo acesso.
+- **Duas políticas OPOSTAS para registrador desconhecido, deliberadamente**:
+  `ipod_touch_chipid.c` usa `hw_error(...)` (**aborta ruidosamente**) porque um chip ID
+  errado corromperia silenciosamente todo o boot; o `unknown1` devolve `0` e segue. A
+  lição não é "escolha uma", é **falhar alto onde o valor importa e seguir quieto onde
+  não importa**. Nossa política atual de MMIO desconhecido não faz essa distinção.
+- **Começar de um estágio de boot mais tardio é decisão legítima**: o autor NÃO
+  conseguiu rodar o bootrom (salta para código fundido no silício, ausente do dump) e
+  **deliberadamente pulou para o iBoot**. Precedente direto para nossa dúvida entre boot
+  LLE fiel desde o início vs. entrar depois.
+- **Escolher a versão mais antiga do firmware por ter menos segurança** foi decisão
+  explícita dele (iPhoneOS 1.0, sem trust cache) — evitou ter de driblar crypto.
+- Referência adicional citada por ele: **openiBoot** (reimplementação de bootloader), que
+  foi como entendeu periféricos não documentados.
 
 - [ ] **CP15 exercitado pelo boot vs. o que modelamos (levantado 2026-09-10)**:
     Inventário dos `MCR p15` realmente executados no boot, por (CRn,CRm,opc1,opc2):
