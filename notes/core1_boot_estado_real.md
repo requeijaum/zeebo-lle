@@ -86,6 +86,30 @@ O ganho 7M→59M prova que a variável mudou, não que a correção seja a certa
 | 3 | A lista livre do alocador está vazia / nunca inicializada | Li `[pool]` no ponto errado: `f0002c94` é o ramo de **sucesso**, e `[pool]=0` é o estado **depois** de desenfileirar o último nó. A lista tinha nós |
 | 4 | Split I/D restaurando a pilha como código causa o laço | Assimetria era real, mas `r8` continuou 0 com a pilha coerente |
 | 5 | `7` em `b0000007` é corrupção | É o campo **rights** de um fpage L4 (`orr r2,r2,#7` em `f0016a8c`) |
+| 6 | Scheduler/IPC ausente é o bloqueio (QW46) | 8 SVCs no boot, **todos** `0x14` (MapControl), zero L4_Ipc — o caminho é inalcançável. **Ressalva**: o hook `UC_HOOK_INTR` está registrado só no Core0 (`zeebo_lle_main.cpp:2740`); a contagem descreve o Core0 |
+| 7 | **complete fpage mal detectada** causaria a assertion do TCB | **REFUTADA por medição.** A divergência de código é REAL (nosso `is_whole_space()` usa `size_log2>=32`; o OKL4 codifica complete como `size==1 && base==0`, confirmado em `refs/okl4-2.1.1-fix7/pistachio/include/fpage.h:137-138` e `:206-207`) — mas é **inócua neste firmware**. Instrumentei o dispatcher (`[FPG]`): das **371 fpages** emitidas no boot, **ZERO** complete e **ZERO** whole-space. `size_log2` observados: 20(124×) 12(78×) 14(37×) 21(21×) 13(21×) 22(20×) 23(19×) 16(17×) 15(10×) 17(9×) 19(6×) 18(6×) 25(3×) — nenhum `size==1`. Logo `is_whole_space()` é **código morto** neste boot e corrigi-lo **não pode** destravar o TCB |
+
+> **Lição de método (repetida, agora evitada a tempo):** o corpus OKL4 provou que
+> existe uma divergência de ABI, **não** que ela é exercida por este firmware.
+> Medir antes de corrigir evitou um segundo "conserto" de variável vizinha.
+> A divergência continua valendo como dívida técnica — só não é a causa do TCB.
+
+## 4.1. Segfault pré-existente em `--seconds=20`
+
+Descoberto em 2026-09-10 enquanto instrumentava as fpages. **Não é regressão
+das mudanças de hoje** — reproduzido no worktree do commit `744a227`, anterior
+a todo o trabalho desta sessão, com as ROMs reais presentes:
+
+```
+seconds=5   -> exit 0
+seconds=12  -> exit 0
+seconds=20  -> exit 139 (SIGSEGV)
+```
+
+O emulador **crasha no host** ao rodar ~20s de boot. Como o probe da `.rodata`
+leva o boot a ~73M instruções, esse limite passou a ser alcançável. Ainda **não
+diagnosticado**: falta rodar sob ASAN/gdb para localizar o acesso inválido.
+Item aberto — não confundir com a assertion do TCB, que é do *guest*.
 
 ## 5. Cadeia do alocador (fatos, sem conclusão)
 
