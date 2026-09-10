@@ -668,8 +668,36 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     próximo obstáculo **já conhecido e inventariado**.
   - Nova primeira divergência (#67395): `pc=0xf0009de0`, precedida de `0xee1a0f10` =
     **`MRC p15, 0, r0, c10, c0, 0`** (registrador de TLB lockdown). `r0` = `0xc0` no
-    interpretado contra `0` no recompilado — é o mesmo padrão de CP15 não modelado que já
-    resolvi duas vezes (`5471a8b`, `b1f1eae`), agora em `c10`.
+    interpretado contra `0` no recompilado.
+
+- [x] **CP15 `c10` (TLB lockdown) é "reads ignored" — RESOLVIDO; divergência do boot ZERADA**:
+  - Diagnóstico: `r0` **já valia `0xc0` antes** do `MRC` (instrução #67392 = `mov r0,#0xc0`), e
+    **nenhuma escrita a `c10` ocorre antes** no traço. Ou seja, `0xc0` não é conteúdo do
+    registrador nem valor de reset: o interpretado simplesmente **preserva** `r0`, enquanto o
+    nosso banco CP15 genérico devolvia o slot (zero, nunca escrito) e **sobrescrevia** o destino.
+  - Confirmação no oráculo em engine limpo: `MRC c10,c0,0` devolve **`0`**, não `0xc0` — o que
+    já descarta a hipótese de "valor de reset" que eu poderia ter assumido do traço.
+  - Fonte do QEMU (`target/arm/helper.c`): `TLB_LOCKDOWN` (crn=10, crm 0/1, `CP_ANY`) é
+    `ARM_CP_NOP`, e `cpregs.h` define: *"no change to PE state: writes ignored, reads ignored"*.
+  - **Limitação da API do Dynarmic**: `Coprocessor::CompileGetOneWord` **não consegue expressar**
+    "reads ignored" — o retorno `std::uint32_t*` e o `Callback` **sempre escrevem** no registrador
+    de destino (`emit_arm64_a32_coprocessor.cpp`), e `std::monostate` gera exceção de
+    coprocessador. Como não alteramos código de terceiro, a instrução é tratada **na nossa
+    camada** (`try_execute_cp15_reads_ignored`), no mesmo padrão já usado para `CPS`: intercepta
+    antes da tradução e só avança o PC, deixando os registradores intactos.
+  - Teste `test_jit_cp15_tlb_lockdown.cpp` (4/4) trava o contrato contra o oráculo, com **controle
+    que distingue "preserva" de "devolve constante"**: duas sementes diferentes (`0xc0` e
+    `0xa5a5a5a5`) têm de produzir resultados diferentes — um registrador com conteúdo próprio
+    devolveria o mesmo valor nas duas.
+  - **RESULTADO MEDIDO — divergência ZERADA**: `diff_traces.py` agora reporta *"sem divergência
+    nas 118.326 instruções comparadas"*. Os dois backends executam **exatamente as mesmas
+    instruções com os mesmos registradores** do reset até o ponto de parada.
+  - O recompilado para em `0xf000bcac` = `0xe9dd7fff` = `ldmib r13,{r0-r14}^` (P=1,U=1,S=1,L=1),
+    ou seja **`LDM_usr`** — uma das 6 instruções inventariadas que o Dynarmic não traduz. O
+    interpretado segue dali para `0xf000bcb8` = `rfeia r13!` (**`RFE`**) e retorna do tratador.
+  - **Próximo passo**: implementar `LDM_usr` e `RFE` na nossa camada (mesmo padrão de `CPS` e
+    `c10`). São o par de retorno de tratador de exceção e o **último obstáculo conhecido** entre
+    o backend recompilado e a continuação do boot.
   - **Aviso de método**: ao extrair registradores do traço, conferir o índice das colunas contra
     uma linha crua antes de tirar conclusão — foi exatamente esse descuido que gerou o
     diagnóstico errado de "ponteiro 0x2" e a caçada inútil ao acesso desalinhado.

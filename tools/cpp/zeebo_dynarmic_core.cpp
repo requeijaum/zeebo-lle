@@ -254,6 +254,39 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
     // Executar a semantica sobre o CPSR e avancar o PC deixa o boot seguir.
     //
     // Encoding A1: 1111 0001 0000 imod M 0 0000 000 A I F 0 mode
+    // TLB lockdown (CRn=10) e "reads ignored" no ARM1136/1176: um MRC NAO
+    // altera o registrador de destino (QEMU target/arm/helper.c declara
+    // TLB_LOCKDOWN como ARM_CP_NOP; cpregs.h: "writes ignored, reads
+    // ignored"). Confirmado contra o oraculo em test_jit_cp15_tlb_lockdown.
+    //
+    // A API de Coprocessor do Dynarmic nao consegue expressar isso: tanto o
+    // caminho `std::uint32_t*` quanto o `Callback` sempre ESCREVEM no destino
+    // (emit_arm64_a32_coprocessor.cpp), e `std::monostate` gera excecao de
+    // coprocessador. Como nao alteramos codigo de terceiro, tratamos a
+    // instrucao aqui, antes da traducao: basta avancar o PC.
+    //
+    // Devolve true se consumiu a instrucao (o chamador nao chama Step()).
+    bool try_execute_cp15_reads_ignored(std::uint32_t pc) {
+        if (jit->Cpsr() & (1u << 5)) return false;  // so modo ARM
+        // Le o opcode SEM passar por MemoryReadCode: aquele caminho dispara
+        // bridge.on_code, que sinaliza TRADUCAO de codigo. Como esta checagem
+        // roda a cada instrucao executada, usa-la aqui inflaria a contagem de
+        // traducoes (regressao pega por test_jit_code_hook).
+        const std::uint32_t insn = MemoryRead32(pc);
+
+        // MRC pXX,opc1,Rt,CRn,CRm,opc2: exige bit20=1 (leitura), bit4=1, cp=15.
+        const bool is_mrc = ((insn & 0x0f100010u) == 0x0e100010u)
+                            && (((insn >> 8) & 0xfu) == 15u);
+        if (!is_mrc) return false;
+
+        const unsigned CRn = (insn >> 16) & 0xfu;
+        const unsigned CRm = insn & 0xfu;
+        if (CRn != 10u || CRm > 1u) return false;
+
+        jit->Regs()[15] = pc + 4;  // destino permanece intacto
+        return true;
+    }
+
     bool try_execute_cps(std::uint32_t pc) {
         const auto fetched = MemoryReadCode(pc);
         if (!fetched) return false;
@@ -429,6 +462,9 @@ void DynarmicCore::halt_from_hook() {
 bool DynarmicCore::step_one_insn() {
     impl_->svc_hit_this_block = false;
     impl_->ticks_left = 1;
+    if (impl_->try_execute_cp15_reads_ignored(impl_->jit->Regs()[15])) {
+        return true;
+    }
     impl_->jit->Step();
     if (impl_->svc_hit_this_block) {
         if (on_svc) {
@@ -453,6 +489,10 @@ uint64_t DynarmicCore::run(uint64_t max_insns) {
             if (impl_->halted_by_hook) { impl_->halted_by_hook = false; break; }
             impl_->svc_hit_this_block = false;
             impl_->ticks_left = 1;
+            if (impl_->try_execute_cp15_reads_ignored(impl_->jit->Regs()[15])) {
+                impl_->ticks_consumed_total++;
+                continue;
+            }
             impl_->jit->Step();
             // Uma instrucao invalida nao consome ticks: sem esta saida o laco
             // repete o mesmo PC para sempre (o que travava o boot em silencio).

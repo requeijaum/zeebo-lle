@@ -45,6 +45,9 @@ test_jit_lost_write: test_jit_lost_write.cpp zeebo_l4_mmu.h
 test_jit_unmapped_asymmetry: test_jit_unmapped_asymmetry.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_jit_unmapped_asymmetry.cpp -lunicorn
 
+test_jit_cp15_tlb_lockdown: test_jit_cp15_tlb_lockdown.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_jit_cp15_tlb_lockdown.cpp -lunicorn
+
 test_jit_cp15_reset: test_jit_cp15_reset.cpp zeebo_dynarmic_core.cpp zeebo_dynarmic_core.h
 	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ test_jit_cp15_reset.cpp zeebo_dynarmic_core.cpp $(DYNARMIC_LIBS) -lunicorn
 
@@ -345,7 +348,7 @@ test-clean-hygiene:
 
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
-       test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_jit_lost_write test_jit_unmapped_asymmetry test_control_server test_save_state \
+       test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming
 	./test_brew_timer
 	./test_audio_sink
@@ -362,6 +365,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	./test_jit_cp15_reset
 	./test_jit_lost_write
 	./test_jit_unmapped_asymmetry
+	./test_jit_cp15_tlb_lockdown
 	./test_control_server
 	./test_probe_registry
 	./test_save_state
@@ -370,7 +374,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
+	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming *.o
