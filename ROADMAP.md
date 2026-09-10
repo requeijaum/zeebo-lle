@@ -1469,6 +1469,57 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW60-QW63 — Estado real do Core1 apos o boot do kernel  **[MEDIDO — sem bug fatal encontrado]**
+
+Investigacao para responder "ate' onde o Core1 chega?". Resultado: **ele nao esta'
+travado**, mas o metodo que usei primeiro deu resposta errada duas vezes. Registro
+os dois erros porque ambos sao armadilhas reutilizaveis.
+
+**Medicoes (interpretador puro, sem Dynarmic):**
+
+| O que | Valor |
+|---|---|
+| Perfil por janela de 2M insns | janela 1: 3516 PCs distintos; janelas 2-6: **772, identicas** |
+| Topo do walker `f0003df4` | `r6=0xf400f800` constante, `repetidos=32681 mudou=87` (99.7%) |
+| Janela de page table `0xf4000000` | mapeada, `err=0`, valor **0x00000000** |
+| Controle positivo `0xf000f800` | mapeada, `err=0`, valor `0x202c7825` (heap real) |
+| Escritas do Core1 | total=131072, `pgtable(f4)=889`, `heap(f0)=125938` |
+| Escrita em `0xf400f800` | 5x, `pc=0xf000498c`, **val=0x0**, size=4 |
+| `L4_MapControl` | 755 total, 173 VAs distintos |
+
+**`0xf000498c` desassemblado:**
+
+    f0004988  mov r1, #0
+    f000498c  str r1, [r6]     <- zera a entrada de propósito
+
+E' **invalidacao legitima** de entrada de page table. O zero que o walker le
+e' o zero que o proprio kernel escreveu.
+
+**ERRO 1 (meu) — "escrita perdida no alias".** Suspeitei que `0xf4000000` e
+`0xf0000000` fossem `uc_mem_map` independentes e que as escritas de page table
+se perdessem, igual ao bloqueio da SMEM. **Refutado pela medicao**: ha' 889
+escritas na janela e a entrada lida e' escrita pelo proprio kernel com valor 0.
+
+**ERRO 2 (meu) — "laco fechado".** Janelas identicas (772 PCs, contagens iguais)
+me levaram a concluir laco travado. **Refutado**: ha' **278 `L4_MapControl`
+concluidas DEPOIS** do ponto de estabilizacao (478 antes), e o Core0 avanca
+(6844226 -> 7044226 insns).
+
+> **Licao de metodo:** contar PCs distintos mede **diversidade de codigo**, nao
+> **progresso**. Codigo de servico (walker, alocador) tem baixa diversidade por
+> natureza e roda indefinidamente sem estar travado. O discriminador correto e'
+> o **efeito externo** (syscalls concluidas), nunca o perfil interno.
+> Isto tambem contradiz minha leitura anterior de que o Core1 "progride no setup":
+> ele progride, mas em regime estacionario processando uma fila.
+
+**Achado aproveitavel:** ~21783 iteracoes de walker por 2M instrucoes (~1% do
+tempo) reconsultando **a mesma entrada invalidada**. Ineficiencia real, nao bug
+fatal — candidato a otimizacao, nao a correcao de boot.
+
+**Pendente honesto:** nao ha' referencia para dizer se 755 `MapControl` com 173
+VAs distintos e' o esperado ou se ha' reprocessamento. Comparar com o corpus OKL4.
+
+
 ### QW57 — `Assertion trace_buffer failed` (tracebuffer.cc:116) **[RESOLVIDO — era artefato do QW56]**
 
 Nao era fronteira nova: era **consequencia da guarda assimetrica do QW56**, que
