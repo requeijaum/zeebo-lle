@@ -1,4 +1,32 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10b, Áudio Host Real via SDL2 [QW-AUD1] Entregue; Double Dragon AUSENTE na NAND 1.1.2 atual — só reksio.mod/tectoy.mod)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10c, Double Dragon e 7 jogos comerciais RESOLVIDOS via injeção externa --applet=)
+
+## Nota de sessão (2026-09-10c) — Double Dragon RESOLVIDO
+- Rafael apontou o catálogo real de ROMs de Zeebo em
+  `/media/rafaelfrequiao/8C5F-19E51/zeebo/ROMs/` (No-Intro, .zip válidos — NÃO confundir com o
+  `.7z` corrompido de `Downloads/temp/`, que continua inutilizável).
+- **Double Dragon (Brazil) (Es,Pt).zip** contém `mod/274754/ddragonz.mod` (462.748 bytes) +
+  `data.ggz`/`sound.ggz`/`ddragonz.sig` + `mif/274754.mif`. **CLSID 274754 confirmado** —
+  exatamente o valor hipotetizado na sessão anterior (adjacente ao Z-Wheel 274755).
+- **Não foi preciso injetar na NAND.** O emulador já tinha um "VFS mínimo" pronto: a flag
+  `--applet=<caminho.mod>` (`load_applet()` -> `BrewLoader::inject_mod`) injeta bytes de
+  QUALQUER `.mod` do host diretamente em `0x12000000` no espaço de Core 0, sem exigir que o
+  arquivo esteja catalogado no EFS2/NAND 1.1.2. Zero patch de código necessário.
+- Testado: `--applet=roms_host/doubledragon/mod/274754/ddragonz.mod --seconds=2` (headless E
+  `--gui` com áudio) → `[Z-Wheel/Life] PASS` + `[BREW/Applet] PASS` (EVT_APP_START r0=1,
+  chamada gráfica capturada, framebuffer soma 2013081600, áudio SDL device 44100Hz armado).
+- **Outros 7 jogos comerciais validados com o mesmo mecanismo** (todos PASS, sem crash):
+  Bad Dudes vs. DragonNinja (`279888/baddudes.mod`), Caveman Ninja (`278986/cninja.mod`),
+  Karnov's Revenge (`279126/karnovr.mod`), Quake (`274802/quake.mod`), Tekken 2
+  (`276731/tekken2.mod`), Ridge Racer (`276152/ridgeracer.mod`), Street Hoop
+  (`278988/strhoop.mod`). Amostra escolhida por serem ports de arcade/consoles conhecidos
+  (fácil validar visualmente depois) e por cobrir gêneros distintos (luta, corrida, FPS,
+  beat-em-up, esporte) — teto de complexidade de assets variado.
+- Novo alvo de teste: `make test-roms-external ROM=<caminho.mod>` (Makefile) — valida
+  qualquer `.mod` externo sem exigir NAND, checando `BREW/Applet] PASS` no stdout.
+- **ROMs NÃO fazem parte do repo** (mídia de terceiros/direitos autorais) — extraídas para
+  `roms_host/` (git-ignored) só para teste local. Catálogo completo permanece em
+  `/media/rafaelfrequiao/8C5F-19E51/zeebo/ROMs/` (mídia externa do usuário).
+- Commits: `<pendente>` (Makefile target + .gitignore).
 
 ## Nota de sessão (2026-09-10b)
 - **QW-AUD1 implementado e testado**: `UnifiedHostAudio` (SDL_AudioDevice pull-callback) conectado ao mixer real do

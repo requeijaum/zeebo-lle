@@ -66,3 +66,4 @@ __pycache__/
 *.pyc
 tools/cpp/testkit/build/
 tools/cpp/zeebo_lle_txn_probe
+roms_host/

@@ -186,6 +186,20 @@ test-efs2-game-reksio: zeebo_lle_main
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
 
+# QW-ROMS1: valida o carregamento de .mod externos (host filesystem, SEM
+# montagem de NAND) via --applet=<caminho> para o catálogo real de ROMs de
+# Zeebo (mídia física do usuário, fora do repo — ver ROADMAP para o path).
+# Cada jogo deve completar EVT_APP_START (r0=1) e o dispatch de ciclo de vida
+# (PASS), provando que o injetor BrewLoader funciona como VFS mínimo: qualquer
+# .mod válido pode ser injetado diretamente em 0x12000000 sem precisar estar
+# catalogado na NAND 1.1.2 (EFS2). Uso: make test-roms-external ROM=<path.mod>
+test-roms-external: zeebo_lle_main
+	@test -n "$(ROM)" || (echo "Uso: make test-roms-external ROM=<caminho.mod>"; exit 1)
+	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --applet="$(ROM)" --seconds=1 \
+	  | grep -q "BREW/Applet] PASS" \
+	  && echo "PASS: --applet=$(ROM) executou via injeção externa (sem NAND)." \
+	  || (echo "FAIL: applet externo $(ROM) não completou o ciclo de vida"; exit 1)
+
 # QW6 + QW15 transactional conformance: locally authored ARM/Thumb vectors run
 # under the Unicorn txn probe and diffed against golden traces (ordered
 # bus transactions: prefetch/load/store width/addr/value + full INIT/FINAL
