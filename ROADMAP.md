@@ -939,6 +939,45 @@ não copiar). É o parente técnico mais próximo do zeebo-lle encontrado até a
 
 ---
 
+### Core1 (ARM926/AMSS) — estado do boot em 2026-09-10
+
+Fonte detalhada: `notes/core1_boot_estado_real.md`. Resumo para não repetir trabalho:
+
+**Onde o boot está.** O kernel OKL4 imprime o banner completo (`Initializing KIP...` →
+`root-servers: utcb_area/kip_area` → `creating root server (000a8001)`) e então entra num
+laço infinito de page-table walk. **Causa raiz provada (QW49)**: a `.rodata` do kernel é
+servida do shadow Split I/D zerado. Com o probe que serve essa faixa do pristino, o laço
+morre e o kernel avança ~9x, até uma assertion **dele mesmo**:
+`Failed to create root server TCB` (`pistachio/src/thread.cc:1273`) — QW50, alvo atual.
+
+**O probe é muleta declarada, não correção.** A correção estrutural (QW51) continua aberta.
+
+**REGRA — investigação de LLE roda em INTERPRETADOR PURO.** Sem `--jit`/`--jit-solo`.
+O JIT acrescenta divergência de backend a um problema que ainda é de emulação low-level;
+ele tem worktree próprio (`zeebo-dynarmic-bringup`) e o lockstep é assunto separado.
+O teste `test_rodata_probe_control` **falha** se detectar Dynarmic na saída.
+
+**Hipóteses REFUTADAS por medição — não reabrir sem evidência nova:**
+
+| # | Hipótese | Como caiu |
+|---|---|---|
+| 1 | `find_kernel_heap`/memdesc mal configurado escolhe o heap | Este build **não usa** esse caminho. Erro de método: apliquei o corpus OKL4 como prova do fluxo desta firmware — exatamente o que `MORE_INFO.md` §5.1 adverte quanto ao kernel MSM |
+| 2 | Heap `(f0000000,f0200000)` sobrepõe a imagem ⇒ limiar linear separa | `.rodata` e pilha no MESMO `PT_LOAD`; tentativa → regressão 16.717 insns/`pc=0` |
+| 3 | Lista livre do alocador vazia / nunca inicializada | Li `[pool]` no ponto errado: `f0002c94` é o ramo de **sucesso** e `[pool]=0` é o estado **depois** de desenfileirar o último nó |
+| 4 | Split I/D restaurando a pilha como código causa o laço | Assimetria real, mas `r8` continuou 0 com a pilha coerente |
+| 5 | O `7` em `b0000007` é corrupção | É o campo **rights** de um fpage L4 (`orr r2,r2,#7` em `f0016a8c`) |
+| 6 | Scheduler/IPC é o bloqueio (QW46) | 8 SVCs no boot, todos MapControl, zero IPC — inalcançável |
+
+**Etapa de carregamento que faltava (corrigida, `0d12c99`)**: o loader do super-ELF do AMSS
+só gravava no VA; **11 dos 18 `PT_LOAD` ficavam com o PA vazio** (`shnum=0`, `phnum=18`).
+Teste `test_elf_pa_load.cpp`. Correto por si, mas **não** destravou o boot.
+
+**Armadilha de ambiente**: `/tmp` é tmpfs de 4,8G; traços de lockstep (~486MB cada) enchem
+o disco e o build falha com `error writing to /tmp/ccXXXX.s: Não há espaço disponível` —
+**parece erro de código e não é**. Checar `df -h /tmp` antes de investigar.
+
+---
+
 ### Fase 15: Double Dragon — runtime, assets, imagem e som (ABERTA)
 - [ ] **Desacoplamento do Stub de Tela Azul e Renderização Real do BREW / Z-Wheel**:
   - Substituir o stub de `clear_color(0.1f, 0.2f, 0.8f)` pelo processamento de command buffers e chamadas reais de `IBitmap` / `IDisplay` do BREW.
@@ -1199,8 +1238,11 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 | QW43 | **concluído (análise/RE)** | Causa raiz do "underflow" RLE em `0xb0400000` = bug na SIMULAÇÃO PYTHON de sessão anterior (`r5+1`→`r5+2`), NÃO no firmware/dispatcher | médio | Oráculo Python decodifica 250/252 bytes → 1040/1040 exatos (strings kernel `"spinlockarm.s"`/`"Invalid argument"`); workaround de core testado e REJEITADO/revertido; zloader real (openzeebo) NÃO descomprime (memcpy puro); nenhuma correção C++ necessária |
 | QW44 | **concluído** | Guard T-bit generalizado p/ TODOS os syscalls quando o retorno cai na cópia local ARM do ig_naming (`9ca92a6`); hipótese de truncamento por DMA descartada via Program Header ELF | médio | boot avança além do stall, `ig_naming` mapeado rwx, **14 frames / 32 draws do Adreno renderizados**; frame ainda **PRETO** (draws não conectados ao sink) |
 | QW45 | **pendente; DD4, não quick win** | Conectar produtor guest ao framebuffer | alto/RE | Frame reconhecível do jogo + origem dos comandos; rejeitar azul constante e contagem artificial |
-| QW46 | **proposto** | Scheduler real na ordem OKL4: instanciar os servers (`iguana`→`timer`→…→`appmgr`) e retirar a injeção sintética de IPC (MR fake, linhas 2232-2237) | alto | `naming_insert` real chega ao ig_naming (não MR fake); `pick_next_thread` escolhe remetente real; lookup/register subsequente de BREW/AMSS funcionam |
+| QW46 | **REFUTADO por medição (2026-09-10)** | ~~Scheduler real na ordem OKL4 + retirar a injeção sintética de IPC~~ — o alvo não existe neste caminho de boot | — | **Instrumentando o hook de syscall: 8 SVCs no boot inteiro, TODOS `0x14` (L4_MapControl), do mesmo PC `b000c940`. ZERO `L4_Ipc` (0x00), ZERO `L4_ExchangeRegisters` (0x0c).** Todo o `case 0x00` — handoff cooperativo QW32, `pick_next_thread`, injeção sintética `MR0=1/MR1=0x16` — é **código morto** aqui, assim como o registro de servers por sniffing de faixa de IP (`register_service`, ~:2952). Não há o que "retirar": o boot do Core1 morre **antes** do primeiro IPC, no laço de page-table walk (ver QW49). Reabrir só depois que o Core1 passar do TCB. Nota: `notes/core1_boot_estado_real.md` |
 | QW47 | **concluído** | Modelar as 3 UARTs do MSM7201A (UART1 `0xA9A00000` console, UART2 `0xA9B00000`, UART3 `0xA9C00000`) + captura de TX FIFO no stderr como console de boot (`aea313d`); corrige colisão KEYPAD_BASE (0xA9A00000 era UART1 real) | baixo-médio | TX FIFO acumulado → console em stderr; read-hook fornece TX_READY (UART_SR=0x0C); boot preservado (frame 14/32 draws, `make check` verde) |
+| QW49 | **concluído (causa raiz provada com controle negativo)** | Laço infinito de page-table walk do Core1 pós-`creating root server`: a `.rodata` do kernel é servida do shadow Split I/D **zerado** (`5267476`, `339c0b2`) | alto | A tabela de tamanhos de página do OKL4 `{12,16,20,26,32}` em `0xf000efc8` cai dentro da janela do heap REX; o laço de zeragem apaga a cópia do shadow ⇒ `ldr r1` lê 0 ⇒ size 0 ⇒ `lsl r8` shift 0 ⇒ máscara `0xffffffff` ⇒ `sl=0xb0000007` ⇒ walk infinito. **Controle negativo (MORE_INFO §7) rodado**: baseline 8,2M insns / `rodata` 73,3M (8,93x, alcança TCB) / `control` (faixa vizinha `f0012000`, mesma mecânica) 8,3M (1,01x, NÃO alcança TCB). Teste `test_rodata_probe_control.cpp` no `check`, com guarda de **interpretador puro** (falha se detectar Dynarmic; controle positivo: com `--jit` acusa 2 ocorrências) |
+| QW50 | **próximo alvo** | Assertion do próprio kernel: `!"Failed to create root server TCB"` em `pistachio/src/thread.cc:1273` | alto | Alcançada com o probe de `.rodata` (73,3M insns) — território novo, nunca antes atingido. É onde threads passariam a existir, o que explicaria os zero IPCs do QW46. Corpus em `refs/okl4-2.1.1-fix7/pistachio/src/thread.cc` |
+| QW51 | **aberto** | Fix estrutural do Split I/D: separar `.rodata` (nunca do shadow) de `.bss`/pilha (nunca do pristino) — hoje o probe é **muleta declarada**, não correção | alto | Limiar linear de endereço **não** resolve: `.rodata` (`f000efc8`) e pilha (`sp≈f00196xx`) vivem no MESMO `PT_LOAD` (`va=f0000000 filesz=0001a324 memsz=0001e2c0`) e o super-ELF tem `shnum=0` (sem section headers). Tentativa por topo de imagem (memsz/filesz) → regressão para 16.717 insns/`pc=0`. Caminho: inferir `.rodata` por comportamento (lida como constante, escrita só pelo laço de zeragem) |
 | QW48 | **proposto** | Resolver a re-entrada indevida da 2ª imagem no `__scatterload` (quartz_servers via `lr=0xb0302dd1` ou tabela corrompida por aliasing) — o kernel Iguana completa o scatterload corretamente, o travamento é host | alto | kernel termina reach `0xb0410070` __rt_entry (já verificado); 2ª imagem completa sem `ctrl=0x00`/loop; boot avança para `iguana_server_loop` pós-scatterload |
 
 **QW42 — 3ª hipótese testada e descartada, com localização exata do SVC**: instrumentação `ZEEBO_DEBUG_SYSCALL_NEAR` (temporária) confirmou que o ÚNICO SVC disparado na faixa `0xb0102000-0xb0104000` antes do stall é `syscall=0x0c` (L4_ExchangeRegisters) em `pc=0xb0102c2c` — não `0x00`/L4_Ipc como hipotetizado antes. Confirmado por disassembly (Capstone) que `0xb0103338` é um `bl 0xb0102cb8` (função ARM que por sua vez faz `svc #0x1400`); o retorno real é reconstruído incorretamente pelo classificador `apply_tbit` genérico, mas a correção precisa (detecção de formato por bytes, halfword em `pc-2`==`0xDFxx`⇒Thumb) aplicada SÓ no branch do case `0x0c` (`else`, sem `did_handoff`) causou REGRESSÃO para o stall antigo `0x10137000` — ou seja, esse mesmo case/branch é usado pelo caminho normal que já FUNCIONA para chegar até dentro do `ig_naming`; a heurística "errada" (`apply_tbit` por faixa fixa) coincidentemente acerta esse caso mais comum, então substituí-la ali quebra o handoff que já funcionava. Revertido com segurança (`git checkout HEAD --`); HEAD confirmado em `d0c8edf`, suite/boot idênticos ao baseline. Conclusão: o bug do QW42 não está isolado num único ponto de retorno de SVC — é necessário identificar e diferenciar CADA call site específico (não por case de syscall nem por faixa de PC do chamador), possivelmente rastreando o LR do chamador de `0xb0102cb8` (visto no trace: `lr=0xb0046fa8`, fora de qualquer stub conhecido) para achar de onde realmente vem essa chamada.
@@ -1227,7 +1269,12 @@ Assertion r != 0 failed in file pistachio/arch/arm/src/init.cc, line 130
 
 **Dado negativo importante**: o dead-loop `0xf000e710` NÃO era espera de MMIO nem inicialização de dispositivo faltando — é o handler `ent0` da tabela de dispatch em `0xf0019e78` (índice `[0xf001da60]=0`), usado como stub de panic após a asserção. O `r0=1` do teste em `0xf000e704` vem de `mov r0,#1` **literal** em `0xf00143bc`, não de leitura de dispositivo. Vigia de escrita próprio foi necessário: `--watch-writes` não cobre o Core1 (vigiar TODA a memória deu 0 escritas = instrumento inválido).
 
-**Próxima barreira (aberta)**: a asserção `r != 0` em `init.cc:130`. No corpus OKL4 2.1.1-fix7 (referência, não cópia) as asserções desse arquivo com essa forma são `ASSERT(ALWAYS, r)` sobre o retorno de `kspace->add_mapping(...)` (linhas 392/404/453) — ou seja, **um mapeamento de página do kernel está falhando**. Note que o arquivo do corpus não bate linha-a-linha com o binário (build diferente), então a linha 130 não é diretamente localizável; a identificação do `add_mapping` é por forma da asserção, não por linha. Investigar `add_mapping`/`lookup_mapping` do kernel space é o próximo passo do Core1.
+> ⚠ **SUPERADA (2026-09-10).** O boot do Core1 avançou muito além desta asserção: hoje
+> imprime o banner completo até `creating root server (000a8001)` e a barreira atual é a
+> assertion do TCB em `thread.cc:1273` (QW50), alcançada com o probe de `.rodata` (QW49).
+> O parágrafo abaixo fica como registro histórico do caminho percorrido.
+
+**Próxima barreira (era aberta; hoje SUPERADA)**: a asserção `r != 0` em `init.cc:130`. No corpus OKL4 2.1.1-fix7 (referência, não cópia) as asserções desse arquivo com essa forma são `ASSERT(ALWAYS, r)` sobre o retorno de `kspace->add_mapping(...)` (linhas 392/404/453) — ou seja, **um mapeamento de página do kernel está falhando**. Note que o arquivo do corpus não bate linha-a-linha com o binário (build diferente), então a linha 130 não é diretamente localizável; a identificação do `add_mapping` é por forma da asserção, não por linha. Investigar `add_mapping`/`lookup_mapping` do kernel space é o próximo passo do Core1.
 
 ### P1 — Infraestrutura após o Passo 13
 
