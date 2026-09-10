@@ -119,68 +119,7 @@ enum {
 static inline u16 rd16(const u8* p, size_t o) { return p[o]|(p[o+1]<<8); }
 static inline u32 rd32(const u8* p, size_t o) { return p[o]|(p[o+1]<<8)|(p[o+2]<<16)|(p[o+3]<<24); }
 
-// ---- Unified Hardware Models ----
-
-// 1. Virtual MDDI Engine
-class UnifiedMDDI {
-public:
-    UnifiedMDDI() : status_(0x21), version_(0x00000102), pri_ptr_(0), frame_count_(0) {}
-    u32 read(u32 off) {
-        if (off == 0x0004) return version_;
-        if (off == 0x0028) return status_;
-        if (off == 0x0008) return pri_ptr_;
-        auto it = regs_.find(off); return it != regs_.end() ? it->second : 0;
-    }
-    void write(u32 off, u32 val) {
-        regs_[off] = val;
-        if (off == 0x0000) { // CMD
-            if ((val & 0xff00) == 0x0200) status_ |= 0x01; // POWER_UP -> LINK_ACTIVE
-            else if ((val & 0xff00) == 0x0400) status_ = 0x21; // RESET
-        } else if (off == 0x0008) { // PRI_PTR
-            pri_ptr_ = val;
-            frame_count_++;
-            status_ |= 0x20; // PRI_LIST_DONE
-        }
-    }
-    u32 frame_count() const { return frame_count_; }
-private:
-    u32 status_, version_, pri_ptr_, frame_count_;
-    std::map<u32, u32> regs_;
-};
-
-// 2. Virtual Adreno 130 GPU Engine
-class UnifiedAdreno130 {
-public:
-    UnifiedAdreno130() : status_(1), rb_rptr_(0), rb_wptr_(0), int_status_(0), int_en_(0), draws_(0), fb_dirty_(false) {}
-    u32 read(u32 off) {
-        if (off == 0x0000) return CHIP_ID_YAMATO;
-        if (off == 0x0004) return 0x00000001; // Rev 1
-        if (off == 0x0110) return status_;
-        if (off == 0x0108) return rb_rptr_;
-        if (off == 0x010c) return rb_wptr_;
-        if (off == 0x0120) return int_status_;
-        auto it = regs_.find(off); return it != regs_.end() ? it->second : 0;
-    }
-    void write(u32 off, u32 val) {
-        regs_[off] = val;
-        if (off == 0x010c) { // WPTR
-            rb_wptr_ = val;
-            draws_ += (rb_wptr_ >= rb_rptr_) ? (rb_wptr_ - rb_rptr_) : (0x10000 - rb_rptr_ + rb_wptr_);
-            rb_rptr_ = rb_wptr_;
-            fb_dirty_ = true;
-            if (int_en_ & 1) int_status_ |= 1;
-        } else if (off == 0x0124) int_en_ = val;
-        else if (off == 0x0128) int_status_ &= ~val;
-    }
-    u32 draws() const { return draws_; }
-    bool is_fb_dirty() const { return fb_dirty_; }
-    void clear_fb_dirty() { fb_dirty_ = false; }
-    void mark_dirty() { fb_dirty_ = true; }
-private:
-    u32 status_, rb_rptr_, rb_wptr_, int_status_, int_en_, draws_;
-    bool fb_dirty_;
-    std::map<u32, u32> regs_;
-};
+#include "zeebo_video_mmio.h"
 
 // 3. Gamepad & Input Subsystem (Zeebo Z-Pad / MSM7201A Keysense)
 enum {
@@ -3288,6 +3227,15 @@ private:
                 return 0x000C; // TX_READY | TX_EMPTY
             }
         }
+        // Registradores de video: as janelas MDDI/Adreno sao mapeadas como RAM
+        // comum no Unicorn, entao sem este roteamento o guest lia sempre o
+        // conteudo de fundo (zero) em vez do modelo -- CHIP_ID vinha 0.
+        if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) {
+            if (mddi_) return mddi_->read((u32)(addr - MSM_MDDI_BASE));
+        }
+        if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) {
+            if (gpu_) return gpu_->read((u32)(addr - ADRENO130_BASE));
+        }
         u32 val = 0;
         vtlb_.read_u32(addr, &val);
         return val;
@@ -3310,6 +3258,17 @@ private:
         (void)ud; (void)type;
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         if (size != 4 && size != 2 && size != 1) return;
+
+        // Janelas de video: injeta o valor do modelo antes de o Unicorn
+        // devolver a RAM de fundo. Sem isto UnifiedMDDI::read/UnifiedAdreno130::read
+        // nunca eram chamados em leitura (apenas escritas eram roteadas).
+        if ((addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) ||
+            (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE)) {
+            const u32 v = sys->handle_peripheral_read((u32)addr, size);
+            uc_mem_write(uc, addr, &v, (size_t)size);
+            return;
+        }
+
         const bool is_uart =
             (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
         if (!is_uart) return;
