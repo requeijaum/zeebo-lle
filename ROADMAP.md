@@ -1469,6 +1469,135 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW77 — Nao existe bug ARM/Thumb; Core0 atravessa o memset e entra na descompressao  **[MEDIDO com controle]**
+
+**A previsao do QW76 foi testada e confirmada.** Se o gargalo era throughput
+(nao deadlock), mais tempo deveria produzir um PC novo:
+
+    seconds=12  ->  pc=0xb000aff4  insns=4.966.776   (ainda no memset de 5 MB)
+    seconds=45  ->  pc=0xb040006c  insns=7.044.226   (fase NOVA)
+
+O Core0 **atravessou** o memset e avancou.
+
+**Onde ele chegou:** `0xb0400040` (seg4, `va=0xb0400000 off=0x41000`) e' um
+**veneer ARM->Thumb** canonico, seguido de um **descompressor LZ em Thumb**:
+
+    b0400040  add  ip, pc, #1     ; veneer: LSB=1
+    b0400044  bx   ip             ; troca para Thumb
+    b0400048  adds r2, r1, r2     ; --- Thumb daqui em diante ---
+    b040004a  ldrb r3, [r0]       ; le byte de controle
+    b0400064  ldrb r6, [r0]       ; copia literal
+    b0400068  strb r6, [r1]
+    b040006c  subs r4, #1
+    b040006e  bne  b0400064
+    b0400082  ldrb r4, [r0]       ; referencia para tras (match LZ)
+    b0400096  cmp  r1, r2
+    b0400098  blo  b040004a       ; ate' preencher o destino
+
+**Medicao do T-bit, com controle negativo:**
+
+    LZ (b0400040-b04000a0):  T=1: 989.650   T=0: 36
+    CTRL memset (ARM):       T=1: 0         T=0: 6.150.015
+    PCs no LZ: b0400040 44 48 4a 4c 4e 50 52 54 56 58 5a 5c 5e   <- passo 2
+
+O veneer (`40`,`44`) aparece com passo 4 (ARM); de `48` em diante o passo e' 2
+com `T=1` (Thumb). O controle na funcao ARM da `T=0` puro — o instrumento
+**distingue** os dois casos.
+
+> **O "passo de 4" que me enganou** (`64,68,6c`) era artefato de **amostragem**
+> do traco periodico, nao evidencia de decodificacao errada. Medindo *todas* as
+> instrucoes, o passo 2 aparece. **Traco amostrado nao prova tamanho de
+> instrucao.**
+
+**Conclusoes:**
+
+1. **Nao existe bug de ARM/Thumb no emulador.** `apply_tbit` entrega `T=1` onde
+   deve e `T=0` onde deve. A auditoria que o marcou como suspeito fica encerrada.
+2. **O endereco `0xb0400064/68/6c` do ROADMAP antigo estava CERTO.** Eu o havia
+   declarado errado no QW64 — retratado tambem.
+3. O Core0 progride por fases: setup -> memset de 5 MB -> **descompressao LZ**.
+
+**Pendente:** `exit=139` com `seconds=45`. Era tido como pre-existente
+(`seconds=20`), mas agora ocorre **depois de progresso real**, entao pode estar
+limitando o boot. Proximo alvo.
+
+### QW73-QW76 — Core0: o "travamento" e' THROUGHPUT, nao deadlock  **[MEDIDO]**
+
+Retomada apos a retratacao QW70-72, agora sobre o binario correto
+(`nand/1.1.2_APPS.bin`).
+
+**QW73 — `0x80000000` esta mapeada; quem chama o memset**
+
+    n=1       lr=0xb0043000  dst_err=0  CTRL_err=0  faixas: b0=1
+    n=100000  lr=0x8093bf70  dst_err=0  CTRL_err=0  faixas: 80=80888 b0=19112
+    n=500000  lr=0x80a56770  dst_err=0  CTRL_err=0  faixas: 80=480888 b0=19112
+
+`dst_err=0` com controle `CTRL_err=0` em `0xb0043000` (sabidamente mapeada):
+a faixa `0x80000000` **esta mapeada**. A hipotese "escrita em regiao nao
+mapeada" morre aqui. A faixa `b0` congela em 19112 e a `80` cresce sem parar:
+o alvo mudou de buffers pequenos de setup para um buffer grande.
+
+Chamadores (topo da pilha, estaveis): `0xb00049b8` e `0xb00058d0`. Ambos com o
+mesmo idioma:
+
+    ldmda r3, {r2, r3}    ; carrega par (inicio, fim)
+    sub   r2, r3, r2      ; tamanho = fim - inicio
+    add   r2, r2, #1
+    ldr   r0, [r5/r6, #8] ; destino
+    bl    0xb000af88      ; memset
+
+**QW74 — o tamanho (com uma correcao de instrumento no meio)**
+
+Primeiras chamadas, todas sadias: `4096, 4096, 104, 12, 4, 12`.
+
+> ⚠ **Erro meu:** o filtro era `n<=6 || n%20000==0` e o total nunca chegou a
+> 20000, entao vi 6 linhas e reportei **"6 chamadas"** como se fosse o total.
+> Era so' o que eu tinha mandado imprimir. Refeito com escala log
+> `(n & (n-1))==0`, que cobre qualquer volume: total real **>256**.
+> **Filtro mal escolhido mente por omissao.**
+
+Com o instrumento corrigido, o alvo real aparece:
+
+    *** memset GRANDE dst=0x80800000 size=0x00500000 (5242880 bytes) lr=0xb00049b8
+    *** memset GRANDE dst=0x80800000 size=0x00500000 (5242880 bytes) lr=0xb00058d0
+
+**5 MB zerados**, pelos dois sitios.
+
+**QW75 — nao ha entrada anomala no laco**
+
+    n=400000  iteracoes=399720  portas: 0xb000afd8=280
+
+Apenas **280 entradas**; todo o resto sao iteracoes normais. Ninguem salta para
+dentro do laco: uma unica chamada itera centenas de milhares de vezes.
+
+**O laco esta correto** (`b000af88..b000b004`, memset ARM desenrolado):
+
+    b000afdc  tst   ip, #3        ; Z=1 se ip multiplo de 4
+    b000afe0  streq r3, [lr], #4  ; caminho A: 3 stores condicionais
+    b000afe8  subeq ip, ip, #4    ;            + ip -= 4
+    b000aff0  subne ip, ip, #1    ; caminho B: ip -= 1
+    b000aff4  cmp   ip, #0
+    b000aff8  str   r3, [lr], #4  ; sempre 1 store
+    b000affc  bne   b000afdc
+
+Caminho A zera 4 words e desconta 4; caminho B zera 1 e desconta 1. Coerente,
+e termina em `ip==0`.
+
+**QW76 — a conta fecha**
+
+    0x500000 / 4        = 1.310.720 words
+    caminho rapido      = 4 words/iteracao
+    => ~327.680 iteracoes por chamada de 5 MB
+
+Casa com o observado: 399.720 iteracoes ≈ 1,2 chamadas de 5 MB; e o
+`ip=0x132aa4` (1.256.100) que eu tinha achado suspeito e' simplesmente o
+contador **descendo** de 1.310.720.
+
+**Conclusao:** o Core0 **nao esta travado nem corrompido** — esta zerando 5 MB,
+uma instrucao interpretada por vez, e progride (`insns=3.185.753`). Nao ha bug
+para consertar aqui. A pergunta vira orcamento de tempo: quantos segundos para
+atravessar o memset e alcancar o proximo marco.
+
 ### QW70-QW72 — RETRATACAO: QW64-69 estavam ERRADOS (binario errado)  **[CORRECAO]**
 
 > ⚠ **As secoes QW64-QW66 e QW67-QW69 abaixo estao FACTUALMENTE ERRADAS.**
