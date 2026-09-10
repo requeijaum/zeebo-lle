@@ -452,7 +452,19 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
       `RFE` 1x; `STM_usr`, `SRS`, `SETEND`, `SWP/SWPB`, `LDREX/STREX`, `WFI/WFE/SEV`, `PLD`
       e `BKPT` = **ZERO**. Nenhum acesso a coprocessador != CP15 (sem VFP/NEON no boot).
     - **Conclusão**: após `559dcf9` não há lacuna de instrução conhecida pendente. A
-      divergência em `#181306` **não** é instrução não traduzida — é outra coisa.
+      divergência em `#181306` **não** era instrução não traduzida — era assimetria
+      VTLB↔Unicorn, corrigida em `45e6bb1`.
+    - **Revarredura em traço 7,5x maior (3.000.000 de instruções, 2026-09-10)**: repetida
+      a contagem no traço longo para vencer a limitação "zero só vale até onde o traço
+      alcança". Resultado **idêntico**: `CPS` 18x, `LDM_usr` 1x, `RFE` 1x; todas as demais
+      (`STM_usr`, `SRS`, `SETEND`, `SWP/SWPB`, `LDREX/STREX`, `PLD`, `BKPT`) seguem em
+      **zero**, e nenhum acesso a coprocessador != CP15. **Thumb: 0 instruções** — o Core0
+      roda 100% em ARM no boot, então a cobertura integral de Thumb do Dynarmic é
+      irrelevante aqui.
+    - **Core1 (ARM926EJ-S) não usa Dynarmic**: é `uc_open` puro (Unicorn), logo lacunas de
+      tradução do Dynarmic **não o afetam**. Toda esta análise vale só para o Core0.
+    - **Paridade dos backends em 3.000.000 de instruções: divergência ZERO** (antes o
+      máximo medido era 400.000).
 
 - [ ] **CP15 exercitado pelo boot vs. o que modelamos (levantado 2026-09-10)**:
     Inventário dos `MCR p15` realmente executados no boot, por (CRn,CRm,opc1,opc2):

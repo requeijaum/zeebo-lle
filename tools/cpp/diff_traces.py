@@ -16,37 +16,53 @@ divergencia e exata.
 import sys
 
 
-def load(path, limit=None):
-    rows = []
+from collections import deque
+
+# Janela de contexto mantida em memoria. O resto do traco NAO e materializado:
+# com 3.000.000 de instrucoes por backend, carregar tudo faz o processo ser
+# morto pelo OOM killer (exit 137) -- foi o que aconteceu na primeira tentativa
+# de comparar tracos longos.
+CONTEXTO = 10
+DEPOIS = 8
+
+
+def parse(line):
+    p = line.split()
+    if len(p) < 18:
+        return None
+    # (n, pc, flags/cpsr, registradores, opcode)
+    return (int(p[0]), p[1], p[2], p[4:19], p[3])
+
+
+def iter_rows(path):
     with open(path) as f:
         for line in f:
-            p = line.split()
-            if len(p) < 18:
-                continue
-            rows.append((int(p[0]), p[1], p[2], p[4:19], p[3]))
-            if limit and len(rows) >= limit:
-                break
-    return rows
+            row = parse(line)
+            if row is not None:
+                yield row
 
 
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    a = load(sys.argv[1])
-    b = load(sys.argv[2])
-    print(f"interpretado: {len(a)} instrucoes")
-    print(f"recompilado : {len(b)} instrucoes")
+    ia = iter_rows(sys.argv[1])
+    ib = iter_rows(sys.argv[2])
 
-    n = min(len(a), len(b))
-    for i in range(n):
-        na, pca, fa, ra, opa = a[i]
-        nb, pcb, fb, rb, opb = b[i]
+    contexto = deque(maxlen=CONTEXTO)
+    n = 0
+    for ra_row, rb_row in zip(ia, ib):
+        n += 1
+        na, pca, fa, ra, opa = ra_row
+        nb, pcb, fb, rb, opb = rb_row
         if pca == pcb and fa == fb and ra == rb:
+            contexto.append(ra_row)
             continue
 
         print(f"\nPRIMEIRA DIVERGENCIA na instrucao #{na}")
-        print(f"  a instrucao ANTERIOR (#{a[i-1][0]}) foi pc=0x{a[i-1][1]} opcode=0x{a[i-1][4]}")
+        if contexto:
+            ant = contexto[-1]
+            print(f"  a instrucao ANTERIOR (#{ant[0]}) foi pc=0x{ant[1]} opcode=0x{ant[4]}")
         print(f"  esta instrucao: pc=0x{pca} opcode=0x{opa}")
         print(f"  pc     interpretado=0x{pca}  recompilado=0x{pcb}"
               f"{'' if pca == pcb else '   <== PC DIFERENTE'}")
@@ -56,18 +72,25 @@ def main():
             if ra[k] != rb[k]:
                 print(f"  r{k:<2}    0x{ra[k]}  !=  0x{rb[k]}")
 
-        print("\n  contexto (10 instrucoes antes, ambos identicos):")
-        for j in range(max(0, i - 10), i):
-            print(f"    #{a[j][0]:<8} pc=0x{a[j][1]} opcode=0x{a[j][4]}")
+        print(f"\n  contexto ({len(contexto)} instrucoes antes, ambos identicos):")
+        for row in contexto:
+            print(f"    #{row[0]:<8} pc=0x{row[1]} opcode=0x{row[4]}")
 
         print("\n  como cada motor segue depois:")
-        for j in range(i, min(i + 8, n)):
-            print(f"    #{a[j][0]:<8} interpretado=0x{a[j][1]}   recompilado=0x{b[j][1]}")
+        print(f"    #{na:<8} interpretado=0x{pca}   recompilado=0x{pcb}")
+        for _ in range(DEPOIS - 1):
+            pa = next(ia, None)
+            pb = next(ib, None)
+            if pa is None or pb is None:
+                break
+            print(f"    #{pa[0]:<8} interpretado=0x{pa[1]}   recompilado=0x{pb[1]}")
         return 1
 
     print(f"\nsem divergencia nas {n} instrucoes comparadas")
-    if len(a) != len(b):
-        print(f"(os tracos tem tamanhos diferentes: {len(a)} vs {len(b)})")
+    resto_a = sum(1 for _ in ia)
+    resto_b = sum(1 for _ in ib)
+    if resto_a or resto_b:
+        print(f"(os tracos tem tamanhos diferentes: sobraram {resto_a} vs {resto_b} linhas)")
     return 0
 
 
