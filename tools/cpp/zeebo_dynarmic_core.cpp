@@ -214,7 +214,46 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
     bool fallback_pending = false;
     std::uint32_t fallback_pc = 0;
 
+    // Interpreta a instrucao CPS (habilita/desabilita IRQ, FIQ, abort e troca
+    // de modo). O Dynarmic decodifica CPS mas delega ao interpretador, que este
+    // projeto nao acopla -- entao ela chegava aqui como fallback e parava o
+    // Core0 no boot do kernel (pc=0xf0003adc, opcode=0xf10800c0 = "cpsie if").
+    // Executar a semantica sobre o CPSR e avancar o PC deixa o boot seguir.
+    //
+    // Encoding A1: 1111 0001 0000 imod M 0 0000 000 A I F 0 mode
+    bool try_execute_cps(std::uint32_t pc) {
+        const auto fetched = MemoryReadCode(pc);
+        if (!fetched) return false;
+        const std::uint32_t insn = *fetched;
+        if ((insn & 0xFFF1FE20u) != 0xF1000000u) return false;
+
+        const std::uint32_t imod = (insn >> 18) & 0x3u;
+        const bool change_mode = ((insn >> 17) & 0x1u) != 0;
+        const std::uint32_t mode = insn & 0x1Fu;
+        const std::uint32_t affected =
+            (((insn >> 8) & 1u) ? 0x100u : 0u) |   // A (abort)
+            (((insn >> 7) & 1u) ? 0x80u : 0u) |    // I (IRQ)
+            (((insn >> 6) & 1u) ? 0x40u : 0u);     // F (FIQ)
+
+        std::uint32_t cpsr = jit->Cpsr();
+        if (imod == 0b10) {
+            cpsr &= ~affected;          // CPSIE: habilita = limpa a mascara
+        } else if (imod == 0b11) {
+            cpsr |= affected;           // CPSID: desabilita = seta a mascara
+        }
+        if (change_mode) {
+            cpsr = (cpsr & ~0x1Fu) | mode;
+        }
+        jit->SetCpsr(cpsr);
+        jit->Regs()[15] = pc + 4;
+        return true;
+    }
+
     void InterpreterFallback(std::uint32_t pc, std::size_t /*num_instructions*/) override {
+        // CPS e a unica instrucao de sistema que o boot precisa e que o
+        // Dynarmic nao traduz; tratada aqui, o fluxo continua normalmente.
+        if (try_execute_cps(pc)) return;
+
         // Sem interpretador acoplado, continuar daqui repetiria a mesma
         // instrucao indefinidamente. Registra e para o quantum.
         fallback_pending = true;
@@ -363,7 +402,9 @@ bool DynarmicCore::step_one_insn() {
             on_svc(impl_->last_swi_num);
         }
     }
-    return true;
+    // Retornava true incondicionalmente, entao quem chamava em laco nao tinha
+    // como perceber uma instrucao invalida e repetia o passo indefinidamente.
+    return !(impl_->exception_pending || impl_->fallback_pending);
 }
 
 uint64_t DynarmicCore::run(uint64_t max_insns) {

@@ -73,3 +73,4 @@ roms_host/
 tools/cpp/test_video_mmio
 tools/cpp/test_jit_code_hook
 tools/cpp/test_jit_fault_report
+tools/cpp/test_jit_lockstep

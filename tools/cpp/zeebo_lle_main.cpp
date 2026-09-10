@@ -1444,8 +1444,13 @@ public:
                 // silencioso: PC parado, contador de instrucoes subindo.
                 auto fault = core0_.jit->take_fault();
                 if (fault.raised || fault.interpreter_fallback) {
-                    printf("[Core0/JIT] parada em pc=0x%08x (%s, kind=%u) apos %llu insns\n",
-                           fault.pc,
+                    // Sem o opcode nao da para saber POR QUE o motor parou:
+                    // le a palavra no PC da falha pelo mesmo caminho de memoria
+                    // que o JIT usa.
+                    u32 opcode = 0;
+                    uc_mem_read(core0_.uc, fault.pc, &opcode, 4);
+                    printf("[Core0/JIT] parada em pc=0x%08x opcode=0x%08x (%s, kind=%u) apos %llu insns\n",
+                           fault.pc, opcode,
                            fault.raised ? "excecao" : "fallback de interpretador",
                            fault.kind, (unsigned long long)core0_.insns);
                     fflush(stdout);
