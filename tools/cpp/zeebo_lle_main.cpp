@@ -3628,6 +3628,36 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
 
+        // ── [TCB-PROBE] instrumentacao temporaria da cadeia do alocador ──────
+        // Cadeia provada por desassemblagem estatica:
+        //   allocate_tcb(f0007008) -> bitmap_alloc(f00067e4) -> refill(f00065f0)
+        //   -> pool_alloc(f0002b7c) com pool head 0xf001a508, pedido 0x1000.
+        // Objetivo: ver POR QUE f0002b7c devolve 0 (=> panic thread.cc:1273).
+        if (getenv("ZEEBO_TCB_PROBE")) {
+            u32 pc = (u32)ad;
+            auto rd = [&](u32 a)->u32 { u32 v=0; uc_mem_read(uc,a,&v,4); return v; };
+            auto reg = [&](int r)->u32 { u32 v=0; uc_reg_read(uc,r,&v); return v; };
+            if (pc == 0xf0007008) {
+                u32 obj = rd(0xf001a52c);
+                fprintf(stderr,"[TCB] allocate_tcb ENTRA  obj@f001a52c=0x%08x"
+                        " [obj+4]=0x%08x [obj+8]=0x%08x [obj+c]=0x%08x\n",
+                        obj, obj?rd(obj+4):0, obj?rd(obj+8):0, obj?rd(obj+0xc):0);
+            } else if (pc == 0xf00065f0) {
+                fprintf(stderr,"[TCB] refill ENTRA        pool_head@f001a508=0x%08x\n",
+                        rd(0xf001a508));
+            } else if (pc == 0xf0002b7c) {
+                fprintf(stderr,"[TCB] pool_alloc ENTRA    r0=0x%08x r1=0x%08x(tam) r2=0x%08x"
+                        "  [pool]=0x%08x\n", reg(UC_ARM_REG_R0), reg(UC_ARM_REG_R1),
+                        reg(UC_ARM_REG_R2), rd(0xf001a508));
+            } else if (pc == 0xf000660c) {
+                fprintf(stderr,"[TCB] pool_alloc RETORNA  r0=0x%08x  %s\n",
+                        reg(UC_ARM_REG_R0),
+                        reg(UC_ARM_REG_R0)==0 ? "<== NULL! causa do panic" : "ok");
+            } else if (pc == 0xf0016bec) {
+                fprintf(stderr,"[TCB] >>> ponto do panic thread.cc:1273 alcancado\n");
+            }
+        }
+
         // ── Split I/D do heap REX: antes do fetch, restaura o código pristino ────
         // dos endereços que foram tocados como DADO (heap free-list), desacoplando
         // a visão de instrução da de dados no mesmo VA — exatamente o que a MMU do

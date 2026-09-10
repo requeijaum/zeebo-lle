@@ -178,3 +178,49 @@ instruções e só então esbarra no TCB.
 
 Próximo passo: instrumentar `0xf00067e4` (entrada/saída) e o objeto
 `0xf001a52c` no momento da chamada, para ver por que devolve NULL.
+
+## QW50 RESOLVIDO — causa medida: `obj@f001a52c == 0` (2026-09-10)
+
+Cadeia provada por desassemblagem estatica (100%, sem executar):
+
+```
+create_root_server 0xf0016b8c  bl allocate_tcb
+allocate_tcb       0xf0007008  ldr r6,[pc] -> obj 0xf001a52c (BSS)
+                   0xf0007014  bl 0xf00067e4
+bitmap_alloc       0xf00067e4  [obj+0xc]=limite [obj+8]=usados
+                   0xf000680c  if ([obj+4]==0) -> refill
+refill             0xf00065f0  r1=0x1000, r0 <- pool head 0xf001a508
+                   0xf0006608  bl 0xf0002b7c        <== alocador ja rastreado
+                   0xf0006610  popeq -> NULL
+=> panic thread.cc:1273
+```
+
+### Medicao (`ZEEBO_TCB_PROBE=1 ZEEBO_PROBE=rodata`)
+
+```
+[TCB] allocate_tcb ENTRA  obj@f001a52c=0x00000000 [obj+4]=0 [obj+8]=0 [obj+c]=0
+[OKL4] Assertion !"Failed to create root server TCB" ... line 1273 (fn=f0016f18)
+```
+
+**`allocate_tcb` e chamada UMA unica vez e o ponteiro do objeto alocador de TCB
+esta ZERADO.** Nao e o pool que esta vazio — o pool FUNCIONA: no mesmo boot
+`pool_alloc` atende varios pedidos com sucesso (`r0=0xf0001000`, `0xf0004000`,
+`0xf000b000`, `0xf000c000`), inclusive DEPOIS de `creating root server`.
+
+### O que isto REFUTA
+
+1. **Hipotese do elfweaver** (`num_tcbs`/`free_tcb_idx`/`tcb_array` de `data.cc`):
+   este build nao usa a free-list do corpus. Corpus e dicionario, nao prova.
+2. **"Alocador e TCB sao o mesmo bug"** — minha propria hipotese unificada da
+   janela anterior. **ERRADA**: o alocador esta saudavel; o defeito e o objeto
+   `f001a52c` nunca ter sido construido. Sao dois bugs distintos, e o probe da
+   `.rodata` so destrava o primeiro.
+3. **Dependencia de timer** — `allocate_tcb` nao le relogio algum.
+
+### Estado / proximo passo
+
+`f001a52c` esta em BSS (alem do `filesz` do seg1 = `0xf001a324`). Falta achar
+QUEM deveria inicializa-lo (provavel `init_tcb_allocator` equivalente, chamado
+de `init_kernel_threads`/`generic_init`) e por que essa inicializacao nao roda
+ou nao persiste. `--watch-writes` nao serve: e cego no Core1 (registra a faixa
+e nao reporta nada) — usar hook proprio.
