@@ -1469,6 +1469,54 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW64-QW66 — Core0 executa codigo Thumb em modo ARM  **[CAUSA PARCIAL MEDIDA — fix tentado FALHOU]**
+
+**O endereco no ROADMAP estava errado.** O Core0 nao esta' no laco
+`0xb0400064/68/6c`. O perfil por janela mostra a regiao real:
+
+| Janela (1M insns) | PCs distintos | Faixa |
+|---|---|---|
+| 1 | 7422 | `10000000..f001704c` |
+| 2 | **9** | `b000afdc..b000affc` |
+| 3 | **9** | `b000afdc..b000affc` |
+| 4 | 527 | `b0003974..b000d718` |
+
+**Descoberta central — o codigo e' Thumb, executado como ARM:**
+
+    ARM   (desassemble): stmdals / andlt / adcsmi / <?>        -> lixo
+    THUMB (desassemble): bl / cmp / bne / pop {r4-r7,pc} / ldr -> coerente
+
+Medicao direta do `CPSR.T` em `0xb0000000+`:
+
+    THUMB (T=1) =       0
+    ARM   (T=0) = 4194304      <- 100%
+
+Confirmacao independente: o hook nunca ve `0xb000afda` (2-alinhado) mas ve
+`b000afdc`/`b000aff4` — **passo de 4 bytes**, assinatura de modo ARM.
+
+**Hipotese testada e REFUTADA:** `apply_tbit` (linha ~3069) classifica o modo por
+**faixa de PC**, e `[b0000000,b0020000)` e' declarada "stub ARM" embora contenha
+codigo Thumb do Iguana. Item que a auditoria ja' listava como suspeito. Troquei a
+fonte de verdade para o `CPSR.T` do guest e comparei **no mesmo binario**:
+
+    com fix    : T=1=0  T=0=4194304
+    controle   : T=1=0  T=0=4194304      (identico — fix sem efeito)
+
+> **O controle negativo salvou a conclusao.** Se eu tivesse commitado o fix sem
+> comparar, teria reportado "causa raiz corrigida" com base num patch inerte.
+
+**Reinterpretacao:** T=1 nunca aparece em 4M de amostras — nem antes nem depois de
+syscalls. Logo o problema **nao** e' a retomada limpar o bit T; e' que o Core0
+**nunca entrou em Thumb desde o inicio**. A causa esta' no **ponto de entrada**
+do Core0 (como o PC inicial e' definido), nao em `apply_tbit`.
+
+Fix revertido (inerte). `apply_tbit` continua suspeito por classificar por faixa,
+mas **nao** e' o que prende o Core0.
+
+**Proximo passo:** auditar como o PC inicial do Core0 e' setado e se algum `BX`
+deveria ter feito a transicao ARM->Thumb.
+
+
 ### QW60-QW63 — Estado real do Core1 apos o boot do kernel  **[MEDIDO — sem bug fatal encontrado]**
 
 Investigacao para responder "ate' onde o Core1 chega?". Resultado: **ele nao esta'
