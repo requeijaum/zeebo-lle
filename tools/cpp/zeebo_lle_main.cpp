@@ -2562,6 +2562,18 @@ private:
             // Direct mapping: os segmentos sao gravados no VA (0xf0000000...).
             uc_mem_write(core1_.uc, va, d.data() + off, fs);
 
+            // ETAPA QUE FALTAVA: o super-ELF do AMSS traz VA e PA DISTINTOS por
+            // segmento (ex.: seg3 va=b0000000 pa=00af0000). Gravavamos so no VA,
+            // entao toda leitura feita pelo PA via o endereco VAZIO. Medido:
+            //   [VA b0000000]=e35d0000  [PA 00af0000]=00000000
+            // O page-table walk do OKL4 opera sobre PA (r7=00af0000 no laco), por
+            // isso via zeros. Grava tambem no PA quando ele difere do VA.
+            if (pa && pa != va) {
+                if (uc_mem_write(core1_.uc, pa, d.data() + off, fs) != UC_ERR_OK)
+                    fprintf(stderr, "[SEG] PA 0x%08x (+%u) nao mapeado - segmento nao espelhado\n",
+                            pa, fs);
+            }
+
             // Espelho na janela de RELOCACAO do REX (0xdf600000 = va + 0xef600000).
             // A transicao 0xf001774c (mov pc,r0) relocaliza PC/SP por +0xef600000; sem o
             // codigo espelhado nessa janela, o salto cai em fetch/exec unmapped no Unicorn
@@ -2582,6 +2594,7 @@ private:
                 entry_va = va + (e_entry - pa);
             }
         }
+
 
         core1_.entry = entry_va;
         printf("[System][Core1] Reset vector real (VA) = 0x%08x  (e_entry PA 0x%08x traduzido)\n",
