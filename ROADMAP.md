@@ -464,6 +464,59 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     `DDI0211K_arm1136_r1p5_trm.pdf` (934 pp., ARM1136 = Core0) e
     `DDI0198E_arm926ejs_r0p5_trm.pdf` (264 pp., ARM926EJ-S = Core1).
 
+- [ ] **Incoerência de identidade de CPU entre os dois backends (ACHADO — pendente de decisão)**:
+  - Levantado ao investigar o que o QEMU teria a ensinar (o Unicorn é um **fork do QEMU**, então
+    o modelo de CPU dele *é* o modelo do QEMU; ver seção de licença abaixo).
+  - Medido: `MIDR` que cada modelo do QEMU/Unicorn reporta (`mrc p15,0,Rd,c0,c0,0`):
+
+        arm1136     MIDR=0x4117b363
+        arm1136-r2  MIDR=0x4107b362   <-- identico ao que declaramos
+        arm1176     MIDR=0x410fb767   <-- o que realmente configuramos
+        arm926      MIDR=0x41069265
+
+  - **A incoerência**: `zeebo_dynarmic_core.h:37` declara `midr = 0x4107B362` (família ARM1136),
+    mas todo o código configura o Unicorn como `UC_CPU_ARM_1176`, que reporta `0x410fb767`.
+    Os dois backends respondem **identidades de CPU diferentes** para o mesmo firmware.
+  - Ocorrências de `UC_CPU_ARM_1176` para o Core0: `zeebo_lle_main.cpp:1185`, `zeebo_boot.cpp:337`,
+    `zeebo_dual_core.cpp:203`, além de harnesses e de `test_jit_lockstep`/`test_jit_unaligned_ldr`.
+    (Core1 usa `UC_CPU_ARM_926`, coerente com o ARM926EJ-S.)
+  - **Não corrigir no escuro**: o valor `0x4107B362` está marcado como *"CONFIRMAR"* no plano
+    `.hermes/plans/2026-09-09_etapa3-dynarmic-integration.md:326` — nunca foi confirmado contra
+    hardware real. Busca por ambas as constantes na `nand/1.1.2_AMSS.bin` deu **0 ocorrências**,
+    então o firmware não compara MIDR com literal embutido (pelo menos não em palavra crua).
+  - Impacto plausível, **não medido**: identidade de CPU divergente muda caminho de código no boot
+    (ARM1136 e ARM1176 diferem em VMSA/TLB/CP15). Pode ou não ter relação com a divergência
+    #23726 — **não afirmar** relação sem medir.
+  - Próximo passo: decidir qual é a CPU real do Zeebo (o TRM em `docs/remote/` é do **ARM1136
+    r1p5**, o que favorece a família 1136), alinhar os DOIS backends ao mesmo modelo e observar
+    se a divergência do boot se move. Trocar o modelo do Unicorn muda o comportamento do
+    oráculo — refazer os traços depois.
+
+- [ ] **QEMU como fonte de aprendizado: o que dá e o que NÃO dá para usar (licença)**:
+  - **Restrição legal (decidir antes de copiar qualquer linha)**: QEMU é **GPLv2**. Copiar código
+    dele para este projeto tornaria o resultado uma obra derivada sob GPLv2. O `Dynarmic` que
+    usamos é **licença permissiva** (estilo ISC/0BSD: "permission to use, copy, modify, and/or
+    distribute ... with or without fee"). Este repositório **não tem arquivo LICENSE** — ou seja,
+    a licença do próprio projeto está indefinida. **Não copiar fonte do QEMU** enquanto isso não
+    for decidido explicitamente pelo dono do projeto.
+  - **Já dependemos do QEMU indiretamente**: o Unicorn é um **fork do QEMU** e o pacote instalado
+    (`libunicorn 2.1.1`) declara `GPL-2` / `LGPL-2+` no copyright. Ligamos com `-lunicorn` em
+    praticamente todos os binários. Isso é **linkagem**, não cópia de fonte — situação diferente,
+    mas que reforça a necessidade de definir a licença do projeto.
+  - **O que o QEMU NÃO oferece**: nenhuma máquina que sirva de referência para o SoC do Zeebo.
+    `qemu-system-arm -machine help` lista 107 máquinas; as únicas Qualcomm são BMCs Cortex-A7
+    (`qcom-dc-scm-v1-bmc`, `qcom-firework-bmc`), sem relação com o MSM do Zeebo. Não há modelo de
+    MSM7xxx para copiar — a parte específica do console (QDSP5, GPU, EFS2, BREW) continua sendo
+    trabalho original nosso.
+  - **O que o QEMU JÁ nos dá, sem copiar nada**: os modelos de CPU. Como o Unicorn é fork do
+    QEMU, `uc_ctl_set_cpu_model()` seleciona exatamente as definições de CPU do QEMU — incluindo
+    `arm1136`, `arm1136-r2`, `arm1176` e `arm926`. Foi assim que a incoerência de MIDR acima foi
+    medida. **Aprender comportamento observando o binário é legítimo e não cria obra derivada**;
+    copiar o fonte é que cria.
+  - Uso recomendado: tratar QEMU/Unicorn como **oráculo executável** (comparar comportamento) e o
+    TRM em `docs/remote/` como **referência normativa**, escrevendo a implementação por conta
+    própria — exatamente o método já usado em `CPS` e `CP15`.
+
 - [x] **Resultado NEGATIVO — LDR desalinhado NÃO é a causa da divergência #23726**
       (`test_jit_unaligned_ldr.cpp`; registrado para ninguém reinvestigar):
   - Hipótese: a instrução que diverge é `ldreq r3,[r5]` com **r5 = 0x00000002**, uma carga de
@@ -472,8 +525,14 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     Seria uma explicação limpa: interpretado rotacionando, recompilado lendo literal.
   - **Refutada por medição.** Controle que separa os dois modelos: memória `11223344 55667788`,
     `ldr` de `+2`. O modelo rotacionado daria `0x33441122`; o Unicorn como ARM1176 devolve
-    **`0x77881122`** = leitura **literal**. Logo o acesso desalinhado está habilitado (U=1) e ler
-    byte-a-byte do endereço cru — como a VTLB faz — está **correto**. Nada a consertar aqui.
+    **`0x77881122`** = leitura **literal**. Ler byte-a-byte do endereço cru — como a VTLB faz —
+    reproduz o oráculo. Nada a consertar aqui.
+  - **Ressalva sobre o oráculo (medida depois)**: o Unicorn devolve `SCTLR = 0` no reset (bit
+    U = 0) e **mesmo assim** faz leitura literal. Ou seja, ele **não modela** o comportamento
+    rotacionado descrito no TRM — não é que o firmware tenha habilitado U=1, é que o oráculo
+    ignora esse bit. Consequência honesta: os dois backends **concordam entre si**, que é o que o
+    teste trava, mas nenhum dos dois foi provado fiel ao silício aqui. Se o boot algum dia
+    depender de rotação, este é um ponto onde emulador e hardware real podem divergir.
   - Cuidado metodológico: com memória zerada além da palavra, "rotação" e "leitura literal" dão
     **o mesmo resultado**. O primeiro teste que escrevi não distinguia os dois e teria
     "confirmado" a hipótese errada; foi preciso um caso com **duas palavras não nulas adjacentes**.

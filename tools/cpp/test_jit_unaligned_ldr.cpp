@@ -9,8 +9,14 @@
 // por medicao**: o Unicorn configurado como ARM1176 devolve leitura LITERAL,
 // nao rotacionada. Controle que separa os dois modelos (memoria
 // 11223344 55667788, ldr de +2): rotacao daria 0x33441122; o Unicorn devolve
-// 0x77881122 = literal. Portanto o suporte a acesso desalinhado esta ativo
-// (U=1) e ler byte-a-byte do endereco cru, como a VTLB faz, esta CORRETO.
+// `0x77881122` = literal. Ler byte-a-byte do endereco cru, como a VTLB faz,
+// reproduz o oraculo.
+//
+// RESSALVA: o Unicorn devolve SCTLR=0 no reset (bit U=0) e AINDA ASSIM le
+// literal — ele nao modela a rotacao descrita no TRM. Nao e que o firmware
+// habilite U=1; e que o oraculo ignora esse bit. Os dois motores concordam
+// entre si (o que este teste trava), mas nenhum foi provado fiel ao silicio
+// neste ponto.
 //
 // O teste fica como REGRESSAO: trava a concordancia dos dois motores em carga
 // desalinhada, para que uma futura "correcao" nao introduza rotacao indevida.
