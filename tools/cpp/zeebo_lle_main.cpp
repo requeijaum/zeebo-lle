@@ -1612,6 +1612,14 @@ public:
                 e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
                 uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
                 if (e1 != UC_ERR_OK) {
+                    // O Core1 morria em SILENCIO: so o Core0 tinha [E0-ERROR], entao
+                    // uma falha aqui virava "pc parado" sem nenhuma pista no log.
+                    u32 lr1 = 0, sp1 = 0, cpsr1 = 0;
+                    uc_reg_read(core1_.uc, UC_ARM_REG_LR, &lr1);
+                    uc_reg_read(core1_.uc, UC_ARM_REG_SP, &sp1);
+                    uc_reg_read(core1_.uc, UC_ARM_REG_CPSR, &cpsr1);
+                    printf("[E1-ERROR] cycle=%d err=%d (%s) pc=0x%08x lr=0x%08x sp=0x%08x cpsr=0x%08x modo=%u\n",
+                           c, (int)e1, uc_strerror(e1), core1_.entry, lr1, sp1, cpsr1, cpsr1 & 0x1f);
                     core1_.halted = true;
                 }
             }
