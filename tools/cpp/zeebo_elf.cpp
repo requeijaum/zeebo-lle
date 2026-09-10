@@ -19,6 +19,9 @@
 #include <capstone/capstone.h>
 #include "zeebo_devices.h"
 
+// Teto para alocacao guiada por p_memsz do arquivo (RAM do aparelho e bem menor).
+static constexpr size_t kMaxSegBytes = 64u * 1024u * 1024u;
+
 using u16=uint16_t;
 
 // ---- ARM11 VA->PA map (real, from console__zeebo__mmu.txt, ARM11 section) ----
@@ -68,7 +71,9 @@ int main(int argc,char**argv){
 
     int loads=0;
     for(int i=0;i<phnum;i++){
-        size_t o=phoff+i*phent;
+        size_t o=phoff+(size_t)i*phent;
+        // Header do proprio arquivo: nao confiar em phoff/phent/phnum.
+        if(o+4>d.size()){ printf("  [skip] phdr %d fora do arquivo (off=%zu size=%zu)\n", i, o, d.size()); continue; }
         u32 ptype=rd32(d.data(),o);
         if(ptype!=1) continue;
         u32 p_filesz=o+16<d.size()? rd32(d.data(),o+16):0;
@@ -79,9 +84,17 @@ int main(int argc,char**argv){
         size_t nmem=p_memsz? p_memsz : p_filesz;
         if(!nmem) continue;
         // copy file bytes then zero bss tail
+        // p_memsz vem do arquivo; recusa alocacao absurda em vez de tentar.
+        if(nmem>kMaxSegBytes){ printf("  [skip] phdr %d memsz=%zu acima do teto\n", i, nmem); continue; }
         std::vector<u8> seg(nmem,0);
-        if(p_filesz){ size_t cl=std::min((size_t)p_filesz,seg.size());
-            memcpy(seg.data(), d.data()+val, cl); }
+        if(p_filesz){
+            // p_offset/p_filesz sao do arquivo: validar contra o buffer real.
+            if((size_t)val>d.size()){ printf("  [skip] phdr %d p_offset=0x%x fora do arquivo\n", i, val); continue; }
+            size_t avail=d.size()-(size_t)val;
+            size_t cl=std::min({(size_t)p_filesz, seg.size(), avail});
+            if(cl<(size_t)p_filesz) printf("  [warn] phdr %d truncado: %zu de %u bytes\n", i, cl, p_filesz);
+            memcpy(seg.data(), d.data()+val, cl);
+        }
         uc_mem_write(uc,lmap,seg.data(),seg.size());
         printf("  LOAD vaddr=0x%08x ->pa 0x%08x (%s) filesz=%u memsz=%u\n",
                p_vaddr,lmap, physical?"phys":"vaddr", p_filesz,nmem);

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 
 // Multi-stream audio mixer & PCM sink inspired by HLE patterns (Infuse / Zeebulator / Zeemu)
 // Adapts HLE PCM/MIDI voice concepts to LLE QDSP5 / Audio DMA streams
@@ -27,9 +28,26 @@ public:
     UnifiedAudioSink(uint32_t output_sample_rate = 44100)
         : out_rate_(output_sample_rate ? output_sample_rate : 44100) {}
 
+    // O produtor (hook do Core1) e a thread de audio do SDL tocam o mesmo sink.
+    // O mutex nao e copiavel/movivel, mas audpp_engine faz `sink_ = UnifiedAudioSink(rate)`
+    // como reset; por isso a atribuicao troca so o estado, sob a trava do destino.
+    UnifiedAudioSink(const UnifiedAudioSink& o) {
+        std::lock_guard<std::mutex> lo(o.m_);
+        voices_ = o.voices_; out_rate_ = o.out_rate_;
+    }
+    UnifiedAudioSink& operator=(const UnifiedAudioSink& o) {
+        if (this == &o) return *this;
+        std::vector<VoiceSlot> tmp; uint32_t rate;
+        { std::lock_guard<std::mutex> lo(o.m_); tmp = o.voices_; rate = o.out_rate_; }
+        std::lock_guard<std::mutex> lk(m_);
+        voices_ = std::move(tmp); out_rate_ = rate;
+        return *this;
+    }
+
     // Channel allocation and PCM streaming
     uint32_t allocate_voice(uint32_t sample_rate = 44100, uint32_t channels = 2, float volume = 1.0f) {
         if (sample_rate == 0 || (channels != 1 && channels != 2) || !std::isfinite(volume)) return 0;
+        std::lock_guard<std::mutex> lk(m_);
         for (size_t i = 0; i < voices_.size(); i++) {
             if (!voices_[i].active) {
                 voices_[i].id = (uint32_t)(i + 1);
@@ -53,12 +71,14 @@ public:
     }
 
     void submit_pcm(uint32_t voice_id, const int16_t* samples, size_t count) {
+        std::lock_guard<std::mutex> lk(m_);
         VoiceSlot* v = find_voice(voice_id);
         if (!v || !v->active || count == 0 || !samples) return;
         v->pcm_data.insert(v->pcm_data.end(), samples, samples + count);
     }
 
     void release_voice(uint32_t voice_id) {
+        std::lock_guard<std::mutex> lk(m_);
         VoiceSlot* v = find_voice(voice_id);
         if (v) {
             v->active = false;
@@ -70,6 +90,7 @@ public:
     // Mix active voices into interleaved stereo 16-bit PCM buffer
     void mix_samples(int16_t* out_buffer, size_t num_frames) {
         if (!out_buffer || num_frames == 0) return;
+        std::lock_guard<std::mutex> lk(m_);
 
         std::vector<float> mix_l(num_frames, 0.0f);
         std::vector<float> mix_r(num_frames, 0.0f);
@@ -121,6 +142,8 @@ private:
     using VoiceSlot = StreamVoice;
     std::vector<VoiceSlot> voices_;
     uint32_t out_rate_{44100};
+    // Protege voices_/out_rate_ entre o produtor e a thread de audio.
+    mutable std::mutex m_;
 
     VoiceSlot* find_voice(uint32_t id) {
         for (auto& v : voices_) {
