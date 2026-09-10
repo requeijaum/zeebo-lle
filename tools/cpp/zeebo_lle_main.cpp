@@ -3058,9 +3058,14 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
                 u32 opc = 0;
                 uc_mem_read(uc, (u32)ad, &opc, 4);
+                // CPSR COMPLETO, nao so os bits de flag: o modo (bits [4:0]) e
+                // indispensavel para instrucoes com banco de registradores
+                // (LDM_usr/STM_usr) e para diagnosticar retorno de excecao.
+                // Os bits NZCV seguem nos 4 bits altos, entao a comparacao de
+                // tracos antiga continua valida.
                 fprintf(sys->trace_file_, "%llu %08x %08x %08x",
                         (unsigned long long)sys->core0_.insns, (u32)ad,
-                        cpsr & 0xF0000000u, opc);
+                        cpsr, opc);
                 for (int i = 0; i < 15; i++) fprintf(sys->trace_file_, " %08x", r[i]);
                 fputc('\n', sys->trace_file_);
             } else if (sys->trace_limit_ != 0) {

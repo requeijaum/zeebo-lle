@@ -308,6 +308,9 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
             cpsr |= affected;           // CPSID: desabilita = seta a mascara
         }
         if (change_mode) {
+            // Troca o banco r13/r14 junto com o modo: o Dynarmic mantem um unico
+            // arquivo de registradores, entao a troca e responsabilidade nossa.
+            switch_mode(mode);
             cpsr = (cpsr & ~0x1Fu) | mode;
         }
         jit->SetCpsr(cpsr);
@@ -315,10 +318,136 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
         return true;
     }
 
+    // ---- Bancos de registradores por modo (r13/r14) ----
+    //
+    // O Dynarmic NAO modela bancos por modo nem SPSR: a interface expoe apenas
+    // Regs()[16] e o jitstate documenta o array como "Current register file"
+    // (backend/x64/a32_jitstate.h:26). Nao alteramos codigo de terceiro, entao
+    // o banco vive aqui. So r13/r14 sao modelados: sao os unicos banked que o
+    // boot usa (o banco FIQ de r8-r12 nunca e exercitado no traco).
+    struct ModeBank {
+        std::uint32_t r13 = 0;
+        std::uint32_t r14 = 0;
+    };
+    ModeBank bank_usr_;   // compartilhado por User(0x10) e System(0x1f)
+    std::uint32_t cur_mode_ = 0x13;  // SVC no reset
+
+    static bool uses_user_bank(std::uint32_t mode) {
+        return mode == 0x10u || mode == 0x1fu;
+    }
+
+    // LDM/STM com bit S e SEM o PC na lista acessa os registradores banked de
+    // USUARIO, independentemente do modo corrente (TRM DDI0211K, "The S bit").
+    // Encoding: cond 100 P U S W L Rn lista, com S=1 e lista[15]=0.
+    //
+    // Confirmado contra o oraculo (Unicorn) em test_jit_ldm_usr_rfe: executando
+    // em SVC, um `ldmia r0,{r13,r14}^` NAO altera o r13/r14 de SVC e escreve no
+    // banco de usuario.
+    bool try_execute_ldm_usr(std::uint32_t pc) {
+        if (jit->Cpsr() & (1u << 5)) return false;  // so modo ARM
+        const std::uint32_t insn = MemoryRead32(pc);
+
+        if ((insn & 0x0e000000u) != 0x08000000u) return false;  // grupo LDM/STM
+        const bool S = ((insn >> 22) & 1u) != 0;
+        if (!S) return false;                                    // sem bit S: Dynarmic traduz
+        const std::uint32_t list = insn & 0xffffu;
+        if (list & 0x8000u) return false;                        // PC na lista => LDM_eret, outro caso
+        const bool L = ((insn >> 20) & 1u) != 0;
+        const bool W = ((insn >> 21) & 1u) != 0;
+        if (W) return false;  // writeback com bit S e UNPREDICTABLE (TRM); nao ocorre no boot
+
+        const std::uint32_t mode = jit->Cpsr() & 0x1fu;
+        // Em User/System o banco corrente JA e o de usuario: nada a especializar,
+        // e o Dynarmic nao traduz mesmo assim, entao tratamos igual.
+        const bool P = ((insn >> 24) & 1u) != 0;
+        const bool U = ((insn >> 23) & 1u) != 0;
+        const std::uint32_t Rn = (insn >> 16) & 0xfu;
+
+        const unsigned n = __builtin_popcount(list);
+        std::uint32_t base = jit->Regs()[Rn];
+        // Endereco inicial conforme P/U (IA/IB/DA/DB).
+        std::uint32_t addr = U ? (P ? base + 4 : base)
+                               : (P ? base - 4u * n : base - 4u * n + 4);
+
+        auto& regs = jit->Regs();
+        for (unsigned i = 0; i < 15; ++i) {
+            if (!((list >> i) & 1u)) continue;
+            if (L) {
+                const std::uint32_t v = MemoryRead32(addr);
+                if ((i == 13 || i == 14) && !uses_user_bank(mode)) {
+                    // Escreve no banco de USUARIO, preservando o do modo corrente.
+                    (i == 13 ? bank_usr_.r13 : bank_usr_.r14) = v;
+                } else {
+                    regs[i] = v;
+                }
+            } else {
+                std::uint32_t v;
+                if ((i == 13 || i == 14) && !uses_user_bank(mode)) {
+                    v = (i == 13 ? bank_usr_.r13 : bank_usr_.r14);
+                } else {
+                    v = regs[i];
+                }
+                MemoryWrite32(addr, v);
+            }
+            addr += 4;
+        }
+
+        jit->Regs()[15] = pc + 4;
+        return true;
+    }
+
+    // RFE (Return From Exception): PC <- [Rn], CPSR <- [Rn+4], com writeback
+    // opcional. E INCONDICIONAL (cond=0b1111), entao nao ha condicao a avaliar.
+    // Encoding A1: 1111 100 P U 0 W 1 Rn 0000 1010 0000 0000
+    bool try_execute_rfe(std::uint32_t pc) {
+        if (jit->Cpsr() & (1u << 5)) return false;
+        const std::uint32_t insn = MemoryRead32(pc);
+        if ((insn & 0xfe50ffffu) != 0xf8100a00u) return false;
+
+        const bool P = ((insn >> 24) & 1u) != 0;
+        const bool U = ((insn >> 23) & 1u) != 0;
+        const bool W = ((insn >> 21) & 1u) != 0;
+        const std::uint32_t Rn = (insn >> 16) & 0xfu;
+
+        std::uint32_t base = jit->Regs()[Rn];
+        std::uint32_t addr = U ? (P ? base + 4 : base)
+                               : (P ? base - 8 : base - 4);
+
+        const std::uint32_t new_pc   = MemoryRead32(addr);
+        const std::uint32_t new_cpsr = MemoryRead32(addr + 4);
+
+        if (W) {
+            jit->Regs()[Rn] = U ? base + 8 : base - 8;
+        }
+        switch_mode(new_cpsr & 0x1fu);
+        jit->SetCpsr(new_cpsr);
+        jit->Regs()[15] = new_pc;
+        return true;
+    }
+
+    // Troca o banco r13/r14 ao mudar de modo. Sem isso, um retorno de excecao
+    // para User entregaria o SP do modo de excecao ao codigo de usuario.
+    void switch_mode(std::uint32_t new_mode) {
+        if (new_mode == cur_mode_) return;
+        auto& regs = jit->Regs();
+        if (uses_user_bank(cur_mode_)) {
+            bank_usr_.r13 = regs[13];
+            bank_usr_.r14 = regs[14];
+        }
+        if (uses_user_bank(new_mode)) {
+            regs[13] = bank_usr_.r13;
+            regs[14] = bank_usr_.r14;
+        }
+        cur_mode_ = new_mode;
+    }
+
     void InterpreterFallback(std::uint32_t pc, std::size_t /*num_instructions*/) override {
-        // CPS e a unica instrucao de sistema que o boot precisa e que o
-        // Dynarmic nao traduz; tratada aqui, o fluxo continua normalmente.
+        // Instrucoes de sistema que o boot exercita e o Dynarmic nao traduz.
+        // Medido no traco (400k instrucoes): CPS 18x, LDM_usr 1x, RFE 1x;
+        // SRS/STM_usr/LDM_eret NAO ocorrem, entao nao sao implementadas aqui.
         if (try_execute_cps(pc)) return;
+        if (try_execute_ldm_usr(pc)) return;
+        if (try_execute_rfe(pc)) return;
 
         // Sem interpretador acoplado, continuar daqui repetiria a mesma
         // instrucao indefinidamente. Registra e para o quantum.
