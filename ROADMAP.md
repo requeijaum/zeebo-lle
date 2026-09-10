@@ -1209,6 +1209,26 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 
 **QW43 — workaround experimental testado e REJEITADO (revertido)**: implementei uma heurística no `c0_code_hook` — ao detectar `r4==0xffffffff` em `0xb0400062` (checagem pós-decremento do loop RLE), forçar `r4=0` e desviar para `0xb0400070` (mesmo destino usado pelo codec para "0 literais legítimo"), sem alterar mais nada. Resultado real (`/tmp/boot_qw43fix1.log`): o loop infinito de fato foi evitado — o boot AVANÇOU e chegou a produzir `[APPSBL] Performing handoff jump: bx r2 -> 0x10000000` (sinal de progresso real na cadeia de boot). PORÉM a execução trava logo depois num NOVO travamento em `pc=0x0045005c` (região de buffer de DMA de página, `DMA_PAGE_BUF=0x00450000`, não código válido) com `UC_ERR_INSN_INVALID` — ou seja, o decodificador RLE produziu uma saída incompleta/errada (porque interrompemos a descompressão no meio, sem realmente saber quantos bytes ainda faltavam), e código posterior tenta pular para um endereço de dados corrompido como consequência. CONCLUSÃO: o workaround não é seguro — ele evita o sintoma (loop infinito) mas não resolve a causa (dados de saída da descompressão ficam incorretos), gerando um bug diferente e potencialmente mais difícil de depurar mais adiante. Revertido integralmente; HEAD limpo. Isso reforça que o byte de escape zero provavelmente indica STREAM DE ENTRADA REALMENTE INCOMPLETO/CORROMPIDO na imagem NAND (`1.1.2_AMSS.bin`/`1.1.2_APPS.bin`) usada — não um caso de EOF legítimo do formato. Recomendação: (1) verificar integridade/hash das imagens NAND contra uma fonte alternativa antes de investir mais tempo em RE de baixo nível deste codec; (2) se as imagens forem a única cópia disponível e estiverem corretas, o próximo passo é reconstruir com precisão o algoritmo de descompressão completo (não só o ponto de falha) para simular corretamente o efeito de um "corte" de stream, o que exige engenharia reversa completa do codec (esforço significativo, ainda sem retorno garantido). |
 
+**QW44 — Core1 destravado até o kernel OKL4 falar (`395685f`, `0c3ca70`)**: duas causas encadeadas, ambas *falhas silenciosas*.
+
+1. **`uc_ctl_set_cpu_model` ignorado em silêncio** (`395685f`). A chamada vinha DEPOIS de `uc_ctl_tlb_mode()`; nessa ordem o Unicorn devolve `UC_ERR_ARG` e descarta o modelo — e o retorno não era checado. **O Core1 nunca foi ARM926**: rodava no CPU default, que rejeita `mrc p15,0,apsr_nzcv,c7,c14,3` (*test-and-clean dcache*, exclusiva do ARM9) com `UC_ERR_INSN_INVALID`, travando em `0xf001833c`. Medido isoladamente: ARM926 executa; ARM946 e ARM1176 rejeitam. Fix: `set_cpu_model` ANTES de `tlb_mode`, com os dois `uc_err` checados e abortando o boot. Regressão coberta por `test_uc_cpu_model_order` (controle negativo embutido: reprova a ordem antiga). Core1: 37.262 insns travadas → 810.000+ contínuas.
+
+2. **Console do kernel OKL4 espelhado** (`0c3ca70`). O `putchar` do kernel (`0xf000e6e0`) grava byte a byte num ring buffer em `0xf001da68`, índice em `0xf001da64`, wrap `0x800`. Espelhar essas escritas transformou falha silenciosa em diagnóstico do próprio kernel:
+
+```
+kmem_init (f0000000, f0200000) [2M]
+OKL4 - (provider: Open Kernel Labs) built on Apr 10 2008 15:12:43 using gcc 3.4.4
+Initialized tracebuffer @ 00004000
+Initializing kernel space @ 00000000...
+Initializing KIP...
+Assertion r != 0 failed in file pistachio/arch/arm/src/init.cc, line 130
+--- KD# assert ---
+```
+
+**Dado negativo importante**: o dead-loop `0xf000e710` NÃO era espera de MMIO nem inicialização de dispositivo faltando — é o handler `ent0` da tabela de dispatch em `0xf0019e78` (índice `[0xf001da60]=0`), usado como stub de panic após a asserção. O `r0=1` do teste em `0xf000e704` vem de `mov r0,#1` **literal** em `0xf00143bc`, não de leitura de dispositivo. Vigia de escrita próprio foi necessário: `--watch-writes` não cobre o Core1 (vigiar TODA a memória deu 0 escritas = instrumento inválido).
+
+**Próxima barreira (aberta)**: a asserção `r != 0` em `init.cc:130`. No corpus OKL4 2.1.1-fix7 (referência, não cópia) as asserções desse arquivo com essa forma são `ASSERT(ALWAYS, r)` sobre o retorno de `kspace->add_mapping(...)` (linhas 392/404/453) — ou seja, **um mapeamento de página do kernel está falhando**. Note que o arquivo do corpus não bate linha-a-linha com o binário (build diferente), então a linha 130 não é diretamente localizável; a identificação do `add_mapping` é por forma da asserção, não por linha. Investigar `add_mapping`/`lookup_mapping` do kernel space é o próximo passo do Core1.
+
 ### P1 — Infraestrutura após o Passo 13
 
 1. **Modelo de interrupção real (IRQ/timer)** [da auditoria 2026-09-09]
