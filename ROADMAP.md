@@ -28,6 +28,19 @@ O teste `test-roms-external`, baseado nessa mensagem PASS, é um falso gate de e
   `dispatch_zwheel_app_start`, `run_zwheel_interactive`, `zwheel_stub_hook`;
   `tools/cpp/zeebo_brew_loader.h` — `inject_bytes` / resolução de entry.
 
+### Documentação normativa local — não buscar na web
+
+`docs/remote/` (não commitado; verificado 2026-09-10) contém a referência de arquitetura:
+
+- `DDI0211K_arm1136_r1p5_trm.pdf` — ARM1136 r1p5 TRM, 934 pp. **Core0** (ARM1136EJ-S, part `0xB36`).
+- `DDI0198E_arm926ejs_r0p5_trm.pdf` — ARM926EJ-S r0p5 TRM, 264 pp. **Core1** (AMSS/ARM9).
+- `ZeeboDeveloperGuide0.97.pdf` — 137 pp., guia oficial de desenvolvedor do Zeebo.
+- `memory_map.ods`, `openzeebo/`, `revskills2.04.zip` — material de RE da comunidade.
+
+Usar os TRMs como fonte normativa para semântica de instrução, CP15, modos e bancos de
+registradores em vez de inferir comportamento por tentativa. Isso é **referência de ABI /
+comportamento**: não copiar código de terceiros.
+
 ### Mídia disponível — não procurar outro dump
 
 - Fonte de trabalho read-only: `/home/rafaelfrequiao/.Tuxality/Infuse/brew/`.
@@ -419,6 +432,37 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **O boot continua NÃO fechando.** Contador maior (1,17M no JIT vs 596k no interpretado) **não**
     é prova de correção — pode significar executar lixo por mais tempo. O que sustenta progresso
     aqui é a divergência ter recuado, não o contador ter subido.
+
+- [ ] **Inventário do que o Dynarmic NÃO traduz (levantado 2026-09-10; ver `scan_unimplemented.py`)**:
+  - O Dynarmic delega ao interpretador apenas **6 instruções A32**, todas de modo privilegiado —
+    verificado em `third_party/dynarmic/.../translate/impl/`:
+    `arm_CPS`, `arm_RFE`, `arm_SRS` (`status_register_access.cpp`) e
+    `arm_LDM_usr`, `arm_LDM_eret`, `arm_STM_usr` (`load_store.cpp`).
+    **Thumb não tem nenhuma** (`InterpretThisInstruction` = 0 ocorrências nos tradutores Thumb).
+    Como este projeto não acopla interpretador, cada uma PARA o Core0 sob `--jit`.
+  - Varredura linear do AMSS acha 173.430 candidatos, mas isso é **ruído**: dados e código Thumb
+    são lidos como palavras ARM (há ASCII entre os achados). O número útil vem do **traço de
+    execução**, não da varredura. Executadas de fato no boot interpretado (596k instruções):
+    apenas **4 endereços distintos**.
+
+  | PC | opcode | instrução | situação |
+  |---|---|---|---|
+  | `0xf0003adc` | `0xf10800c0` | `cpsie if` | **resolvido** em `24d7d26` |
+  | `0xf0003b04` | `0xf10c00c0` | `cpsid if` | **resolvido** em `24d7d26` |
+  | `0xf000bcac` | `0xe9dd7fff` | `ldmib r13,{r0-r14}^` | **pendente** |
+  | `0xf000bcb8` | `0xf8bd0a00` | `rfeia r13!` | **pendente** |
+
+  - As duas pendentes são adjacentes e formam a sequência clássica de **retorno de tratador de
+    exceção**: restaura o banco de registradores de **usuário** (sufixo `^`, bit S) e depois
+    recarrega PC+CPSR de uma vez. Sem elas não há retorno de IRQ/SVC, então o boot não pode
+    progredir além do primeiro tratador — implementar as duas **juntas**, com acesso ao banco
+    de registradores de usuário (não ao banco do modo corrente).
+  - O boot interpretado as alcança na instrução **#118326**. O JIT ainda **não** chega lá
+    (executa as 18 CPS, zero RFE/LDM_usr): a divergência #23726 o desvia antes. Ou seja, são
+    bloqueios **reais e já enfileirados**, mas a divergência de memória vem primeiro.
+  - Referência normativa disponível localmente (não buscar na web): `docs/remote/` traz
+    `DDI0211K_arm1136_r1p5_trm.pdf` (934 pp., ARM1136 = Core0) e
+    `DDI0198E_arm926ejs_r0p5_trm.pdf` (264 pp., ARM926EJ-S = Core1).
 - [ ] **Ciclo de vida real por módulo (reaberto; `adcb631` oferece apenas carga + harness fixo)**:
   - EFS2 usa catálogo de blocos conhecidos, não extração universal. `--applet=` copia bytes host.
   - Resolver formato/relocações/entry de DD, criar instância com CLSID correto e usar HandleEvent do objeto retornado; jamais reutilizar `0x10532344` para todo jogo.
