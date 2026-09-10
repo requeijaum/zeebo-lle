@@ -1246,8 +1246,21 @@ public:
         // igual ao Core0 — para o Unicorn ignorar a MMU do guest e manter o mapa
         // plano. Validado por execucao real: sem isso os registradores congelam
         // exatamente na escrita do SCTLR (r3=0x5317d).
-        uc_ctl_tlb_mode(core1_.uc, UC_TLB_VIRTUAL);
-        uc_ctl_set_cpu_model(core1_.uc, UC_CPU_ARM_926);
+        // ORDEM IMPORTA: uc_ctl_set_cpu_model DEVE vir ANTES de uc_ctl_tlb_mode.
+        // Invertido, o set_cpu_model retorna UC_ERR_ARG e o modelo e silenciosamente
+        // ignorado -- o Core1 ficava no CPU default (nao-ARM926), que rejeita
+        // `mrc p15,0,apsr_nzcv,c7,c14,3` (test-and-clean dcache do ARM9) com
+        // UC_ERR_INSN_INVALID em 0xf001833c. Medido: com a ordem invertida
+        // set_cpu_model=UC_ERR_ARG e a execucao falha; com a ordem correta ambos OK.
+        {
+            uc_err e_model = uc_ctl_set_cpu_model(core1_.uc, UC_CPU_ARM_926);
+            uc_err e_tlb   = uc_ctl_tlb_mode(core1_.uc, UC_TLB_VIRTUAL);
+            if (e_model != UC_ERR_OK || e_tlb != UC_ERR_OK) {
+                printf("[Fatal][Core1] setup da CPU falhou: set_cpu_model=%s tlb_mode=%s\n",
+                       uc_strerror(e_model), uc_strerror(e_tlb));
+                return false;
+            }
+        }
         core1_.name = "ARM9-Modem";
         core1_state_ = &core1_;
 
@@ -2687,6 +2700,7 @@ private:
         // Core 1 hooks
         uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
+
         uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
         // Split I/D do heap REX: leitura de DADO na janela 0xf0000000+2MB injeta o shadow.
         uc_hook_add(core1_.uc, &h_r1, UC_HOOK_MEM_READ, (void*)c1_heap_read_hook, this,
