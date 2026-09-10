@@ -624,9 +624,33 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **Ferramenta nova**: `tools/cpp/diff_memory.py` — sobe o emulador nos dois backends e compara
     o conteúdo do mesmo endereço via `peek`. Serve para separar "divergência de semântica de
     instrução" de "divergência de estado de memória".
-  - Próximo passo concreto: instrumentar **escritas** (não leituras) na faixa `0xf401f000`–
-    `0xf4020000` nos dois backends e ver qual agente escreve `0x10090001` no interpretado e não
-    escreve no recompilado. Suspeita principal: o caminho Core1/SMD, já que o Core0 não escreve.
+  - **CAUSA RAIZ ENCONTRADA — a escrita se perde silenciosamente no caminho recompilado.**
+    O vigia `--watch-writes` mostrou que **os dois backends emitem as mesmas escritas**:
+
+        core0 pc=0xf000a32c addr=0xf401ffc0 valor=0x00000001
+        core0 pc=0xf000a35c addr=0xf401ffc0 valor=0x10090001   <- interpretado E recompilado
+
+    Mas no recompilado a leitura seguinte do MESMO endereço devolve `0`:
+
+        READ addr=0xf401ffc0 valor=0x00000000 origem=UC
+
+    Ou seja: **o defeito não está na semântica do store nem na do load** — a escrita
+    simplesmente não persiste. (Isto corrige a suspeita anterior de que o Core0 "não escrevia":
+    ele escreve; o dado é que se perde.)
+  - Mecanismo: `bridge.write32` (`zeebo_lle_main.cpp:1299`) faz
+
+        s->vtlb_.write_u32(addr, val);          // retorna bool  — DESCARTADO
+        if (s->core0_.uc) uc_mem_write(...);    // retorna uc_err — DESCARTADO
+
+    `0xf401f000` **não está mapeado**, então as duas falham e ninguém percebe: o firmware
+    prossegue como se tivesse gravado, e relê zero. Falha silenciosa clássica.
+  - Teste `test_jit_lost_write.cpp` trava o contrato, com controle positivo (página mapeada:
+    escreve e relê o valor) e o caso real (`0xf401ffc0`: escrita **rejeitada** e leitura falha
+    junto). 5/5.
+  - **Ressalva honesta**: provar a perda silenciosa **não** é o mesmo que consertar o boot.
+    Falta decidir *por que* `0xf401f000` não está mapeado — se a região deveria ter sido criada
+    por um `L4_MapControl` que o recompilado não executou, ou se falta uma janela na init. O
+    conserto certo é **mapear a região** (ou propagar o erro), não silenciar o sintoma.
   - **Aviso de método**: ao extrair registradores do traço, conferir o índice das colunas contra
     uma linha crua antes de tirar conclusão — foi exatamente esse descuido que gerou o
     diagnóstico errado de "ponteiro 0x2" e a caçada inútil ao acesso desalinhado.

@@ -493,6 +493,49 @@ public:
     FILE* trace_file_ = nullptr;
     uint64_t trace_limit_ = 0;
 
+    // Vigia de ESCRITAS numa faixa de enderecos (ver --watch-writes).
+    //
+    // Motivacao: a primeira divergencia entre os backends (#23726) le
+    // 0xf401ffc0 e obtem 0x10090001 no interpretado contra 0 no recompilado.
+    // O conteudo nao vem da imagem AMSS nem de escrita do Core0, entao alguem
+    // escreve ali em tempo de execucao. Este vigia registra QUEM escreve na
+    // faixa, em qual core e com que valor, para comparar os dois caminhos.
+    FILE* watch_file_ = nullptr;
+    uint32_t watch_lo_ = 0;
+    uint32_t watch_hi_ = 0;
+    uint64_t watch_hits_ = 0;
+
+    bool open_watch(const std::string& spec, const std::string& path) {
+        // spec = "lo-hi" em hexadecimal, ex.: 0xf401f000-0xf4020000
+        const size_t dash = spec.find('-');
+        if (dash == std::string::npos) {
+            printf("[watch] faixa invalida (esperado lo-hi): %s\n", spec.c_str());
+            return false;
+        }
+        watch_lo_ = (uint32_t)strtoull(spec.substr(0, dash).c_str(), nullptr, 0);
+        watch_hi_ = (uint32_t)strtoull(spec.substr(dash + 1).c_str(), nullptr, 0);
+        if (watch_hi_ <= watch_lo_) {
+            printf("[watch] faixa vazia: 0x%08x-0x%08x\n", watch_lo_, watch_hi_);
+            return false;
+        }
+        watch_file_ = path.empty() ? stdout : fopen(path.c_str(), "w");
+        if (!watch_file_) {
+            printf("[watch] nao foi possivel abrir %s\n", path.c_str());
+            return false;
+        }
+        printf("[watch] vigiando escritas em 0x%08x-0x%08x\n", watch_lo_, watch_hi_);
+        return true;
+    }
+
+    void note_write(int core, uint32_t addr, int size, uint32_t value, uint32_t pc) {
+        if (!watch_file_) return;
+        if (addr < watch_lo_ || addr >= watch_hi_) return;
+        watch_hits_++;
+        fprintf(watch_file_, "core%d pc=0x%08x addr=0x%08x size=%d valor=0x%08x\n",
+                core, pc, addr, size, value);
+        fflush(watch_file_);
+    }
+
     bool open_trace(const std::string& path, uint64_t limit) {
         trace_file_ = fopen(path.c_str(), "w");
         if (!trace_file_) {
@@ -1239,8 +1282,19 @@ public:
             bridge.read32 = [](void* ud, uint32_t addr) -> uint32_t {
                 ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
                 uint32_t val = 0;
-                if (s->vtlb_.read_u32(addr, &val)) return val;
-                if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 4);
+                bool from_vtlb = s->vtlb_.read_u32(addr, &val);
+                if (!from_vtlb && s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 4);
+                // Vigia de LEITURA: registra a origem do dado (VTLB ou Unicorn).
+                // As duas fontes podem divergir, e e exatamente isso que se quer ver.
+                if (s->watch_file_ && addr >= s->watch_lo_ && addr < s->watch_hi_) {
+                    uint32_t alt = 0;
+                    if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &alt, 4);
+                    fprintf(s->watch_file_,
+                            "READ  addr=0x%08x valor=0x%08x origem=%s uc_diz=0x%08x%s\n",
+                            addr, val, from_vtlb ? "VTLB" : "UC", alt,
+                            (from_vtlb && alt != val) ? "  <<< DIVERGEM" : "");
+                    fflush(s->watch_file_);
+                }
                 return val;
             };
             bridge.write8 = [](void* ud, uint32_t addr, uint8_t val) {
@@ -1255,6 +1309,11 @@ public:
             };
             bridge.write32 = [](void* ud, uint32_t addr, uint32_t val) {
                 ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                // O vigia precisa ser instrumentado AQUI: no caminho recompilado
+                // a escrita passa por esta bridge, e uc_mem_write() (API externa)
+                // NAO dispara UC_HOOK_MEM_WRITE. Sem isto o vigia fica cego no
+                // JIT e reportaria "zero escritas" para qualquer faixa.
+                s->note_write(0, addr, 4, val, s->core0_.jit ? s->core0_.jit->pc() : 0);
                 s->vtlb_.write_u32(addr, val);
                 if (s->core0_.uc) uc_mem_write(s->core0_.uc, addr, &val, 4);
             };
@@ -3329,9 +3388,13 @@ private:
     }
 
     static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
-        (void)uc;
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         if (type == UC_MEM_WRITE) {
+            if (sys->watch_file_) {
+                uint32_t pc = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                sys->note_write(0, (uint32_t)addr, size, (uint32_t)value, pc);
+            }
             sys->handle_peripheral_write((uint32_t)addr, size, (uint32_t)value);
         }
     }
@@ -3570,6 +3633,11 @@ private:
 
     static void c1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        if (type == UC_MEM_WRITE && sys->watch_file_) {
+            uint32_t pc1 = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc1);
+            sys->note_write(1, (uint32_t)addr, size, (uint32_t)value, pc1);
+        }
         if (type == UC_MEM_WRITE &&
             ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
              (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
@@ -3779,6 +3847,8 @@ int main(int argc, char** argv) {
     bool strict_unmapped = false;
     bool use_jit = false;
     std::string trace_path;
+    std::string watch_spec;
+    std::string watch_path;
     uint64_t trace_limit = 0;
     bool jit_solo = false;
     int cycles = 250;
@@ -3847,6 +3917,10 @@ int main(int argc, char** argv) {
             strict_unmapped = true;
         } else if (arg.rfind("--trace-core0=", 0) == 0) {
             trace_path = arg.substr(14);
+        } else if (arg.rfind("--watch-writes=", 0) == 0) {
+            watch_spec = arg.substr(15);
+        } else if (arg.rfind("--watch-out=", 0) == 0) {
+            watch_path = arg.substr(12);
         } else if (arg.rfind("--trace-limit=", 0) == 0) {
             trace_limit = strtoull(arg.substr(14).c_str(), nullptr, 0);
         } else if (arg == "--jit") {
@@ -3892,6 +3966,7 @@ int main(int argc, char** argv) {
     }
 
     if (!trace_path.empty()) sys.open_trace(trace_path, trace_limit);
+    if (!watch_spec.empty()) sys.open_watch(watch_spec, watch_path);
     if (!sys.init(nand_path, apps_path, amss_path, headless, use_jit)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
