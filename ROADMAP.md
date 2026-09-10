@@ -493,7 +493,17 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     TRM que temos é do ARM1136 r1p5, o que sugere que o certo seria alinhar tudo à família 1136,
     não ao 1176. Trocar exige refazer os traços (muda o oráculo).
 
-- [ ] **Incoerência de identidade de CPU entre os dois backends (ACHADO — pendente de decisão)**:
+- [x] **Resultado NEGATIVO — a família de CPU (1136 vs 1176) NÃO afeta a divergência do boot**:
+  - Experimento: troquei o Core0 para `UC_CPU_ARM_1136_R2` no Unicorn **e** o `midr` do Dynarmic
+    para `0x4107B362`, alinhando os dois backends à família ARM1136 (a do TRM que temos).
+  - Resultado: **idêntico em tudo** — mesma primeira divergência (#23726), mesmos valores
+    (`r3 = 0x10090001` vs `0`), mesmas contagens (596.725 vs 1.168.764 instruções).
+  - Conclusão: a escolha entre 1136 e 1176 **não influencia** o defeito do boot. O experimento foi
+    revertido (o código segue em `arm1176`, agora coerente nos dois backends). A pergunta de qual
+    é a CPU historicamente correta continua aberta, mas deixou de ser prioridade — não é o
+    caminho para destravar o boot.
+
+- [ ] **Incoerência de identidade de CPU entre os dois backends (parcialmente resolvida)**:
   - Levantado ao investigar o que o QEMU teria a ensinar (o Unicorn é um **fork do QEMU**, então
     o modelo de CPU dele *é* o modelo do QEMU; ver seção de licença abaixo).
   - Medido: `MIDR` que cada modelo do QEMU/Unicorn reporta (`mrc p15,0,Rd,c0,c0,0`):
@@ -558,8 +568,10 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 - [x] **Resultado NEGATIVO — LDR desalinhado NÃO é a causa da divergência #23726**
       (`test_jit_unaligned_ldr.cpp`; registrado para ninguém reinvestigar):
-  - Hipótese: a instrução que diverge é `ldreq r3,[r5]` com **r5 = 0x00000002**, uma carga de
-    endereço **desalinhado**. O TRM do ARM1136 (DDI0211K, p.210) diz que o bit U vale 0 no reset
+  - Hipótese: a instrução que diverge seria `ldreq r3,[r5]` com **r5 = 0x00000002**, uma carga de
+    endereço **desalinhado**. (A premissa em si era falsa: `r5` vale `0xf401ffc0` e está
+    alinhado — eu havia lido a coluna errada do traço. O teste continua válido como regressão,
+    mas a motivação original não existia.) O TRM do ARM1136 (DDI0211K, p.210) diz que o bit U vale 0 no reset
     e que nesse modo o processador "treats unaligned loads as rotated aligned data accesses".
     Seria uma explicação limpa: interpretado rotacionando, recompilado lendo literal.
   - **Refutada por medição.** Controle que separa os dois modelos: memória `11223344 55667788`,
@@ -581,10 +593,43 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **A causa real segue ABERTA** e é de outra natureza: os dois motores executam a mesma
     instrução, no mesmo PC, com as mesmas flags (`nzcv=0x60000000`, Z=1 nos dois), lendo o
     **mesmo endereço**, e obtêm valores diferentes (`0x10090001` vs `0`). Divergem no **conteúdo
-    da memória**, não na semântica da instrução. Note que `r5 = 0x2` é um ponteiro absurdo: a
-    corrupção provavelmente nasce **antes**, e #23726 é só onde ela fica visível.
-  - Próximo passo sugerido: comparar o **conteúdo da memória** entre os backends (não só
+    da memória**, não na semântica da instrução. (O endereço real é `r5 = 0xf401ffc0`, não `0x2`
+    como registrei antes por ler a coluna errada do traço — ver a entrada de caracterização
+    abaixo.)
+  - Próximo passo: comparar o **conteúdo da memória** entre os backends (não só
     registradores) e rastrear quem escreveu — ou deixou de escrever — a região lida.
+
+- [ ] **Divergência #23726 caracterizada (investigação em curso; `diff_memory.py`)**:
+  - **CORREÇÃO de um erro anterior deste ROADMAP**: eu havia registrado que a carga era
+    `ldreq r3,[r5]` com **`r5 = 0x00000002`** (ponteiro absurdo, sugerindo memória corrompida).
+    **Estava errado** — eu lia a coluna errada do traço. O formato real da linha é
+    `# pc nzcv opcode r0..r15`, portanto `r3` é a **coluna 7** e `r5` a **coluna 9**.
+    O valor real é **`r5 = 0xf401ffc0`**, um ponteiro perfeitamente alinhado e plausível.
+    (Isto também derruba a motivação original da hipótese de acesso desalinhado.)
+  - Fatos estabelecidos sobre `0xf401ffc0`:
+    - **Não é periférico**: não cai em nenhuma janela conhecida (`MSM_CSR` `0xc0100000`,
+      `SMEM` `0x01f00000`, `MDDI` `0xaa600000`, `ADRENO` `0xa0000000`, `VIC` `0xc0000000`),
+      logo `is_core0_peripheral()` responde falso e a leitura vai para a memória normal.
+    - **Não vem da imagem**: o deslocamento `0x401ffc0` na janela AMSS (`0xf0000000`) está
+      **além do fim** de `nand/1.1.2_AMSS.bin` (21.626.880 B = `0x14a0000`). Não é conteúdo
+      carregado de arquivo.
+    - **Nenhuma escrita do Core0** para essa região aparece no traço antes de #23725.
+    - Fora do contexto do boot, os **dois** backends leem `0x00000000` ali (`diff_memory.py`,
+      que usa a sonda `peek` do servidor de controle). O conteúdo estático é igual.
+  - Conclusão parcial: o valor `0x10090001` que o interpretado enxerga é **produzido em tempo de
+    execução por algo que não é o Core0** — candidatos: Core1 (ARM926), DMA, injeção de SMD/RPC,
+    ou um mapeamento de VTLB que só existe em um dos caminhos. É uma região vizinha de outras em
+    uso ativo (`0xf4090000`, `0xf401fe40` aparecem como base em passagens seguintes pelo mesmo
+    trecho de código), ou seja, `0xf401xxxx` é uma área viva, não lixo.
+  - **Ferramenta nova**: `tools/cpp/diff_memory.py` — sobe o emulador nos dois backends e compara
+    o conteúdo do mesmo endereço via `peek`. Serve para separar "divergência de semântica de
+    instrução" de "divergência de estado de memória".
+  - Próximo passo concreto: instrumentar **escritas** (não leituras) na faixa `0xf401f000`–
+    `0xf4020000` nos dois backends e ver qual agente escreve `0x10090001` no interpretado e não
+    escreve no recompilado. Suspeita principal: o caminho Core1/SMD, já que o Core0 não escreve.
+  - **Aviso de método**: ao extrair registradores do traço, conferir o índice das colunas contra
+    uma linha crua antes de tirar conclusão — foi exatamente esse descuido que gerou o
+    diagnóstico errado de "ponteiro 0x2" e a caçada inútil ao acesso desalinhado.
 - [ ] **Ciclo de vida real por módulo (reaberto; `adcb631` oferece apenas carga + harness fixo)**:
   - EFS2 usa catálogo de blocos conhecidos, não extração universal. `--applet=` copia bytes host.
   - Resolver formato/relocações/entry de DD, criar instância com CLSID correto e usar HandleEvent do objeto retornado; jamais reutilizar `0x10532344` para todo jogo.
