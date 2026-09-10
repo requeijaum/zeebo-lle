@@ -1275,8 +1275,20 @@ public:
             bridge.read16 = [](void* ud, uint32_t addr) -> uint16_t {
                 ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
                 uint16_t val = 0;
-                if (s->vtlb_.read(addr, &val, 2)) return val;
-                if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 2);
+                const bool from_vtlb = s->vtlb_.read(addr, &val, 2);
+                if (!from_vtlb && s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 2);
+                // Mesmo vigia do read32: sem ele, uma divergencia VTLB<->Unicorn
+                // em acesso de halfword (LDRH) fica invisivel. Foi exatamente o
+                // caso de #181306 (LDRH r3,[r0,#2] com r0=0xb0d00000).
+                if (s->watch_file_ && addr >= s->watch_lo_ && addr < s->watch_hi_) {
+                    uint16_t alt = 0;
+                    if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &alt, 2);
+                    fprintf(s->watch_file_,
+                            "READ16 addr=0x%08x valor=0x%04x origem=%s uc_diz=0x%04x%s\n",
+                            addr, val, from_vtlb ? "VTLB" : "UC", alt,
+                            (from_vtlb && alt != val) ? "  <<< DIVERGEM" : "");
+                    fflush(s->watch_file_);
+                }
                 return val;
             };
             bridge.read32 = [](void* ud, uint32_t addr) -> uint32_t {

@@ -397,11 +397,23 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
     if (prot == 0) prot = 1;
 
     uc_err e = uc_mem_map_ptr(uc, base, (size_t)msize, prot, hp);
+    bool host_ptr_aceito = (e == UC_ERR_OK);
     if (e == UC_ERR_MAP) {
         // Já existe região nesse VA: só reajusta a proteção (host_ptr imutável).
         e = uc_mem_protect(uc, base, (size_t)msize, prot);
     }
-    if (e == UC_ERR_OK && lut) lut->map(base, msize, hp);
+    // So atualiza a LUT quando o Unicorn REALMENTE adotou este host_ptr.
+    //
+    // Se veio UC_ERR_MAP, o Unicorn manteve o buffer anterior e apenas a
+    // protecao foi reajustada. Atualizar a LUT com `hp` faria a VTLB servir um
+    // buffer e o Unicorn servir outro para o MESMO endereco virtual: o backend
+    // interpretado le pelo Unicorn e o recompilado le pela VTLB, entao os dois
+    // divergem em silencio, sem erro nem aviso.
+    //
+    // Foi a causa raiz da divergencia #181306 do boot, capturada como
+    // "READ16 addr=0xb0d00002 valor=0xea00 origem=VTLB uc_diz=0x0001".
+    // Ver test_vtlb_remap_asymmetry.
+    if (e == UC_ERR_OK && host_ptr_aceito && lut) lut->map(base, msize, hp);
     return e;
 }
 
