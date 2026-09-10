@@ -697,9 +697,15 @@ public:
         else                printf("== 0:EFS2APPS dirents (filtro=%s) ==\n", filter.c_str());
         for (const auto& e : efs2_->dirents()) {
             if (!filter.empty()) {
-                if (e.name.size() < filter.size() ||
-                    e.name.compare(e.name.size() - filter.size(), filter.size(), filter) != 0)
-                    continue;
+                bool contains_mode = filter.size() >= 1 && filter[0] == '*';
+                const std::string needle = contains_mode ? filter.substr(1) : filter;
+                if (contains_mode) {
+                    if (e.name.find(needle) == std::string::npos) continue;
+                } else {
+                    if (e.name.size() < needle.size() ||
+                        e.name.compare(e.name.size() - needle.size(), needle.size(), needle) != 0)
+                        continue;
+                }
             }
             printf("  inode=0x%-7x parent=0x%-7x type=%u  %s\n",
                    e.inode, e.parent_inode(), e.type, e.name.c_str());
@@ -3691,6 +3697,7 @@ int main(int argc, char** argv) {
     std::string efs2_run = "";
     bool efs2_ls_flag = false;
     std::string efs2_ls_filter = "";
+    size_t efs2_ls_max = 200;
     std::string dump_frames_dir = "";
     bool headless = true;
     bool zwheel_preview = false;
@@ -3741,6 +3748,12 @@ int main(int argc, char** argv) {
         } else if (arg.rfind("--efs2-ls=", 0) == 0) {
             efs2_ls_flag = true;
             efs2_ls_filter = arg.substr(10);
+        } else if (arg.rfind("--efs2-ls-max=", 0) == 0) {
+            int max_i = 0;
+            if (!parse_int_arg(arg.substr(14), 1, 200000, max_i)) {
+                fprintf(stderr, "Argumento inválido: %s\n", arg.c_str()); return 2;
+            }
+            efs2_ls_max = (size_t)max_i;
         } else if (arg.rfind("--dump-frames=", 0) == 0) {
             dump_frames_dir = arg.substr(14);
         } else if (arg.rfind("--cycles=", 0) == 0) {
@@ -3817,7 +3830,7 @@ int main(int argc, char** argv) {
 
     // --efs2-ls: lista os dirents da partição 0:EFS2APPS e sai.
     if (efs2_ls_flag) {
-        size_t n = sys.efs2_ls(efs2_ls_filter);
+        size_t n = sys.efs2_ls(efs2_ls_filter, efs2_ls_max);
         return n > 0 ? 0 : 1;
     }
 
