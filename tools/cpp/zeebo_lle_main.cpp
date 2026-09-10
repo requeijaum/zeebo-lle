@@ -1611,6 +1611,8 @@ public:
             if (!core1_.halted) {
                 e1 = uc_emu_start(core1_.uc, core1_.entry, 0, 0, slice_insns);
                 uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+                // [QW79] Contexto seguro: fora do TB. Aqui uc_ctl e' reentrante.
+                drain_tb_invalidate(core1_.uc);
                 if (e1 != UC_ERR_OK) {
                     // O Core1 morria em SILENCIO: so o Core0 tinha [E0-ERROR], entao
                     // uma falha aqui virava "pc parado" sem nenhuma pista no log.
@@ -3716,7 +3718,7 @@ private:
             u32 pc=(u32)ad;
             for (u32 w : sys->rex_heap_dirty_) sys->rex_restore_code(w, 4);
             sys->rex_heap_dirty_.clear();
-            if (rex_in_heap(pc)) uc_ctl_remove_cache(uc, pc, pc + (size?size:4));
+            if (rex_in_heap(pc)) queue_tb_invalidate(pc, pc + (size?size:4));
         }
         if (sys->rex_split_id_ && rex_in_heap((u32)ad))
             sys->rex_restore_code((u32)ad, size?size:4);
@@ -4064,6 +4066,32 @@ private:
     bool rex_split_id_ = false;
 
     static bool rex_in_heap(u32 a){ return a>=REX_HEAP_VA_BASE && a<REX_HEAP_VA_BASE+REX_HEAP_VA_SIZE; }
+
+    // [QW79] Fila de invalidacao de TB adiada.
+    // uc_ctl(TB_REMOVE_CACHE) NAO e' reentrante a partir de um code hook: o hook
+    // roda via helper_uc_tracecode, de dentro do TB em execucao, e invalidar
+    // dali libera o proprio TB -> SIGSEGV (backtrace QW78:
+    // tb_invalidate_phys_range_arm <- uc_ctl <- c1_code_hook).
+    // Comprovado 2x2: COM = exit 139 sempre; SEM = exit 0 sempre.
+    // Solucao: enfileirar aqui, aplicar FORA do uc_emu_start (contexto seguro).
+    static std::vector<std::pair<u32,u32>>& tb_inval_queue() {
+        static std::vector<std::pair<u32,u32>> q;
+        return q;
+    }
+    static void queue_tb_invalidate(u32 begin, u32 end) {
+        // [QW80] SEM teto de descarte. Um teto silencioso (era 4096) chegou a
+        // saturar 2x numa janela de 45s, e cada descarte deixaria um TB de
+        // codigo automodificado sem invalidar -- traducao velha executando sem
+        // aviso. Trocar um crash por corrupcao muda seria um retrocesso.
+        // Custo de memoria e' irrelevante (8 bytes por par; drenado a cada
+        // fatia de uc_emu_start).
+        tb_inval_queue().emplace_back(begin, end);
+    }
+    static void drain_tb_invalidate(uc_engine* uc) {
+        auto& q = tb_inval_queue();
+        for (auto& r : q) uc_ctl_remove_cache(uc, r.first, r.second);
+        q.clear();
+    }
     void rex_restore_code(u32 addr, u32 n){
         u32 off=addr-REX_HEAP_VA_BASE;
         if(off>=rex_heap_pristine_.size()) return;

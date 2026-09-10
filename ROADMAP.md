@@ -1469,6 +1469,72 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW78-QW80 — SIGSEGV: invalidacao de TB nao e' reentrante em code hook  **[CORRIGIDO]**
+
+O `exit=139` estava catalogado como "segfault de host pre-existente". **Nao era.**
+Era um teto: qualquer investigacao que precisasse passar de ~45s do Core0 morria
+ali.
+
+**QW78 — backtrace (gdb, `-O0 -g`):**
+
+    #1 tb_invalidate_phys_range_arm   libunicorn
+    #3 uc_ctl                         libunicorn
+    #4 ZeeboLLESystem::c1_code_hook   <-- nosso codigo
+    #5 helper_uc_tracecode            libunicorn
+
+`c1_code_hook` roda **via `helper_uc_tracecode`**, ou seja, de dentro do
+translation block em execucao. Chamar `uc_ctl(TB_REMOVE_CACHE)` dali invalida e
+libera o proprio TB que esta executando; o retorno cai em memoria liberada.
+
+A faixa era sempre sadia (4 bytes) — **o problema nunca foi o argumento, foi o
+reentrance**. Por isso so aparecia as vezes: depende de o TB invalidado ser
+exatamente o que esta em execucao, o que fica mais provavel quanto mais tempo
+roda (batia com "pre-existente com `seconds=20`").
+
+**QW79 — causalidade provada (controle negativo, 2 pares alternados):**
+
+    COM invalidacao (controle):  exit=139, exit=139   <- sempre
+    SEM invalidacao (teste):     exit=0,   exit=0     <- nunca
+
+    Core0 COM: insns=7.044.226
+    Core0 SEM: insns=105.944.226 / 106.644.226   (15x mais longe)
+    L4_MapControl = 756 nos dois                 (boot nao regrediu)
+
+**Mas remover a invalidacao NAO e o fix.** Ela existe porque o Split I/D do
+Core1 escreve no heap REX; sem invalidar, o Unicorn seguiria executando a
+traducao **antiga** de codigo automodificado. O boot nao regredir aqui e sorte,
+nao corretude.
+
+**Fix correto — adiar, nao remover:** enfileirar as faixas durante o hook e
+aplica-las **fora** do `uc_emu_start`, onde `uc_ctl` e reentrante:
+
+    queue_tb_invalidate(pc, pc+size)   // no hook
+    drain_tb_invalidate(core1_.uc)     // apos uc_emu_start, contexto seguro
+
+**QW80 — controle POSITIVO do fix** (senao "nao crasha" poderia significar
+apenas "a fila nunca e usada" — bug mudo no lugar de crash):
+
+    drains=8192  invalidacoes=12.037.608  fila_max=4096  saturou=2
+
+12 milhoes de invalidacoes **realmente aplicadas**. A fila trabalha.
+
+> ⚠ **Defeito que eu mesmo introduzi:** escrevi `if (q.size() < 4096)`, que
+> **descarta silenciosamente** ao encher — exatamente o bug mudo que eu dizia
+> querer evitar. `saturou=2` mostrou que acontecia de verdade. Removido o teto;
+> pico real medido = **4664** (o teto de 4096 descartava ~568 invalidacoes).
+> Custo de memoria e irrelevante (8 bytes/par, drenado a cada fatia).
+> **Nunca descartar trabalho de correcao para respeitar um limite arbitrario.**
+
+**Validacao final** (`-O2`, sem instrumentacao):
+
+    run1 exit=0  insns=157.410.000  MapControl=756
+    run2 exit=0  insns=155.810.000  MapControl=756
+    run3 exit=0  insns=158.810.000  MapControl=756
+    make check   exit=0  ALL TESTS PASSED
+
+De 7 milhoes de instrucoes (com crash) para ~157 milhoes (estavel): **22x**.
+O teto de 45s deixou de existir.
+
 ### QW77 — Nao existe bug ARM/Thumb; Core0 atravessa o memset e entra na descompressao  **[MEDIDO com controle]**
 
 **A previsao do QW76 foi testada e confirmada.** Se o gargalo era throughput
@@ -1517,9 +1583,7 @@ com `T=1` (Thumb). O controle na funcao ARM da `T=0` puro — o instrumento
    declarado errado no QW64 — retratado tambem.
 3. O Core0 progride por fases: setup -> memset de 5 MB -> **descompressao LZ**.
 
-**Pendente:** `exit=139` com `seconds=45`. Era tido como pre-existente
-(`seconds=20`), mas agora ocorre **depois de progresso real**, entao pode estar
-limitando o boot. Proximo alvo.
+**Pendente:** ~~`exit=139` com `seconds=45`~~ **[RESOLVIDO no QW78-80: invalidacao de TB nao reentrante em code hook]**
 
 ### QW73-QW76 — Core0: o "travamento" e' THROUGHPUT, nao deadlock  **[MEDIDO]**
 
