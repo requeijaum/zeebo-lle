@@ -37,6 +37,13 @@
 //   rodata   73.210.000 insns   TCB=SIM
 //   control   8.310.000 insns   TCB=nao
 //
+// INTERPRETADOR PURO (exigencia do projeto)
+// Investigacao de LLE roda SEM Dynarmic: o JIT introduz uma variavel a mais
+// (divergencia de backend) num problema que ainda e de emulacao low-level. O
+// comando montado abaixo NAO passa --jit nem --jit-solo, e o teste ABORTA se a
+// saida mencionar o backend JIT -- assim a exigencia fica verificada, nao
+// apenas prometida em comentario.
+//
 // SKIP (exit 77) se a imagem AMSS nao estiver presente.
 
 #include <cstdio>
@@ -50,6 +57,7 @@ static const char* kAmss = "../../nand/1.1.2_AMSS.bin";
 struct Run {
     unsigned long long insns = 0;
     bool tcb = false;
+    bool jit = false;   // backend JIT detectado na saida (nao deve ocorrer)
 };
 
 // Roda o emulador com um valor de ZEEBO_PROBE e extrai (insns, assertion TCB).
@@ -67,6 +75,10 @@ static Run run_probe(const char* modo) {
         if (strstr(linha, "thread.cc:1273") ||
             strstr(linha, "Failed to create root server")) {
             r.tcb = true;
+        }
+        // guarda: nenhuma corrida deste teste pode usar Dynarmic
+        if (strstr(linha, "Dynarmic") || strstr(linha, "JIT backend")) {
+            r.jit = true;
         }
         // ultima ocorrencia de insns= vence (progresso final)
         const char* m = nullptr;
@@ -97,6 +109,13 @@ int main() {
     printf("  baseline  insns=%llu  TCB=%s\n", base.insns, base.tcb ? "SIM" : "nao");
     printf("  rodata    insns=%llu  TCB=%s\n", rod.insns,  rod.tcb  ? "SIM" : "nao");
     printf("  control   insns=%llu  TCB=%s\n", ctl.insns,  ctl.tcb  ? "SIM" : "nao");
+
+    if (base.jit || rod.jit || ctl.jit) {
+        fprintf(stderr, "FALHA: backend JIT/Dynarmic detectado -- este teste exige "
+                        "interpretador puro (sem --jit/--jit-solo)\n");
+        return 1;
+    }
+    printf("  [guarda] interpretador puro confirmado (sem Dynarmic)\n");
 
     if (base.insns == 0) {
         fprintf(stderr, "FALHA: baseline nao produziu contagem de insns\n");
