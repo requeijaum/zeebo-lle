@@ -1425,3 +1425,45 @@ sobre o formato deste codec proprietário (inexistente publicamente).
    (via debug agent / control-port, não terminal direto) para decidir (a) vs (b) com evidência
    cruzada, antes de qualquer nova tentativa de correção.
 
+### QW56 — [CAUSA RAIZ] Split I/D corrompe a BSS/`.data` do kernel  **[CORRIGIDO]**
+
+**Provado por medicao** (interpretador puro): `shadow[f001a538]=0x00000100` vs
+`uc[f001a538]=0x00000000`. O `init_tcb_allocator` roda, escreve certo, e a RAM do
+Unicorn e' revertida a zero por `c1_heap_read_hook` (`zeebo_lle_main.cpp:3946`).
+
+- Janela `REX_HEAP_VA_BASE=0xf0000000 + 0x200000` cobre `.text`+`.data`+`.bss` do kernel.
+- Toda leitura na janela serve shadow/pristino **e faz `uc_mem_write` por cima**.
+- `.bss` no pristino = zeros (sem filesz) => variaveis globais do kernel sao apagadas.
+- Sintoma visivel: panic `Failed to create root server TCB` (thread.cc:1273).
+- **`ZEEBO_PROBE=rodata` e' remendo do mesmo defeito**, nao a causa.
+
+**Proximo passo**: teste RED que prove a corrupcao (escreve global na janela, le de
+volta, exige o valor escrito) e so' entao restringir a janela ao `.text` executavel.
+
+**Rebaixa**: QW50 deixa de ser "causa localizada" — a causa e' esta.
+
+**CORRECAO APLICADA** (`c1_heap_read_hook`): guarda `if (off >= REX_KERNEL_FILESZ) return;`
+com `REX_KERNEL_FILESZ = 0x0001a324` (filesz do seg1). O pristino so' e' servido onde
+ha' lastro no arquivo; `.bss` passa a viver na RAM do Unicorn como deveria.
+
+**Controle negativo (obrigatorio, §7)** — mesmo binario, so' a guarda muda:
+
+| guarda | onde o boot para |
+|---|---|
+| desativada | `creating root server (000a8001)` -> panic TCB (thread.cc:1273) |
+| ativada    | avanca; nova parada em `tracebuffer.cc:116` |
+
+**Sem `ZEEBO_PROBE`** — o boot passa do TCB com o probe desligado. O remendo virou no-op.
+
+**Teste**: `test_split_id_bss_clobber` (RED comentando a guarda: exit 1, `lido=0x0`;
+GREEN com ela: exit 0). Controle positivo embutido: se o shadow nao registrar a
+escrita, o teste aborta com exit 2 em vez de concluir.
+
+**Efeito colateral**: `test_rodata_probe_control` ficou obsoleto nas premissas (1) e (3)
+— exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
+seguem valendo.
+
+### QW57 — `Assertion trace_buffer failed` (tracebuffer.cc:116) **[ABERTO — nova fronteira]**
+
+Nova parada do Core1, bem depois do TCB. O kernel espera um buffer de trace que nao
+provemos. Investigar se e' memoria dedicada esperada por memdesc ou init faltante.

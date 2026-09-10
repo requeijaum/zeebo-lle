@@ -1,3 +1,18 @@
+// ── OBSOLETO POR QW56 (causa raiz corrigida) ────────────────────────────────
+// Este teste nasceu quando o boot travava no panic thread.cc:1273 e o
+// ZEEBO_PROBE=rodata era o unico jeito de passar dele. Ele exigia que:
+//    - rodata avancasse >3x sobre o baseline
+//    - rodata ALCANCASSE a assertion do TCB
+//
+// QW56 provou que aquilo era REMENDO: a causa real era o Split I/D servindo
+// o pristino (zeros) sobre o .bss do kernel, apagando a struct do alocador de
+// TCB. Corrigido em c1_heap_read_hook (guarda REX_KERNEL_FILESZ), o boot passa
+// do TCB SEM probe algum -- logo as premissas 1 e 3 sao falsas por construcao.
+//
+// O que ainda tem valor e' o CONTROLE NEGATIVO (premissa 2/4): a faixa
+// irrelevante nao pode destravar nada. Isso segue verificado abaixo.
+// A cobertura da causa real esta' em test_split_id_bss_clobber.
+// ────────────────────────────────────────────────────────────────────────────
 // test_rodata_probe_control.cpp — controle negativo do probe de .rodata (Core1).
 //
 // CONTEXTO
@@ -130,8 +145,8 @@ int main() {
     if (r_rod > 3.0) {
         printf("[PASS] rodata avanca sobre o baseline (%.2fx > 3x)\n", r_rod);
     } else {
-        printf("[FALHA] rodata NAO avancou (%.2fx <= 3x)\n", r_rod);
-        falhas++;
+        printf("[INFO/QW56] rodata nao avanca mais (%.2fx) -- esperado:\n"
+               "         a causa raiz foi corrigida, o probe virou no-op.\n", r_rod);
     }
 
     // (2) CONTROLE NEGATIVO: a faixa irrelevante NAO pode avancar
@@ -147,8 +162,8 @@ int main() {
     if (rod.tcb) {
         printf("[PASS] rodata alcanca a assertion do TCB (thread.cc:1273)\n");
     } else {
-        printf("[FALHA] rodata NAO alcancou a assertion do TCB\n");
-        falhas++;
+        printf("[INFO/QW56] rodata nao alcanca mais o TCB -- esperado:\n"
+               "         o boot passa do TCB sem probe (ver test_split_id_bss_clobber).\n");
     }
     if (!ctl.tcb) {
         printf("[PASS] controle negativo: faixa irrelevante nao alcanca o TCB\n");

@@ -3638,10 +3638,28 @@ private:
             auto rd = [&](u32 a)->u32 { u32 v=0; uc_mem_read(uc,a,&v,4); return v; };
             auto reg = [&](int r)->u32 { u32 v=0; uc_reg_read(uc,r,&v); return v; };
             if (pc == 0xf0007008) {
-                u32 obj = rd(0xf001a52c);
-                fprintf(stderr,"[TCB] allocate_tcb ENTRA  obj@f001a52c=0x%08x"
-                        " [obj+4]=0x%08x [obj+8]=0x%08x [obj+c]=0x%08x\n",
-                        obj, obj?rd(obj+4):0, obj?rd(obj+8):0, obj?rd(obj+0xc):0);
+                // CORRECAO: f001a52c e a BASE da struct (o init escreve via `ip`),
+                // NAO um ponteiro. Ler os campos diretamente.
+                const u32 obj = 0xf001a52c;
+                fprintf(stderr,"[TCB] allocate_tcb ENTRA  obj=f001a52c campos:"
+                        " +0=0x%08x +4=0x%08x +8=0x%08x +c=0x%08x"
+                        " | h+10=0x%04x h+12=0x%04x h+14=0x%04x\n",
+                        rd(obj), rd(obj+4), rd(obj+8), rd(obj+0xc),
+                        (u16)(rd(obj+0x10)&0xffff), (u16)(rd(obj+0x10)>>16),
+                        (u16)(rd(obj+0x14)&0xffff));
+                {   // ARBITRO: o que diz o SHADOW (visao de dados do Split I/D)?
+                    u32 off = 0xf001a538u - REX_HEAP_VA_BASE, sh = 0;
+                    if (off + 4 <= sys->rex_heap_shadow_.size())
+                        memcpy(&sh, &sys->rex_heap_shadow_[off], 4);
+                    fprintf(stderr,"[TCB]   split_id=%d shadow[f001a538]=0x%08x uc[f001a538]=0x%08x %s\n",
+                            (int)sys->rex_split_id_, sh, rd(0xf001a538),
+                            (sh==0x100 && rd(0xf001a538)==0) ? "<== SHADOW OK, UC CLOBBERED" : "");
+                }
+            } else if (pc == 0xf00067e4) {
+                fprintf(stderr,"[TCB] bitmap_alloc ENTRA  r0=0x%08x [obj+4]=0x%08x"
+                        " [obj+8]=0x%08x [obj+c]=0x%08x\n", reg(UC_ARM_REG_R0),
+                        rd(reg(UC_ARM_REG_R0)+4), rd(reg(UC_ARM_REG_R0)+8),
+                        rd(reg(UC_ARM_REG_R0)+0xc));
             } else if (pc == 0xf00065f0) {
                 fprintf(stderr,"[TCB] refill ENTRA        pool_head@f001a508=0x%08x\n",
                         rd(0xf001a508));
@@ -3655,6 +3673,32 @@ private:
                         reg(UC_ARM_REG_R0)==0 ? "<== NULL! causa do panic" : "ok");
             } else if (pc == 0xf0016bec) {
                 fprintf(stderr,"[TCB] >>> ponto do panic thread.cc:1273 alcancado\n");
+            } else if (pc == 0xf001681c) {
+                fprintf(stderr,"[TCB] init_tcb_allocator ENTRA (f001681c)\n");
+            } else if (pc == 0xf00162d8) {
+                fprintf(stderr,"[TCB] call-site do init ALCANCADO (f00162d8)\n");
+            } else if (pc == 0xf001682c) {
+                // logo APOS `str r3,[ip,#0xc]` (r3=0x100) em 0xf0016828
+                u32 ip=0; uc_reg_read(uc,UC_ARM_REG_IP,&ip);
+                fprintf(stderr,"[TCB] POS-STORE ip=0x%08x  [ip+c]=0x%08x  (esperado 0x00000100) %s\n",
+                        ip, rd(ip+0xc), rd(ip+0xc)==0x100?"ok":"<== ESCRITA PERDIDA");
+            } else if (pc == 0xf0016870 || pc == 0xf0016880 || pc == 0xf00168a0
+                       || pc == 0xf0016900 || pc == 0xf0016a00 || pc == 0xf0016b00
+                       || pc == 0xf0016b8c) {
+                static u32 ultimo = 0xffffffff;
+                u32 v = rd(0xf001a538); // campo +c da struct base f001a52c
+                if (v != ultimo) {
+                    fprintf(stderr,"[TCB] RASTREIO pc=0x%08x  [f001a538]=0x%08x %s\n",
+                            pc, v, v==0?"<== ZEROU AQUI":"");
+                    ultimo = v;
+                }
+            } else if (pc == 0xf0016864) {
+                u32 r0=0,r1=0; uc_reg_read(uc,UC_ARM_REG_R0,&r0); uc_reg_read(uc,UC_ARM_REG_R1,&r1);
+                fprintf(stderr,"[TCB] init: pool_alloc(r0=0x%08x, tam=0x%08x)\n",r0,r1);
+            } else if (pc == 0xf0016868) {
+                u32 r0=0; uc_reg_read(uc,UC_ARM_REG_R0,&r0);
+                fprintf(stderr,"[TCB] init: pool_alloc devolveu 0x%08x %s\n",
+                        r0, r0==0?"<== INIT FALHOU":"ok");
             }
         }
 
@@ -3904,6 +3948,17 @@ private:
                 return;
             }
         }
+        // ── QW56: NAO servir shadow/pristino sobre .data/.bss do kernel ─────────
+        // A janela do Split I/D (0xf0000000+2MB) foi desenhada para o .text do
+        // kernel (literal pool / jump table), mas engole `.data` e `.bss`. No
+        // pristino o `.bss` e' TODO zero (nao tem filesz no ELF), entao servir
+        // essa faixa apaga variaveis globais que o kernel acabou de escrever --
+        // e a `uc_mem_write` abaixo reverte a RAM do Unicorn.
+        // Medido: init_tcb_allocator escreve 0x100 em f001a538, o shadow guarda
+        // 0x100, mas allocate_tcb le 0 => NULL => panic thread.cc:1273.
+        // Ver test_split_id_bss_clobber (RED sem esta guarda).
+        if (off >= REX_KERNEL_FILESZ) return;
+
         uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
         for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
     }
@@ -3987,6 +4042,10 @@ private:
     // Mantemos a janela mapeada SEMPRE com o código pristino (visão de instrução)
     // e roteamos as escritas de DADOS para rex_heap_shadow_ (PA 0x00a00000).
     static constexpr u32 REX_HEAP_VA_BASE = 0xf0000000;
+    // QW56: fim do conteudo com lastro no ARQUIVO (filesz do seg1 do kernel).
+    // Acima disto e' .bss: o pristino e' zero por construcao e servi-lo apaga
+    // globais do kernel. Ver c1_heap_read_hook e test_split_id_bss_clobber.
+    static constexpr u32 REX_KERNEL_FILESZ = 0x0001a324;
     static constexpr u32 REX_HEAP_VA_SIZE = 0x00200000;
     std::vector<u8> rex_heap_pristine_;    // código pristino da janela (visão I)
     std::vector<u8> rex_heap_shadow_;      // RAM de dados dedicada (visão D)

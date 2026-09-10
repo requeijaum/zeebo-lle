@@ -224,3 +224,53 @@ QUEM deveria inicializa-lo (provavel `init_tcb_allocator` equivalente, chamado
 de `init_kernel_threads`/`generic_init`) e por que essa inicializacao nao roda
 ou nao persiste. `--watch-writes` nao serve: e cego no Core1 (registra a faixa
 e nao reporta nada) — usar hook proprio.
+
+
+## QW50 — CAUSA RAIZ PROVADA: Split I/D corrompe a BSS do kernel (2026-09-10)
+
+O panic `Failed to create root server TCB` (thread.cc:1273) **nao e' bug do firmware
+nem falta de memoria**. E' bug NOSSO, no Split I/D do heap REX.
+
+### Medicao decisiva (interpretador puro, sem Dynarmic)
+
+```
+[TCB] POS-STORE ip=0xf001a52c  [ip+c]=0x00000100  (esperado 0x00000100) ok
+[TCB] allocate_tcb ENTRA  obj=f001a52c campos: +0=0 +4=0 +8=0 +c=0
+[TCB]   split_id=1 shadow[f001a538]=0x00000100 uc[f001a538]=0x00000000  <== SHADOW OK, UC CLOBBERED
+```
+
+O `init_tcb_allocator` **roda e tem sucesso**; a escrita **acontece** (POS-STORE le 0x100
+de volta). O SHADOW preserva 0x100 corretamente. Mas a RAM do Unicorn le 0.
+
+### Mecanismo
+
+`REX_HEAP_VA_BASE=0xf0000000`, `REX_HEAP_VA_SIZE=0x00200000` (2MB) — a janela cobre
+**f0000000..f0200000**, que inclui a **BSS do kernel** (`f001a324`+), nao so' o heap.
+
+`c1_heap_read_hook` (`:3946`) serve toda leitura da janela a partir do shadow **e
+reescreve a RAM do Unicorn** com esse valor. O `.bss` no shadow foi semeado do
+**pristino do arquivo** (= zeros, pois BSS nao tem filesz). Entao:
+
+1. init escreve 0x100 em f001a538 -> hook de escrita atualiza o shadow (correto)
+2. uma leitura QUALQUER de palavra vizinha na mesma janela serve o pristino/shadow
+   e faz `uc_mem_write` por cima -> a RAM do Unicorn volta a zero
+3. `allocate_tcb` le da RAM do Unicorn -> ve' 0 -> NULL -> panic
+
+### Escopo
+
+A janela do Split I/D esta' **larga demais**: foi desenhada para o `.text` do kernel
+(literal pool / jump table) mas engole `.data` e `.bss`. Qualquer variavel global do
+kernel esta' sujeita ao mesmo apagamento — o TCB e' so' o primeiro sintoma a estourar.
+
+### Consequencia para hipoteses anteriores
+
+- REFUTA "alocador e TCB sao um so' bug": o pool esta' saudavel (devolve f0001000..f000d000).
+- REFUTA a hipotese do elfweaver (ja' refutada por desassemblagem).
+- O probe `.rodata` (ZEEBO_PROBE=rodata) e' um **remendo do mesmo defeito**: ele serve
+  o pristino numa faixa especifica para escapar do shadow zerado. Trata sintoma, nao causa.
+
+### Correcao candidata (NAO aplicada — precisa de teste RED antes)
+
+Restringir a janela do Split I/D ao `.text` executavel do kernel, ou tornar o shadow
+autoritativo de verdade (nunca reescrever a RAM do Unicorn com pristino em enderecos
+ja' sujos). Ver QW56 no ROADMAP.
