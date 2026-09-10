@@ -3786,10 +3786,39 @@ private:
         }
         if (!sys->rex_split_id_ || type != UC_MEM_READ || !rex_in_heap((u32)addr)) return;
         u32 a=(u32)addr, off=a-REX_HEAP_VA_BASE, n=(u32)size;
-        if (off+n <= sys->rex_heap_shadow_.size()) {
-            uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
-            for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
+        if (off+n > sys->rex_heap_shadow_.size()) return;
+
+        // Literal pool: um load PC-relative busca uma CONSTANTE EMBUTIDA no .text,
+        // nao um dado do heap. Em silicio nao ha Split I/D e essa leitura enxerga o
+        // codigo; servir o shadow aqui e' um artefato do nosso modelo.
+        //
+        // Medido no boot: o heap kmem do OKL4 e' (f0000000, f0200000) -- cobre o
+        // .text do proprio kernel -- e os lacos f0002ca4/f000afcc zeram
+        // f0000008..f00060b8, apagando no shadow o literal de add_mapping em
+        // 0xf0002b78 (0x61 -> 0). Resultado: `ldr ip,[pc,#0xb0]` lia 0, o teste
+        // `cmp lr,ip` + `bhs` saia com r0=0 e o kernel abortava em
+        // "Assertion r != 0 failed in file pistachio/arch/arm/src/init.cc".
+        {
+            u32 pc = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            if (rex_in_heap(pc)) {
+                u32 poff = pc - REX_HEAP_VA_BASE, insn = 0;
+                if (poff + 4 <= sys->rex_heap_pristine_.size()) {
+                    memcpy(&insn, &sys->rex_heap_pristine_[poff], 4);
+                    const bool is_ldr_imm = ((insn & 0x0e000000u) == 0x04000000u);
+                    const bool rn_is_pc   = (((insn >> 16) & 0xfu) == 15u);
+                    const bool is_load    = ((insn >> 20) & 1u) != 0;
+                    if (is_ldr_imm && rn_is_pc && is_load) {
+                        // le o .text pristino; NAO suja a word (nada a restaurar)
+                        uc_mem_write(uc, a, &sys->rex_heap_pristine_[off], n);
+                        return;
+                    }
+                }
+            }
         }
+
+        uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
+        for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
     }
 
     static void c1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
