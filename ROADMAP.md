@@ -433,6 +433,59 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     é prova de correção — pode significar executar lixo por mais tempo. O que sustenta progresso
     aqui é a divergência ter recuado, não o contador ter subido.
 
+- [x] **Varredura AMPLIADA de lacunas do Dynarmic + fontes do tripleoxygen/OpenZeebo (2026-09-10)**:
+    Revarredura completa, indo além do `InterpretThisInstruction`:
+
+    - **Fallback real** (a lacuna que nos afeta): continuam sendo **exatamente 6** em A32
+      (`arm_LDM_usr` x2, `arm_LDM_eret`, `arm_STM_usr`, `arm_CPS`, `arm_RFE`, `arm_SRS`)
+      e **zero** em Thumb. Nada novo apareceu.
+    - **`UndefinedInstruction` NÃO é lacuna**: são ~centenas de sítios em ASIMD/NEON, mas
+      representam *encodings inválidos* — recusar é o comportamento correto. Não confundir
+      os dois ao contar "o que falta".
+    - **Tabela de decodificação A32**: 261 entradas. Checadas as instruções ARMv6/ARM11
+      sensíveis — `MCRR`, `MRRC`, `LDREX`, `STREX`, `SWP`, `SWPB`, `SETEND`, `SEV`, `WFI`,
+      `WFE`, `CLREX`, `BKPT`, `MRS`, `LDC`, `STC`, `CDP`, `MCR`, `MRC` estão **todas presentes**.
+      `MSR`/`PLD` existem com sufixo (`arm_MSR_imm`/`arm_MSR_reg`, `arm_PLD_imm`/`arm_PLD_reg`) —
+      um grep ingênuo pelo nome puro dá falso negativo. Ausentes de fato: apenas `DBG` e `SMC`,
+      **irrelevantes** aqui (depuração e TrustZone).
+    - **Contagem no boot real** (400k instruções, interpretado): `CPS` 18x, `LDM_usr` 1x,
+      `RFE` 1x; `STM_usr`, `SRS`, `SETEND`, `SWP/SWPB`, `LDREX/STREX`, `WFI/WFE/SEV`, `PLD`
+      e `BKPT` = **ZERO**. Nenhum acesso a coprocessador != CP15 (sem VFP/NEON no boot).
+    - **Conclusão**: após `559dcf9` não há lacuna de instrução conhecida pendente. A
+      divergência em `#181306` **não** é instrução não traduzida — é outra coisa.
+
+- [ ] **CP15 exercitado pelo boot vs. o que modelamos (levantado 2026-09-10)**:
+    Inventário dos `MCR p15` realmente executados no boot, por (CRn,CRm,opc1,opc2):
+
+        c1,c0   x3      c2,c0   x3      c3,c0   x1
+        c7,c5   x4      c7,c6   x1      c7,c10  x156     c7,c14  x3842
+        c8,c7   x6      c10,c0  x8      c13,c0  x3
+
+    O grosso (`c7` = cache/barreiras, `c8` = TLB) é manutenção e pode ser no-op sem dano.
+    **`c13,c0` merece atenção**: é o par FCSE PID (opc2=0) / **Context ID** (opc2=1) /
+    Thread-Process ID (opc2=2). O firmware escreve Context ID **1** em `#76234`, depois
+    Thread ID 0 e Context ID **2** em `#118306` — ou seja, **troca de contexto de processo**,
+    20 instruções antes do `LDM_usr` de `0xf000bcac`. Se o Context ID influencia tradução de
+    endereço (FCSE) e não o modelamos, a divergência posterior pode vir daí. **A verificar.**
+
+- [x] **Fontes do tripleoxygen/OpenZeebo já presentes em `docs/remote/openzeebo/` (2026-09-10)**:
+    Confirmado: o material do tripleoxygen (`github.com/tripleoxygen/openzeebo`, GPLv2) já
+    está no projeto. Achados de hardware que **não estão modelados** hoje:
+
+    - `asm/arm11_jtag.S` — o "ARM11 enabler": no hardware real, ligar o ARM11 exige
+      escrever em **`0xa9000254` = 0x57** (pull-up nos pinos MODE) e
+      **`0xa900026c` = 0b11** (modo ARM11-only). Base `0xa9000000` é o bloco GPIO.
+      Nenhum dos dois offsets é modelado no nosso MMIO.
+    - `tools/zloader/notes.txt` — mapa de **MPUs** não documentado no TRM:
+      `0xa0b00000` (NAND, enable em +0x0), `0xa0e00000` (Peripheral, +0x400),
+      `0xa8240000` e `0xa8250000` (+0x800). Mais setup de UART1/GPIO
+      (clock `0xa86000e0=0x30`, gpio45/46) — útil para saída de console real.
+    - Sequência de boot do ARM11 em ROM, com **`MCR p15,0,r0,c15,c2,4`** =
+      *Peripheral Port Memory Remap* (TRM p.3-164). O boot que traçamos **não** executa
+      `c15,c2` — provavelmente porque nosso ponto de entrada é posterior a essa ROM.
+    - **Licença**: OpenZeebo é **GPLv2**, mesma restrição do QEMU. Ler/entender endereços e
+      sequências (fatos de hardware) é livre; **copiar código** não.
+
 - [x] **Inventário do que o Dynarmic NÃO traduz — COMPLETO: exatamente 6 A32 (`a60d92b`)**:
   - O Dynarmic delega ao interpretador apenas **6 instruções A32**, todas de modo privilegiado —
     verificado em `third_party/dynarmic/.../translate/impl/`:
