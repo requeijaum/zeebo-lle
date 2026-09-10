@@ -147,3 +147,34 @@ súbita: `df -h /tmp`. Traços de lockstep são regeneráveis — apagar sem dó
 Atacar a assertion do TCB (`thread.cc:1273`) com o probe como **muleta declarada**,
 rodando o controle negativo que falta. Duas frentes convergem para lá: é onde o
 kernel para com o probe, e é onde o caminho de IPC (§1) passaria a existir.
+
+## QW50 — `allocate_tcb` localizada (2026-09-10, desassemblagem estática)
+
+Cadeia medida no firmware (`nand/1.1.2_AMSS.bin`, seg1 `va=f0000000 off=0x8000 filesz=0x1a324`):
+
+| endereço | o quê |
+|---|---|
+| `0xf000fbd0` | string `Assertion !"Failed to create root server TCB\n"` |
+| `0xf0016bec` | `beq 0xf0016d14` — o salto que dispara o panic |
+| `0xf0016bac-b0` | `mov r2,#0x4f0; add r2,#9` = **1273** ⇒ confirma `thread.cc:1273` |
+| `0xf0016b8c` | `bl 0xf0007008` = **`allocate_tcb`** |
+| `0xf0007008` | prólogo; `ldr r6,[pc]` → **`0xf001a52c`** (objeto alocador) |
+| `0xf0007014` | `bl 0xf00067e4` — o alocador de verdade |
+| `0xf0007038` | `ldr r2,[pc]` → **`0xf001a54c`** (2º símbolo) |
+
+**A implementação real NÃO é a free-list do corpus.** `allocate_tcb` não lê
+`free_tcb_idx`/`num_tcbs`/`tcb_array` de `data.cc`: ela carrega um objeto e chama
+um alocador. Isso **refuta** a hipótese do patch do elfweaver — aqueles símbolos
+são de outra variante de build.
+
+**Convergência que importa:** `0xf001a52c` e `0xf001a54c` estão **além do
+`filesz`** do seg1 (`0xf001a324`) ⇒ vivem em **BSS**. E `0xf001a52c` fica a
+**36 bytes** do `pool head 0xf001a508` que já rastreamos no alocador `f0002b7c`.
+
+⇒ Hipótese unificada: **não são dois bugs (alocador + TCB), é um só.** O mesmo
+alocador cuja semeadura o probe de `.rodata` destrava é o que serve o TCB do
+root server. Isso explica por que o probe leva o boot de 8,2M para 73,3M
+instruções e só então esbarra no TCB.
+
+Próximo passo: instrumentar `0xf00067e4` (entrada/saída) e o objeto
+`0xf001a52c` no momento da chamada, para ver por que devolve NULL.
