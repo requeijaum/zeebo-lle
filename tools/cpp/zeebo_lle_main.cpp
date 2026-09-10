@@ -2285,6 +2285,14 @@ private:
         // caem no vazio, add_mapping le a page table de volta como zero e
         // retorna false -> "Assertion r != 0 failed in init.cc".
         uc_mem_map(core1_.uc, 0xf4000000, 0x00100000, UC_PROT_ALL);
+        // High vectors do ARM926 (CP15 c1 bit V=1): a tabela de excecoes vive em
+        // 0xffff0000, nao em 0x0. Sem esta pagina o kernel OKL4 le lixo ao instalar
+        // os handlers e a emulacao morre logo apos "Initialising scheduler...".
+        uc_mem_map(core1_.uc, 0xffff0000, 0x00010000, UC_PROT_ALL);
+        // MMIO alto que o kernel toca ao instalar handlers/timer (medido via
+        // hook de acesso invalido): 0xf9000000 e 0xff000000.
+        uc_mem_map(core1_.uc, 0xf9000000, 0x00100000, UC_PROT_ALL);
+        uc_mem_map(core1_.uc, 0xff000000, 0x00100000, UC_PROT_ALL);
         uc_mem_map(core1_.uc, 0xb0000000, 0x01000000, UC_PROT_ALL); // AMSS user/task VA
 
         // Janela de RELOCAcao do REX (transicao 0xf0017740..0xf001774c).
@@ -2721,6 +2729,8 @@ private:
         // Core 1 hooks
         uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
+
+
 
         // Console do kernel OKL4 (Core1). O putchar do kernel (0xf000e6e0) grava
         // byte a byte num ring buffer em 0xf001da68 com indice em 0xf001da64
@@ -3813,10 +3823,16 @@ private:
                 u32 poff = pc - REX_HEAP_VA_BASE, insn = 0;
                 if (poff + 4 <= sys->rex_heap_pristine_.size()) {
                     memcpy(&insn, &sys->rex_heap_pristine_[poff], 4);
-                    const bool is_ldr_imm = ((insn & 0x0e000000u) == 0x04000000u);
+                    // Aceita as DUAS formas de load PC-relative:
+                    //   0x04000000 = offset imediato   -> ldr ip,[pc,#0xb0]   (literal pool)
+                    //   0x06000000 = offset registrador -> ldr pc,[pc,r12,lsl#2] (jump table)
+                    // O filtro antigo so via a imediata, entao a jump table do kernel em
+                    // f0004f74 era servida do shadow zerado e o PC ia para 0.
+                    const u32  classe     = insn & 0x0e000000u;
+                    const bool is_ldr     = (classe == 0x04000000u) || (classe == 0x06000000u);
                     const bool rn_is_pc   = (((insn >> 16) & 0xfu) == 15u);
                     const bool is_load    = ((insn >> 20) & 1u) != 0;
-                    if (is_ldr_imm && rn_is_pc && is_load) {
+                    if (is_ldr && rn_is_pc && is_load) {
                         // le o .text pristino; NAO suja a word (nada a restaurar)
                         uc_mem_write(uc, a, &sys->rex_heap_pristine_[off], n);
                         return;

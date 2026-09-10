@@ -60,6 +60,12 @@ test_uc_cpu_model_order: test_uc_cpu_model_order.cpp
 test_rex_literal_pool: test_rex_literal_pool.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_rex_literal_pool.cpp -lunicorn
 
+test_pc_rel_reg_offset: test_pc_rel_reg_offset.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_pc_rel_reg_offset.cpp
+
+test_jt_pc_load_hook: test_jt_pc_load_hook.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_jt_pc_load_hook.cpp -lunicorn
+
 test_jit_cp15_reset: test_jit_cp15_reset.cpp zeebo_dynarmic_core.cpp zeebo_dynarmic_core.h
 	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ test_jit_cp15_reset.cpp zeebo_dynarmic_core.cpp $(DYNARMIC_LIBS) -lunicorn
 
