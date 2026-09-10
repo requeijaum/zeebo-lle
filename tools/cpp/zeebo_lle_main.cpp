@@ -48,6 +48,7 @@
 #include "zeebo_brew_loader.h"
 #include "zeebo_efs2_fs.h"
 #include "zeebo_cli_paths.h"
+#include "zeebo_dynarmic_core.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -367,9 +368,16 @@ private:
 };
 
 // ---- Core State & Orchestrator Context ----
+enum class CoreBackend {
+    Unicorn,
+    Dynarmic
+};
+
 struct CoreState {
     const char* name = nullptr;
     uc_engine* uc = nullptr;
+    CoreBackend backend = CoreBackend::Unicorn;
+    std::unique_ptr<zeebo::jit::DynarmicCore> jit;
     u32 entry = 0;
     u64 insns = 0;
     bool halted = false;
@@ -983,8 +991,10 @@ public:
     void set_efs2_nand_path(const std::string& p) { efs2_nand_path_ = p; }
     void set_boot_target(int firstapp) { boot_firstapp_ = firstapp; }
     int boot_target() const { return boot_firstapp_; }
+    void set_jit_solo(bool solo) { jit_solo_ = solo; }
+    bool jit_solo() const { return jit_solo_; }
 
-    bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true) {
+    bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true, bool use_dynarmic = false) {
         printf("===================================================================\n");
         printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
         printf("===================================================================\n");
@@ -1071,6 +1081,73 @@ public:
 
         // 7. Register Hardware Hooks & Inter-core routing
         setup_hooks();
+
+        if (use_dynarmic) {
+            printf("[System] Initializing Core 0 Dynarmic ARM11 JIT backend...\n");
+            zeebo::jit::MemoryBridge bridge;
+            bridge.user_data = this;
+            bridge.read8 = [](void* ud, uint32_t addr) -> uint8_t {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                uint8_t b = 0;
+                if (s->vtlb_.read(addr, &b, 1)) return b;
+                if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &b, 1);
+                return b;
+            };
+            bridge.read16 = [](void* ud, uint32_t addr) -> uint16_t {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                uint16_t val = 0;
+                if (s->vtlb_.read(addr, &val, 2)) return val;
+                if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 2);
+                return val;
+            };
+            bridge.read32 = [](void* ud, uint32_t addr) -> uint32_t {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                uint32_t val = 0;
+                if (s->vtlb_.read_u32(addr, &val)) return val;
+                if (s->core0_.uc) uc_mem_read(s->core0_.uc, addr, &val, 4);
+                return val;
+            };
+            bridge.write8 = [](void* ud, uint32_t addr, uint8_t val) {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                s->vtlb_.write(addr, &val, 1);
+                if (s->core0_.uc) uc_mem_write(s->core0_.uc, addr, &val, 1);
+            };
+            bridge.write16 = [](void* ud, uint32_t addr, uint16_t val) {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                s->vtlb_.write(addr, &val, 2);
+                if (s->core0_.uc) uc_mem_write(s->core0_.uc, addr, &val, 2);
+            };
+            bridge.write32 = [](void* ud, uint32_t addr, uint32_t val) {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                s->vtlb_.write_u32(addr, val);
+                if (s->core0_.uc) uc_mem_write(s->core0_.uc, addr, &val, 4);
+            };
+            bridge.is_peripheral = [](void* /*ud*/, uint32_t addr) -> bool {
+                return is_core0_peripheral(addr);
+            };
+            bridge.read_peripheral = [](void* ud, uint32_t addr, int size) -> uint32_t {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                return s->handle_peripheral_read(addr, size);
+            };
+            bridge.write_peripheral = [](void* ud, uint32_t addr, int size, uint32_t val) {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                s->handle_peripheral_write(addr, size, val);
+            };
+            bridge.on_code = [](void* ud, uint32_t pc) {
+                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
+                c0_code_hook(s->core0_.uc, pc, 4, s);
+            };
+
+            core0_.jit = std::make_unique<zeebo::jit::DynarmicCore>(bridge);
+            core0_.jit->on_svc = [this](uint32_t /*swi*/) {
+                // Sincroniza estado para que c0_intr_hook inspecione e trate registradores
+                core0_.jit->sync_to_unicorn(core0_.uc);
+                c0_intr_hook(core0_.uc, 2, this);
+                core0_.jit->sync_from_unicorn(core0_.uc);
+            };
+            core0_.backend = CoreBackend::Dynarmic;
+            printf("[System] Core 0 switched to Dynarmic ARM11 JIT backend.\n");
+        }
 
         printf("[System] Initialization complete. Both cores ready.\n");
         return true;
@@ -1213,18 +1290,32 @@ public:
             }
 
             // Step Core 0 (ARM11)
-            // QW41: uc_reg_read(PC) nunca retorna o LSB setado (Unicorn reporta
-            // o endereço já alinhado), então reconstituir o T-bit a partir do
-            // CPSR real antes de retomar a fatia seguinte — senão toda
-            // uc_emu_start após a primeira reinicia sempre em modo ARM,
-            // mesmo que a execução estivesse correndo em Thumb.
-            u32 cpsr0 = 0;
-            uc_reg_read(core0_.uc, UC_ARM_REG_CPSR, &cpsr0);
-            u32 start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u);
-            uc_err e0 = uc_emu_start(core0_.uc, start_addr0, 0, 0, slice_insns);
-            uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
-            if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
-                printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\n", c, (int)e0, uc_strerror(e0), core0_.entry);
+            uc_err e0 = UC_ERR_OK;
+            if (core0_.backend == CoreBackend::Dynarmic && core0_.jit) {
+                // Sincroniza estado inicial do Unicorn para o Dynarmic no ciclo 0
+                if (c == 0) {
+                    core0_.jit->sync_from_unicorn(core0_.uc);
+                    core0_.jit->set_pc(core0_.entry);
+                }
+                uint64_t ticks_run = core0_.jit->run(slice_insns);
+                (void)ticks_run;
+                core0_.entry = core0_.jit->pc();
+                // Sincroniza de volta para garantir que hooks/inspeções vejam os registradores atualizados
+                core0_.jit->sync_to_unicorn(core0_.uc);
+            } else {
+                // QW41: uc_reg_read(PC) nunca retorna o LSB setado (Unicorn reporta
+                // o endereço já alinhado), então reconstituir o T-bit a partir do
+                // CPSR real antes de retomar a fatia seguinte — senão toda
+                // uc_emu_start após a primeira reinicia sempre em modo ARM,
+                // mesmo que a execução estivesse correndo em Thumb.
+                u32 cpsr0 = 0;
+                uc_reg_read(core0_.uc, UC_ARM_REG_CPSR, &cpsr0);
+                u32 start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u);
+                e0 = uc_emu_start(core0_.uc, start_addr0, 0, 0, slice_insns);
+                uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
+                    printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\\n", c, (int)e0, uc_strerror(e0), core0_.entry);
+                }
             }
 
             // Step Core 1 (ARM9) — pula se o slide-detector ja abortou o Core1
@@ -2879,67 +2970,100 @@ private:
         return true;
     }
 
-    static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int /*size*/, int64_t value, void* ud) {
-        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+    static bool is_core0_peripheral(uint32_t addr) {
+        if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) return true; // Doorbell
+        if (addr == SMEM_BASE + 0x00 || addr == SMEM_BASE + 0x04) return true;          // ProcComm
+        if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) return true;     // MDDI
+        if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) return true; // Adreno
+        if ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
+            (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
+            (addr >= UART3_BASE && addr < UART3_BASE + UART_SIZE)) return true;         // UARTs
+        if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE) return true;       // Keypad
+        return false;
+    }
+
+    void handle_peripheral_write(uint32_t addr, int /*size*/, uint32_t value) {
         // Inter-core doorbell A2M
-        if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440 && type == UC_MEM_WRITE) {
+        if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) {
             u32 int_num = (addr - (MSM_CSR_BASE + 0x400)) / 4;
-            printf("[Doorbell A2M] Core 0 -> Core 1 INT #%u (val=0x%llx)\n", int_num, (unsigned long long)value);
-            if (sys->core1_state_ && sys->core1_state_->uc) {
+            printf("[Doorbell A2M] Core 0 -> Core 1 INT #%u (val=0x%x)\n", int_num, value);
+            if (core1_state_ && core1_state_->uc) {
                 u32 vic_status0 = 0;
-                uc_mem_read(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
+                uc_mem_read(core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
                 vic_status0 |= (1 << int_num);
-                uc_mem_write(sys->core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
+                uc_mem_write(core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
 
                 // Inject RPC packets on doorbell trigger using official IDs AUDMGR (0x30000013) / ADSPRTOSATOM (0x3000000a)
-                if (sys->smd_) {
+                if (smd_) {
                     std::vector<u8> dummy_payload(16, 0x42);
-                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x30000013, 0x1b59, dummy_payload);
-                    sys->smd_->inject_packet(sys->core1_state_->uc, 0x3000000a, 0x02, dummy_payload);
+                    smd_->inject_packet(core1_state_->uc, 0x30000013, 0x1b59, dummy_payload);
+                    smd_->inject_packet(core1_state_->uc, 0x3000000a, 0x02, dummy_payload);
                 }
             }
         }
         // ProcComm command write by Core 0
-        else if (addr == SMEM_BASE + 0x00 && type == UC_MEM_WRITE) { // APP_COMMAND
-            u32 cmd = (u32)value;
+        else if (addr == SMEM_BASE + 0x00) { // APP_COMMAND
+            u32 cmd = value;
             printf("[ProcComm] Core 0 issued command 0x%x\n", cmd);
             u32 status_success = 3; // PCOM_CMD_SUCCESS
-            uc_mem_write(uc, SMEM_BASE + 0x04, &status_success, 4); // APP_STATUS
-            u32 cmd_done = 1; // PCOM_CMD_DONE
-            uc_mem_write(uc, SMEM_BASE + 0x00, &cmd_done, 4);
+            if (core0_.uc) {
+                uc_mem_write(core0_.uc, SMEM_BASE + 0x04, &status_success, 4); // APP_STATUS
+                u32 cmd_done = 1; // PCOM_CMD_DONE
+                uc_mem_write(core0_.uc, SMEM_BASE + 0x00, &cmd_done, 4);
+            }
+            vtlb_.write_u32(SMEM_BASE + 0x04, status_success);
+            u32 cmd_done = 1;
+            vtlb_.write_u32(SMEM_BASE + 0x00, cmd_done);
         }
         // MDDI write
         else if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) {
-            sys->mddi_->write((u32)(addr - MSM_MDDI_BASE), (u32)value);
+            mddi_->write((u32)(addr - MSM_MDDI_BASE), value);
         }
         // Adreno GPU write
         else if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) {
-            sys->gpu_->write((u32)(addr - ADRENO130_BASE), (u32)value);
+            gpu_->write((u32)(addr - ADRENO130_BASE), value);
         }
-        // UART TX FIFO write -> console: a UART1 é o console serial do boot/linux
-        // (0xA9A00000; UART2/3 também expostas). Toda escrita no registrador de
-        // dados (UART_TF, offset 0x0C) é um caractere TX. Acumulamos e imprimimos
-        // como console em stderr (linha terminal, com escape) para ler as mensagens
-        // de boot. Não afeta o estado da emulação — é um sink de diagnóstico.
+        // UART TX FIFO write -> console
         else if ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
                  (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
                  (addr >= UART3_BASE && addr < UART3_BASE + UART_SIZE)) {
-            const u32 off = (u32)(addr - (addr & ~(UART_SIZE - 1)));
-            (void)off;
-            if (type == UC_MEM_WRITE) {
-                const unsigned char ch = (unsigned char)(value & 0xFF);
-                static u32 line_bytes = 0;
-                if (ch == '\n') { fprintf(stderr, "\n"); line_bytes = 0; }
-                else if (ch == '\r') { /* swallow CR */ }
-                else if (ch >= 0x20 || ch == '\t') {
-                    fputc(ch, stderr);
-                    if (++line_bytes >= 200) { fprintf(stderr, "\n"); line_bytes = 0; }
-                }
+            const unsigned char ch = (unsigned char)(value & 0xFF);
+            static u32 line_bytes = 0;
+            if (ch == '\n') { fprintf(stderr, "\n"); line_bytes = 0; }
+            else if (ch == '\r') { /* swallow CR */ }
+            else if (ch >= 0x20 || ch == '\t') {
+                fputc(ch, stderr);
+                if (++line_bytes >= 200) { fprintf(stderr, "\n"); line_bytes = 0; }
             }
         }
         // Keypad write
         else if (addr >= KEYPAD_BASE && addr < KEYPAD_BASE + KEYPAD_SIZE) {
-            sys->input_->write((u32)(addr - KEYPAD_BASE), (u32)value);
+            input_->write((u32)(addr - KEYPAD_BASE), value);
+        }
+    }
+
+    uint32_t handle_peripheral_read(uint32_t addr, int size) {
+        if (size != 4 && size != 2 && size != 1) return 0;
+        const bool is_uart = (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
+        if (is_uart) {
+            const u32 base = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? UART1_BASE
+                           : (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ? UART2_BASE
+                           : UART3_BASE;
+            const u32 off = (u32)(addr - base);
+            if (off == UART_OFF_SR) {
+                return 0x000C; // TX_READY | TX_EMPTY
+            }
+        }
+        u32 val = 0;
+        vtlb_.read_u32(addr, &val);
+        return val;
+    }
+
+    static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+        (void)uc;
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        if (type == UC_MEM_WRITE) {
+            sys->handle_peripheral_write((uint32_t)addr, size, (uint32_t)value);
         }
     }
 
@@ -2950,6 +3074,7 @@ private:
     // espera de FIFO; outros offsets mantêm a RAM (modelo neutro).
     static void c0_mem_read_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t, void* ud) {
         (void)ud; (void)type;
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         if (size != 4 && size != 2 && size != 1) return;
         const bool is_uart =
             (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
@@ -2959,9 +3084,7 @@ private:
                        : UART3_BASE;
         const u32 off = (u32)(addr - base);
         if (off == UART_OFF_SR) {
-            // UART_SR: TX_READY(bit2) e TX_EMPTY(bit3) setados = transmissor ocioso,
-            // pronto para o guest escrever o próximo byte sem travar em poll.
-            const u32 ready = 0x000C;
+            const u32 ready = sys->handle_peripheral_read((u32)addr, size);
             uc_mem_write(uc, addr, &ready, (size_t)size);
         }
     }
@@ -3252,6 +3375,7 @@ private:
     std::unique_ptr<efs2::Efs2Filesystem> efs2_;
     std::string efs2_nand_path_ = "../../nand/1.1.2.bin";
     int boot_firstapp_ = 0;
+    bool jit_solo_ = false;
     bool efs2_ready_ = false;
     // Passo 5: encaminhamento contínuo de EVT_KEY_* do Z-Pad/SDL2 ao HandleEvent.
     u32  brew_handler_va_ = 0;
@@ -3343,6 +3467,8 @@ int main(int argc, char** argv) {
     bool show_fps = false;
     int control_port = 0;
     bool strict_unmapped = false;
+    bool use_jit = false;
+    bool jit_solo = false;
     int cycles = 250;
     int slice_insns = 10000;
     double max_seconds = 0.0;
@@ -3401,6 +3527,11 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--strict-unmapped") {
             strict_unmapped = true;
+        } else if (arg == "--jit") {
+            use_jit = true;
+        } else if (arg == "--jit-solo") {
+            use_jit = true;
+            jit_solo = true;
         } else if (arg[0] != '-') {
             positional_firmware_args.push_back(argv[i]);
         }
@@ -3438,13 +3569,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!sys.init(nand_path, apps_path, amss_path, headless)) {
+    if (!sys.init(nand_path, apps_path, amss_path, headless, use_jit)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
     }
     // Aponta o parser EFS2 para a mesma cópia de trabalho da NAND usada no boot.
     sys.set_efs2_nand_path(nand_path);
     sys.set_boot_target(boot_firstapp);
+    sys.set_jit_solo(jit_solo);
 
     // QW14: opt-in strict-unmapped. Off by default => boot unchanged.
     if (strict_unmapped) {

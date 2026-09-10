@@ -245,6 +245,10 @@ public:
     bool read_u32(u64 va, u32* out) const  { return read(va, out, 4); }
     bool write_u32(u64 va, u32 v)          { return write(va, &v, 4); }
 
+    // Exposição da tabela crua para integrações fastmem/JIT (como dynarmic)
+    u8** raw_lut_data() { return lut_.data(); }
+    const u8* const* raw_lut_data() const { return lut_.data(); }
+
 private:
     std::vector<u8*> lut_;
 };

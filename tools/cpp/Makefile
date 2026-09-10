@@ -2,14 +2,23 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++23 -O2 -Wall -Wextra
 LIBS := -lunicorn -lcapstone
+
+DYNARMIC_BASE ?= /home/rafaelfrequiao/projects/zeebo-dynarmic-bringup
+DYNARMIC_INCS := -I$(DYNARMIC_BASE)/third_party/dynarmic/src -I$(DYNARMIC_BASE)/third_party/dynarmic/externals/mcl/include -I$(DYNARMIC_BASE)/third_party/dynarmic/externals/fmt/include -I$(DYNARMIC_BASE)/third_party/dynarmic/externals/zydis/include -I$(DYNARMIC_BASE)/build/third_party/dynarmic/externals/zydis
+DYNARMIC_LIBS := $(DYNARMIC_BASE)/build/third_party/dynarmic/src/dynarmic/libdynarmic.a \
+                 $(DYNARMIC_BASE)/build/third_party/dynarmic/externals/mcl/src/libmcl.a \
+                 $(DYNARMIC_BASE)/build/third_party/dynarmic/externals/zydis/libZydis.a \
+                 $(DYNARMIC_BASE)/build/third_party/dynarmic/externals/zydis/zycore/libZycore.a \
+                 $(DYNARMIC_BASE)/build/third_party/dynarmic/externals/fmt/libfmt.a
+
 CPP_HEADERS := $(wildcard *.h gpu/*.h qdsp5/*.h)
 
 all: zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe test_save_state test_audio_sink zeebo_bootinfo_harness
 
 # Depend on every directly included subsystem header. The previous short list
 # left zeebo_lle_main stale after edits to MMU/control/audio/device headers.
-zeebo_lle_main: zeebo_lle_main.cpp $(CPP_HEADERS) qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
-	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_main.cpp qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp -lunicorn $(shell pkg-config --cflags --libs sdl2)
+zeebo_lle_main: zeebo_lle_main.cpp zeebo_dynarmic_core.cpp $(CPP_HEADERS) qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp
+	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ zeebo_lle_main.cpp zeebo_dynarmic_core.cpp qdsp5/qdsp5_dispatcher.cpp qdsp5/audpp_engine.cpp qdsp5/stub_engines.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp gpu/igl_hook.cpp $(DYNARMIC_LIBS) -lunicorn $(shell pkg-config --cflags --libs sdl2)
 
 zeebo_lle_mod_probe: zeebo_lle_mod_probe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_lle_mod_probe.cpp -lunicorn

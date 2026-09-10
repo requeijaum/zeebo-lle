@@ -1,0 +1,357 @@
+// zeebo_dynarmic_core.cpp — dynarmic A32 backend implementation
+#include "zeebo_dynarmic_core.h"
+
+#include <dynarmic/interface/A32/a32.h>
+#include <dynarmic/interface/A32/config.h>
+#include <dynarmic/interface/A32/coprocessor.h>
+
+#include <unicorn/unicorn.h>
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+
+namespace zeebo::jit {
+
+class ZeeboCoprocessor final : public Dynarmic::A32::Coprocessor {
+public:
+    using Coprocessor = Dynarmic::A32::Coprocessor;
+    using CoprocReg = Dynarmic::A32::CoprocReg;
+
+    explicit ZeeboCoprocessor(Cp15Ids ids) : ids_(ids) {
+        scratch_ = 0;
+        scratch2_ = 0;
+        midr_val_ = ids.midr;
+        ctr_val_  = ids.ctr;
+    }
+
+    static std::uint64_t NopFn(void*, std::uint32_t, std::uint32_t) { return 0; }
+
+    std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg,
+                                                     CoprocReg, CoprocReg, unsigned) override {
+        return Callback{&NopFn, std::nullopt};
+    }
+
+    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, CoprocReg,
+                                               CoprocReg, unsigned) override {
+        return Callback{&NopFn, std::nullopt};
+    }
+
+    CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, CoprocReg) override {
+        return Callback{&NopFn, std::nullopt};
+    }
+
+    CallbackOrAccessOneWord CompileGetOneWord(bool /*two*/, unsigned opc1, CoprocReg CRn,
+                                              CoprocReg CRm, unsigned opc2) override {
+        // MRC p15, 0, Rd, c0, c0, 0 => Main ID Register (MIDR)
+        if (opc1 == 0 && (unsigned)CRn == 0 && (unsigned)CRm == 0 && opc2 == 0) {
+            return &midr_val_;
+        }
+        // MRC p15, 0, Rd, c0, c0, 1 => Cache Type Register (CTR)
+        if (opc1 == 0 && (unsigned)CRn == 0 && (unsigned)CRm == 0 && opc2 == 1) {
+            return &ctr_val_;
+        }
+        scratch_ = 0;
+        return &scratch_;
+    }
+
+    CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, CoprocReg) override {
+        scratch_ = 0;
+        scratch2_ = 0;
+        return std::array<std::uint32_t*, 2>{&scratch_, &scratch2_};
+    }
+
+    std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg,
+                                             std::optional<std::uint8_t>) override {
+        return Callback{&NopFn, std::nullopt};
+    }
+
+    std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg,
+                                              std::optional<std::uint8_t>) override {
+        return Callback{&NopFn, std::nullopt};
+    }
+
+private:
+    Cp15Ids ids_;
+    std::uint32_t midr_val_ = 0;
+    std::uint32_t ctr_val_  = 0;
+    std::uint32_t scratch_  = 0;
+    std::uint32_t scratch2_ = 0;
+};
+
+struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
+    MemoryBridge bridge;
+    Cp15Ids cp15;
+    Dynarmic::A32::UserConfig config;
+    std::unique_ptr<Dynarmic::A32::Jit> jit;
+
+    uint64_t ticks_left = 0;
+    uint64_t ticks_consumed_total = 0;
+    bool svc_hit_this_block = false;
+
+    Impl(MemoryBridge b, Cp15Ids ids) : bridge(b), cp15(ids) {
+        config.callbacks = this;
+        config.arch_version = Dynarmic::A32::ArchVersion::v6K;
+
+        auto cp15_coproc = std::make_shared<ZeeboCoprocessor>(ids);
+        config.coprocessors[15] = cp15_coproc;
+
+        auto nop_other = std::make_shared<ZeeboCoprocessor>(ids);
+        for (size_t i = 0; i < 15; i++) {
+            config.coprocessors[i] = nop_other;
+        }
+
+        jit = std::make_unique<Dynarmic::A32::Jit>(config);
+    }
+
+    std::optional<std::uint32_t> MemoryReadCode(std::uint32_t addr) override {
+        if (bridge.on_code) {
+            bridge.on_code(bridge.user_data, addr);
+        }
+        return MemoryRead32(addr);
+    }
+
+    std::uint8_t MemoryRead8(std::uint32_t addr) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            return (std::uint8_t)bridge.read_peripheral(bridge.user_data, addr, 1);
+        }
+        if (bridge.read8) {
+            return bridge.read8(bridge.user_data, addr);
+        }
+        return 0;
+    }
+
+    std::uint16_t MemoryRead16(std::uint32_t addr) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            return (std::uint16_t)bridge.read_peripheral(bridge.user_data, addr, 2);
+        }
+        if (bridge.read16) {
+            return bridge.read16(bridge.user_data, addr);
+        }
+        return (std::uint16_t)MemoryRead8(addr) | ((std::uint16_t)MemoryRead8(addr + 1) << 8);
+    }
+
+    std::uint32_t MemoryRead32(std::uint32_t addr) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            return bridge.read_peripheral(bridge.user_data, addr, 4);
+        }
+        if (bridge.read32) {
+            return bridge.read32(bridge.user_data, addr);
+        }
+        return (std::uint32_t)MemoryRead16(addr) | ((std::uint32_t)MemoryRead16(addr + 2) << 16);
+    }
+
+    std::uint64_t MemoryRead64(std::uint32_t addr) override {
+        return (std::uint64_t)MemoryRead32(addr) | ((std::uint64_t)MemoryRead32(addr + 4) << 32);
+    }
+
+    void MemoryWrite8(std::uint32_t addr, std::uint8_t val) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            bridge.write_peripheral(bridge.user_data, addr, 1, val);
+            return;
+        }
+        if (bridge.write8) {
+            bridge.write8(bridge.user_data, addr, val);
+        }
+    }
+
+    void MemoryWrite16(std::uint32_t addr, std::uint16_t val) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            bridge.write_peripheral(bridge.user_data, addr, 2, val);
+            return;
+        }
+        if (bridge.write16) {
+            bridge.write16(bridge.user_data, addr, val);
+            return;
+        }
+        MemoryWrite8(addr, (std::uint8_t)val);
+        MemoryWrite8(addr + 1, (std::uint8_t)(val >> 8));
+    }
+
+    void MemoryWrite32(std::uint32_t addr, std::uint32_t val) override {
+        if (bridge.is_peripheral && bridge.is_peripheral(bridge.user_data, addr)) {
+            bridge.write_peripheral(bridge.user_data, addr, 4, val);
+            return;
+        }
+        if (bridge.write32) {
+            bridge.write32(bridge.user_data, addr, val);
+            return;
+        }
+        MemoryWrite16(addr, (std::uint16_t)val);
+        MemoryWrite16(addr + 2, (std::uint16_t)(val >> 16));
+    }
+
+    void MemoryWrite64(std::uint32_t addr, std::uint64_t val) override {
+        MemoryWrite32(addr, (std::uint32_t)val);
+        MemoryWrite32(addr + 4, (std::uint32_t)(val >> 32));
+    }
+
+    uint32_t last_swi_num = 0;
+    void CallSVC(std::uint32_t swi) override {
+        svc_hit_this_block = true;
+        last_swi_num = swi;
+        // Pára o quantum no SVC para tratar de forma síncrona
+        ticks_left = 0;
+    }
+
+    void ExceptionRaised(std::uint32_t /*pc*/, Dynarmic::A32::Exception /*exc*/) override {
+        ticks_left = 0;
+    }
+
+    void InterpreterFallback(std::uint32_t /*pc*/, std::size_t /*num_instructions*/) override {
+        // Fallback no-op
+    }
+
+    void AddTicks(std::uint64_t ticks) override {
+        ticks_consumed_total += ticks;
+        ticks_left = (ticks > ticks_left) ? 0 : (ticks_left - ticks);
+    }
+
+    std::uint64_t GetTicksRemaining() override {
+        return ticks_left;
+    }
+};
+
+DynarmicCore::DynarmicCore(MemoryBridge bridge, Cp15Ids cp15)
+    : impl_(std::make_unique<Impl>(bridge, cp15)) {}
+
+DynarmicCore::~DynarmicCore() = default;
+
+void DynarmicCore::set_regs_zero() {
+    impl_->jit->Regs().fill(0);
+}
+
+void DynarmicCore::set_cpsr(uint32_t cpsr) {
+    impl_->jit->SetCpsr(cpsr);
+}
+
+void DynarmicCore::set_pc(uint32_t pc) {
+    impl_->jit->Regs()[15] = pc;
+}
+
+void DynarmicCore::set_sp(uint32_t sp) {
+    impl_->jit->Regs()[13] = sp;
+}
+
+void DynarmicCore::set_lr(uint32_t lr) {
+    impl_->jit->Regs()[14] = lr;
+}
+
+uint32_t DynarmicCore::pc() const {
+    return impl_->jit->Regs()[15];
+}
+
+uint32_t DynarmicCore::cpsr() const {
+    return impl_->jit->Cpsr();
+}
+
+uint32_t DynarmicCore::sp() const {
+    return impl_->jit->Regs()[13];
+}
+
+uint32_t DynarmicCore::lr() const {
+    return impl_->jit->Regs()[14];
+}
+
+uint32_t DynarmicCore::reg(unsigned i) const {
+    if (i < 16) return impl_->jit->Regs()[i];
+    return 0;
+}
+
+void DynarmicCore::set_reg(unsigned i, uint32_t val) {
+    if (i < 16) impl_->jit->Regs()[i] = val;
+}
+
+void DynarmicCore::sync_to_unicorn(void* uc_engine_ptr) const {
+    if (!uc_engine_ptr) return;
+    uc_engine* uc = static_cast<uc_engine*>(uc_engine_ptr);
+    static const int reg_ids[16] = {
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+        UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
+        UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC
+    };
+    for (int i = 0; i < 16; ++i) {
+        uint32_t val = impl_->jit->Regs()[i];
+        uc_reg_write(uc, reg_ids[i], &val);
+    }
+    uint32_t cpsr_val = impl_->jit->Cpsr();
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr_val);
+}
+
+void DynarmicCore::sync_from_unicorn(void* uc_engine_ptr) {
+    if (!uc_engine_ptr) return;
+    uc_engine* uc = static_cast<uc_engine*>(uc_engine_ptr);
+    static const int reg_ids[16] = {
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+        UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
+        UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC
+    };
+    for (int i = 0; i < 16; ++i) {
+        uint32_t val = 0;
+        uc_reg_read(uc, reg_ids[i], &val);
+        impl_->jit->Regs()[i] = val;
+    }
+    uint32_t cpsr_val = 0;
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr_val);
+    impl_->jit->SetCpsr(cpsr_val);
+}
+
+void DynarmicCore::enable_page_table(std::array<std::uint8_t*, 1 << (32 - 12)>* pt) {
+    impl_->config.page_table = pt;
+    impl_->jit = std::make_unique<Dynarmic::A32::Jit>(impl_->config);
+}
+
+void DynarmicCore::invalidate_cache(uint32_t addr, size_t size) {
+    impl_->jit->InvalidateCacheRange(addr, size);
+}
+
+void DynarmicCore::clear_cache() {
+    impl_->jit->ClearCache();
+}
+
+uint64_t DynarmicCore::total_ticks() const {
+    return impl_->ticks_consumed_total;
+}
+
+void DynarmicCore::halt_execution() {
+    impl_->jit->HaltExecution();
+}
+
+bool DynarmicCore::step_one_insn() {
+    impl_->svc_hit_this_block = false;
+    impl_->ticks_left = 1;
+    impl_->jit->Step();
+    if (impl_->svc_hit_this_block) {
+        if (on_svc) {
+            on_svc(impl_->last_swi_num);
+        }
+    }
+    return true;
+}
+
+uint64_t DynarmicCore::run(uint64_t max_insns) {
+    uint64_t start_ticks = impl_->ticks_consumed_total;
+    uint64_t target_ticks = start_ticks + max_insns;
+    uint64_t quantum = 64;
+
+    while (impl_->ticks_consumed_total < target_ticks) {
+        impl_->svc_hit_this_block = false;
+        uint64_t remaining = target_ticks - impl_->ticks_consumed_total;
+        impl_->ticks_left = std::min(quantum, remaining);
+
+        impl_->jit->Run();
+
+        if (impl_->svc_hit_this_block) {
+            // Se houve SVC, executa o dispatcher registrado passando o número real
+            if (on_svc) {
+                on_svc(impl_->last_swi_num);
+            }
+            break;
+        }
+    }
+
+    return impl_->ticks_consumed_total - start_ticks;
+}
+
+} // namespace zeebo::jit
