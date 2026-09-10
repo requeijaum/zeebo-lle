@@ -1469,7 +1469,81 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
-### QW67-QW69 — Core0: o bit T se perde no RETORNO do kernel para o Iguana  **[CAUSA RAIZ LOCALIZADA]**
+### QW70-QW72 — RETRATACAO: QW64-69 estavam ERRADOS (binario errado)  **[CORRECAO]**
+
+> ⚠ **As secoes QW64-QW66 e QW67-QW69 abaixo estao FACTUALMENTE ERRADAS.**
+> Toda a conclusao "Core0 executa Thumb em modo ARM" veio de eu desassemblar
+> **o binario errado**. Mantidas como registro do erro; **nao usar como referencia**.
+
+**O erro:** o Core0 (APPS/Iguana) e' carregado de `nand/1.1.2_APPS.bin`. Eu
+desassemblei `nand/1.1.2_AMSS.bin` — o binario do **Core1** — com um offset
+(`0x00af0000`) que nem corresponde a esse arquivo. Os bytes lidos eram de outro
+programa, em outro lugar. Como lixo raramente decodifica em ARM e quase sempre
+produz *algo* em Thumb, montei uma narrativa inteira em cima disso.
+
+**O que o arquivo CORRETO mostra** (`1.1.2_APPS.bin`, seg2 `va=0xb0000000 off=0x30000`):
+
+    b000c930  push {r4-r8, sb, sl, fp, lr}
+    b000c938  mvn  sp, #0xeb
+    b000c93c  svc  #0x1414          <- svc ARM genuino
+    b000c940  pop  {r4-r8, sb, sl, fp, pc}
+
+    b000c73c  cmp  r4, #0           <- NAO e' "blx r1"
+
+    b000afdc  tst   ip, #3          <- o "laco": memset ARM desenrolado
+    b000afe0  streq r3, [lr], #4
+    b000afe8  subeq ip, ip, #4
+    b000aff4  cmp   ip, #0
+    b000affc  bne   b000afdc
+
+**Cai por terra:**
+
+| Afirmacao publicada | Status |
+|---|---|
+| "Core0 executa Thumb em modo ARM" | **FALSO** — e' ARM executando ARM |
+| "`b000c73c` e' `blx r1` (Thumb)" | **FALSO** — e' `cmp r4,#0` |
+| "`mov r8,r8` = nop canonico Thumb" | eram bytes do AMSS lidos fora de lugar |
+| "CPSR restaurado sem bit T = causa raiz" | **FALSO** — T=0 esta' CORRETO |
+| "premissa do QW41/QW43 esta errada" | **FALSO** — a faixa `b0000000-b0020000` E' ARM |
+
+`T=0` em 4194304/4194304 amostras nunca foi bug: era o valor certo.
+Os fixes QW66 e QW71 foram inertes porque **nao havia nada para consertar**.
+
+> **O que me pegou:** o detector do QW71 leu `0xef00` em `pc-2` e respondeu
+> `thumb=0`. Eu tratei como "detector falhou" e fui verificar — era o detector
+> **certo** contradizendo minha premissa. Divergencia entre instrumento e
+> hipotese: desconfie da hipotese primeiro.
+>
+> **Regra nova:** antes de desassemblar, confirmar de QUAL arquivo o codigo foi
+> carregado e por qual `PT_LOAD`. Um offset plausivel num binario errado produz
+> desassemble que *parece* coerente.
+
+**O que sobrevive (medido, independe do desassemble):** o Core0 gira em
+`b000afdc..b000affc` com passo de 4 bytes. Agora sabemos que e' um **memset real**.
+
+**QW72 — o memset funciona:**
+
+    n=1     ip=0x00000400  lr=0xb0043000    (4KB)
+    n=256   ip=0x00000004  lr=0xb0043ff0    terminou
+    n=512   ip=0x00000004  lr=0xb0044ff0    nova invocacao
+
+`ip` decresce monotonicamente e conclui. Nao ha' travamento — a funcao e'
+**chamada muitas vezes** com alvos diferentes.
+
+Mas as amostras tardias mudam de escala:
+
+    n=32768   ip=0x00132aa4  lr=0x80835570   <- ~5 MB numa chamada
+    n=262144  ip=0x00052aa4  lr=0x80bb5570
+    n=524288  ip=0x00092aa4  lr=0x80ab5570
+
+`lr` aponta para `0x80000000+`, faixa que **nao aparece em nenhum `uc_mem_map`**
+que auditei (`b0000000`, `f0000000`, `f4000000`, `ffff0000`, `10000000`).
+
+**Nao concluo causa raiz aqui.** Falta medir: se `0x80000000` esta' mapeada,
+quem chama o memset (o return address, nao o `lr` do laco — aqui `lr` e' o
+ponteiro de destino), e se as invocacoes crescem sem limite.
+
+### QW67-QW69 — Core0: o bit T se perde no RETORNO do kernel para o Iguana  **[❌ RETRATADO — ver QW70-72: binario errado]**
 
 Continuacao do QW64-66. Duas hipoteses minhas refutadas antes de achar o ponto real.
 
@@ -1520,7 +1594,7 @@ qualquer correcao. O fix deve restaurar o T no retorno kernel->usuario e ser
 comparado no mesmo binario contra o comportamento atual.
 
 
-### QW64-QW66 — Core0 executa codigo Thumb em modo ARM  **[CAUSA PARCIAL MEDIDA — fix tentado FALHOU]**
+### QW64-QW66 — Core0 executa codigo Thumb em modo ARM  **[❌ RETRATADO — ver QW70-72: binario errado]**
 
 **O endereco no ROADMAP estava errado.** O Core0 nao esta' no laco
 `0xb0400064/68/6c`. O perfil por janela mostra a regiao real:
