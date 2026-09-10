@@ -1,53 +1,68 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10c, Double Dragon e 7 jogos comerciais RESOLVIDOS via injeção externa --applet=)
+# Zeebo LLE Emulator — ROADMAP: Double Dragon jogável (revisão auditada)
 
-## Nota de sessão (2026-09-10c) — Double Dragon RESOLVIDO
-- Rafael apontou o catálogo real de ROMs de Zeebo em
-  `/media/rafaelfrequiao/8C5F-19E51/zeebo/ROMs/` (No-Intro, .zip válidos — NÃO confundir com o
-  `.7z` corrompido de `Downloads/temp/`, que continua inutilizável).
-- **Double Dragon (Brazil) (Es,Pt).zip** contém `mod/274754/ddragonz.mod` (462.748 bytes) +
-  `data.ggz`/`sound.ggz`/`ddragonz.sig` + `mif/274754.mif`. **CLSID 274754 confirmado** —
-  exatamente o valor hipotetizado na sessão anterior (adjacente ao Z-Wheel 274755).
-- **Não foi preciso injetar na NAND.** O emulador já tinha um "VFS mínimo" pronto: a flag
-  `--applet=<caminho.mod>` (`load_applet()` -> `BrewLoader::inject_mod`) injeta bytes de
-  QUALQUER `.mod` do host diretamente em `0x12000000` no espaço de Core 0, sem exigir que o
-  arquivo esteja catalogado no EFS2/NAND 1.1.2. Zero patch de código necessário.
-- Testado: `--applet=roms_host/doubledragon/mod/274754/ddragonz.mod --seconds=2` (headless E
-  `--gui` com áudio) → `[Z-Wheel/Life] PASS` + `[BREW/Applet] PASS` (EVT_APP_START r0=1,
-  chamada gráfica capturada, framebuffer soma 2013081600, áudio SDL device 44100Hz armado).
-- **Outros 7 jogos comerciais validados com o mesmo mecanismo** (todos PASS, sem crash):
-  Bad Dudes vs. DragonNinja (`279888/baddudes.mod`), Caveman Ninja (`278986/cninja.mod`),
-  Karnov's Revenge (`279126/karnovr.mod`), Quake (`274802/quake.mod`), Tekken 2
-  (`276731/tekken2.mod`), Ridge Racer (`276152/ridgeracer.mod`), Street Hoop
-  (`278988/strhoop.mod`). Amostra escolhida por serem ports de arcade/consoles conhecidos
-  (fácil validar visualmente depois) e por cobrir gêneros distintos (luta, corrida, FPS,
-  beat-em-up, esporte) — teto de complexidade de assets variado.
-- Novo alvo de teste: `make test-roms-external ROM=<caminho.mod>` (Makefile) — valida
-  qualquer `.mod` externo sem exigir NAND, checando `BREW/Applet] PASS` no stdout.
-- **ROMs NÃO fazem parte do repo** (mídia de terceiros/direitos autorais) — extraídas para
-  `roms_host/` (git-ignored) só para teste local. Catálogo completo permanece em
-  `/media/rafaelfrequiao/8C5F-19E51/zeebo/ROMs/` (mídia externa do usuário).
-- Commits: `<pendente>` (Makefile target + .gitignore).
+## Objetivo e estado real — base auditada `9c7ae29`
 
-## Nota de sessão (2026-09-10b)
-- **QW-AUD1 implementado e testado**: `UnifiedHostAudio` (SDL_AudioDevice pull-callback) conectado ao mixer real do
-  AUDPP/QDSP5 (`Qdsp5Dispatcher::mix_audio` -> `AudppEngine::mix_audio` -> `UnifiedAudioSink`). Ativo só em `--gui`
-  (headless permanece silencioso, sem custo). Boot `--gui --efs2-run=tectoy.mod` com `SDL_AUDIODRIVER=dummy`
-  abriu device 44100Hz/2ch/buffer=1024 e completou o ciclo de vida do Z-Wheel normalmente. Commit `d530d4c`.
-- **Double Dragon NÃO está presente na NAND 1.1.2.bin montada** (`nand/1.1.2.bin`). Varredura completa dos 69.634
-  dirents de `0:EFS2APPS` (`--efs2-ls=*.mod --efs2-ls-max=69634`) só retorna `reksio.mod` e `tectoy.mod`. Strings de
-  Double Dragon existem apenas como texto de loja/descrição de produto (multi-idioma), não como binário de jogo.
-  O arquivo `Downloads/temp/.../Double Dragon (Brazil) (Es,Pt).7z` no host é uma ROM No-Intro separada (7z real,
-  não extraível ainda no ambiente atual — falha silenciosa do `7z x`, cabeçalho começa com bytes nulos, precisa
-  investigação/instalação de suporte a 7z antes de tentar montar como NAND alternativa).
-- Commit `2d52ef5`: filtro `*termo` (contains, não só sufixo) e `--efs2-ls-max=` no CLI `--efs2-ls`, usados para
-  confirmar a ausência de Double Dragon de forma exaustiva (sem adivinhar).
-- Próximo passo honesto para "ver e ouvir... Double Dragon": (a) obter um dump de NAND real do cartucho Double
-  Dragon (ou extrair o 7z do host corretamente) e apontar `--nand=`/paths equivalentes para essa imagem; (b) só
-  então repetir o pipeline EFS2→BrewLoader→dispatch já provado com reksio.mod/tectoy.mod.
+**Objetivo aberto:** no executável LLE, iniciar Double Dragon, atravessar splash/menu,
+entrar numa fase, controlar o personagem e ouvir música/efeitos produzidos pelo jogo.
+BREW AppMgr e Z-Wheel permanecem objetivos de boot; não substituir o emulador por Infuse.
+
+**Correção explícita dos relatos anteriores:** os commits `d530d4c`, `7c146f6` e
+`9c7ae29` NÃO provam jogos executando com som e imagem. `--applet=` copia bytes;
+`dispatch_applet_start()` ignora o handler solicitado e chama sempre o harness
+`dispatch_zwheel_app_start()` em `0x10532344`. O applet/objeto/vtable são scratch do host.
+O hook e o loop pintam azul; SDL abrir um dispositivo não prova PCM do guest.
+As alegações de Double Dragon e outros sete jogos “resolvidos” estão RETRATADAS.
+O teste `test-roms-external`, baseado nessa mensagem PASS, é um falso gate de execução.
+
+### Evidência reproduzida nesta revisão
+
+- Build: `make zeebo_lle_main` retornou 0 (alvo atualizado; não foi clean build).
+- Execuções separadas de DD real e arquivo inválido com `--applet=... --seconds=0.05
+  --dump-frames=...`: ambos exit 0, entry AEEMod_Load não resolvido e mesmo PASS.
+  Ambos produziram 18 PPMs; primeiro frame tem **uma única cor** e SHA-256
+  `2547e8be48601dcf4d09e16428c9b96d5844bd4b5f2af12f8c8b51dfc3fd756d`.
+  Isso prova que o gate atual independe do jogo, NÃO compatibilidade comercial.
+- Logs e controle negativo: `/tmp/zeebo-dd-audit-scjbdxlq/{double_dragon,negative_control}.log`
+  e `results.json` (temporários; receita: arquivo não executável como controle negativo).
+- Código causal: `tools/cpp/zeebo_lle_main.cpp` — `dispatch_applet_start`,
+  `dispatch_zwheel_app_start`, `run_zwheel_interactive`, `zwheel_stub_hook`;
+  `tools/cpp/zeebo_brew_loader.h` — `inject_bytes` / resolução de entry.
+
+### Mídia disponível — não procurar outro dump
+
+- Fonte de trabalho read-only: `/home/rafaelfrequiao/.Tuxality/Infuse/brew/`.
+  Contém árvore `mod/` + `mif/` e assets; não é imagem NAND nem prova de execução LLE.
+- Segunda cópia local: `/media/rafaelfrequiao/8C5F-19E51/zeebo/ROMs/` (isso não implica procedência independente).
+  O ZIP de Double Dragon passou em `ZipFile.testzip()`; seus **cinco arquivos** são
+  byte-idênticos aos correspondentes da árvore Infuse (comparação integral).
+- Double Dragon: App ID/diretório **274754**; AEECLSID **0x0102F789**, NÃO 274754.
+  Referência já existente: `../zeebo-lab/notes/2026-08-31_infuse-vs-zeebulator-dd.md:23-27`.
+- `mod/274754/ddragonz.mod`: 462748 bytes; SHA-256
+  `5485a189fc3f22652dcd94c4a1b242ff2b0f1271ce1b52f96aee5b4727e1a55f`.
+  Assets obrigatórios: `data.ggz`, `sound.ggz`, `ddragonz.sig`, `mif/274754.mif`.
+- O `.7z` em Downloads/temp falhou na extração/CRC; não é necessário para este plano.
+  A busca por nome nos dirents da NAND não prova ausência universal de conteúdo nem
+  justifica procurar “cartucho”: jogos Zeebo são distribuídos digitalmente.
+- Referências A/V existentes em `../zeebo-lab/assets/`: `dd-theme-oracle-01.wav`,
+  `dd-menu-oracle-01.wav`, `dd-gameplay-oracle-01.mp4`. Antes de usar como gate,
+  registrar hash, procedência/emulador e sequência de input; não atribuir toda captura ao Infuse.
+
+### Estratégia de armazenamento e fidelidade
+
+Preferir **overlay de arquivos com base read-only + saves separados**, sem modificar
+NAND nem userdata do Infuse. Montar `fs:/mod/274754/`, `fs:/mif/274754.mif` e os caminhos
+`fs:/mmc4/` que forem observados; resolver caminhos relativos pelo contexto do módulo.
+Isto é PROPOSTA: a cópia `--applet=` atual não oferece open/read/seek/stat nem VFS guest.
+
+Manter CPU/firmware do LLE. O backend host de arquivos precisa ser conectado à fronteira
+real do firmware (ou à emulação de armazenamento); um backend host isolado é só infraestrutura.
+Interceptação BREW de IFile/IGL, caso usada para acelerar bring-up, deve ser identificada
+como modo híbrido experimental, nunca confundida com boot LLE completo. Não implementar
+um segundo runtime BREW inteiro nem transplantar código de emuladores de licença incompatível.
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão consolida a entrega da Etapa 3 do JIT Dynarmic (`c28d66a`), suporte genérico ao ciclo de vida de applets/jogos EFS2 (`adcb631`), melhorias completas de UX de emulador (`07033e1`), roteamento unificado de UARTs (`0xA9A00000`--`0xA9C00000`) e a análise de causa raiz do display (azul estático), diagnóstico USB e áudio do Z-Wheel:
+Histórico de infraestrutura abaixo: JIT (`c28d66a`), carga EFS2 (`adcb631`), UX (`07033e1`) e UARTs. Esses componentes não fecham o boot BREW nem a execução de jogos; o estado auditado e os gates no topo prevalecem sobre contagens históricas:
 - QW17 (`a88a9bd`)/QW19 (`475ee1c`): convenção de PC-resume e restauração de frame callee-saved
   nos stubs de syscall — o mempool_init (96×1 MiB) atravessa e o boot avança além.
 - **Causa raiz 1 (validada por experimento)**: `thread_init` (0xb00070c8, casado com `thread.c`)
@@ -190,7 +205,8 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] `UnifiedAudioSink` disponível (Fase 8) como mixer PCM multi-stream.
 - [x] **Acoplamento oficial do `Qdsp5Dispatcher` ao `UnifiedSMDBridge`**: IDs oficiais `prog::AUDMGR` (`0x30000013`) e `prog::ADSPRTOSATOM` (`0x3000000a`) substituindo o ID provisório `0x30000060`.
 - [x] **Hook de consumo e retorno RPC**: captura em `0x16e8cb96`/`0x16e8cba0` alimenta `qdsp_disp_->feed_raw` com memória guest Core 0 (`guest.read`). Conclusão aciona respostas nos canais de retorno `0x31000013` (`AUDMGR_CB`) e `0x3000000b` (`ADSPRTOSMTOA`) via `on_completion`.
-- [ ] Backend ao vivo `SDL_OpenAudioDevice` no `UnifiedAudioSink` para streaming contínuo durante o loop de emulação além dos testes de dump WAV.
+- [x] Backend SDL de saída implementado em `UnifiedHostAudio` (`d530d4c`); abertura com dummy comprovada.
+- [ ] Streaming de PCM originado pelo jogo, sincronização e encerramento seguros: ainda sem prova de som de DD/AppMgr/Z-Wheel. QDSP5 permanece congelado; auditar integração host sem expandir engines.
 - [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — expansão pós-áudio funcional.
 
 ### Fase 11: Execução Guest Real e Resolução dos 5 Gargalos Estruturais
@@ -314,7 +330,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - A afirmação anterior de que esse echo atendia de forma load-bearing à convenção Iguana/OKL4 não é distinguível no teste black-box atual: entrada e saída são byte-idênticas mesmo sem `write_mr`. QW13 prova a transação de map no Unicorn, não o efeito do write-back sobre o guest.
   - A investigação causal consolidou: o travamento inicial era mascarado pela corrupção de registradores salvos na pilha (`L4_KernelInterface`, corrigido em `4224919`) e pelo misload de firmware do CLI (`d137813`). O stall `0xb000d708` (`size_log2=56`) capturado em `path-c-corrected` (commit `ea1b48f`) foi posteriormente ultrapassado pelas correções de frame de stub QW19/QW26/QW27 (`475ee1c`, `fc4a811`); no HEAD atual o Core 0 executa ~7M+ instruções reais, atravessa `mempool_init`/`bi_execute`/`extensions_init` e entra no `iguana_server_loop` (`0xb000aa94` / `0xb000c834` L4_Ipc wait). A hipótese de que a escrita extra em `sp+0/4/8` do handler 0xb4 causava o d708 foi REFUTADA por TDD host-only (ver QW18 / `test_l4_kip_trap.cpp`): o SP no intr hook é o SP da trap (`mvn sp,#0x4b` = `0xFFFFFFB4`), scratch nunca lido.
   - Gate pendente: harness com guest vivo que observe MRs efetivamente transformados e avanço por bytes/endereços até `bi_execute`; instruction-count não é critério de sucesso.
-- [x] **Passo 7: Integração VFS EFS2 com Iguana / BREW Loader e Catálogo de Applets (Concluído `f1b03fa` e `645f332`)**:
+- [x] **Passo 7: Parser/catálogo EFS2 e injeção host (`f1b03fa`, `645f332`) — NÃO VFS guest completo**:
   - Integrado o parser `efs2::Efs2Filesystem` ao `ZeeboLLESystem` em `tools/cpp/zeebo_lle_main.cpp`.
   - Adicionado `BrewLoader::inject_bytes()` em `tools/cpp/zeebo_brew_loader.h` para injeção de payloads materializados direto da memória.
   - Implementados métodos `ZeeboLLESystem::efs2_ls()`, `efs2_extract()` e `load_applet_from_efs2()`: varrem os 69.634 dirents da partição `0:EFS2APPS` (`0x3220000`), resolvem dirents por `(parent_inode, name)` e extraem a cadeia de clusters do bloco indireto, injetando via `BrewLoader`.
@@ -331,11 +347,11 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Isolada a execução de `0xb000d4dc`: em ambiente isolado, `0xb000d4dc` compõe fpages de 1 MiB (`size_log2 = 20`) com avanço positivo (`r4` de `0xb0d00000` para `0xb0e00000`).
   - No emulador completo com múltiplos ciclos (`--cycles=60`), o Iguana invoca repetidas vezes `L4_MapControl` via UTCB (`0xdff00000`) para registrar e mapear pools do sistema, executando o bit-scan `l4e_min_pagesize()` / CTZ de `KIP[0xc8]` de forma contínua e sem travamentos.
   - Ajustado o log do endereço `0xb000d4a8` em `zeebo_lle_main.cpp` para refletir estritamente o algoritmo real de CTZ (`[Core0/CTZ]`), eliminando qualquer interpretação espúria de polling.
-- [x] **Passo 10: Despacho Automático AEECShell / Ciclo de Vida Z-Wheel (274755) (Concluído `fccca5e`)**:
+- [ ] **Passo 10: Boot/ciclo de vida real da Z-Wheel — parcial: harness isolado (`fccca5e`)**:
   - Descoberto que o payload de 64 KiB de `274755` (@0x3a92000, FNV-1a `0x544a6f30`) são metadados de gnode do VFS com assinatura `"274755"` e referências a assets (`slidemodel.qxm`), enquanto o código executável do ZeeboApp reside embutido em `0:APPS` no manipulador Thumb `@0x10532344`.
   - Implementado `ZeeboLLESystem::dispatch_zwheel_app_start()`: instancia scratch applet + vtable gráfica (`0x28`), despacha `EVT_APP_START` (`0x1f96`) sob Unicorn ao manipulador pré-mapeado com retorno real `r0 = 1` (sucesso) e roteia chamada para o `SoftRasterizer`, reproduzindo frame RGB565 com soma `2013081600`.
   - Integrado à CLI `--efs2-run=274755` e adicionado o teste automatizado `test-efs2-zwheel` no Makefile (agora 8 alvos de CI 100% verdes).
-- [x] **Passo 11: Loop Interativo de Eventos Z-Wheel e Integração de Entrada Contínua (Concluído `79ec1eb`)**:
+- [ ] **Passo 11: Loop de jogo/entrada — parcial: preview host e despacho de eventos (`79ec1eb`)**:
   - Implementado `ZeeboLLESystem::run_zwheel_interactive()`: após `dispatch_zwheel_app_start()` persiste o scratch do applet (manipulador `0x10532344`, applet, pilha) e re-arma o roteamento gráfico slot 10 → `SoftRasterizer`, mantendo um loop que (a) apresenta o framebuffer RGB565 no `HostVideoSink`/tela SDL2 à taxa de quadros e (b) drena eventos de teclado/gamepad SDL2 mapeados para AVK BREW via `dispatch_zpad_to_brew` (`EVT_KEY_PRESS`/`EVT_KEY_RELEASE`, retorno real `r0=1` sob Unicorn).
   - Wired em `main`: `--efs2-run=274755` com `--seconds=N` (N>0) ou modo GUI entra no loop; `--seconds=0 --cycles=1` headless preserva o comportamento de 1 frame estático (`test-efs2-zwheel` intacto).
   - Adicionado `test-efs2-zwheel-loop` ao Makefile; suíte de 9 alvos de CI 100% verde. Validado com execução real (`--seconds=1`: 13066 frames apresentados, loop encerrado organicamente).
@@ -353,28 +369,21 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - QW14 (`2781e18`): `--strict-unmapped` opt-in pausa no primeiro acesso desconhecido, preserva PC/página não mapeada e expõe evento estruturado; keypad conhecido não dispara e o default permanece 22/22.
 - [x] **Passo 15: Harness Autônomo e Classificação Honesta de Apps (`aa3fa5c`, endurecido em `640147b`)**:
   - `tools/cpp/zeebo_debug_agent.py` oferece `peek`, `poke`, `trace`, VRAM, backtrace, catálogo e relatórios via TCP NDJSON/JSON-RPC.
-  - **Execução comprovada:** somente Z-Wheel/274755 completa `EVT_APP_START`, retorna `r0=1` e gera `pixel_sum=2013081600`.
+  - **Prova restrita ao harness:** rotina do firmware em `0x10532344` retorna `r0=1` com objeto scratch e clear azul do host. Não comprova Z-Wheel completa, carrossel ou jogo.
   - **Carga comprovada, execução ainda não:** `reksio.mod` e `tectoy.mod` são `loaded_only`; bytes injetados e progresso genérico do Core 0 não contam como execução do applet.
   - Gate atual: 22/22 asserções; `pass` exige milestone específico por PC/retorno/bytes/pixels e `vram_blank is False`.
-- [ ] **Passo 13: Execução do BootInfo (`bi_execute`) e Transição para Servidores Iguana (Naming/Pager)**:
-  - Parser host-only comprovado contra a cópia `1.1.2_APPS.bin`: BootInfo no offset `0x57000`, magic `0x1960021d`, 10 `BI_TAG_VIRT_POOLS` e 5 `BI_TAG_PHYS_POOLS`; mutações dos bytes alteram/rejeitam o parse como esperado.
-  - Saneamento de pilha ABI no `L4_KernelInterface` (`4224919`), parser posicional CLI (`d137813`), correção de PC-resume QW17 (`a88a9bd`) e correção do stub MapControl QW19 (`475ee1c`) — o `mempool_init` atravessa os 96 blocos de 1 MiB no boot real.
-  - Bloqueio atual (QW26): a função de criação de thread (0xb0007360+, casável com `thread_create`) chama `ThreadControl` (0xb000c798) e `SpaceControl` (0xb000c944) — stubs com frame pós-svc (`pop`) que caem no `else` do handler (retomada via `lr`, pulando o epílogo) → corrompe callee-saved → panic `SpaceControl != 1` (r3=0xf4/linha 244). Fix = retomar 0x08/0x18 em `pc`+`SP=ip` (padrão QW19).
-  - Experimento: com QW23+QW24 o boot alcança `bi_execute` (0xb00001fc, r0=0xb0d00000), aplica 98+ maps físicos reais (0 WRITE_PROT, 0 whole-space espúrio) e avança até o thread_create.
-  - Próximo gate: QW26; depois re-observar rumo a `extensions_init@0xb00017b8`/`iguana_server_loop@0xb000aa94` e ao primeiro server, sem forçar registradores.
-- [ ] **Passo 14: Shims de IPC, Threading e Handoff para o BREW AppMgr**:
-  - Emulação ou despacho honesto de syscalls do OKL4: `L4_ThreadControl` (`0x0c`), `L4_Ipc` (`0x00`), `L4_ExchangeRegisters` (`0x10`).
-  - Handoff para o processo de espaço de usuário do `AEECShell` / BREW em `0x10137000` / `0x10c874f4`.
+- [x] **Passo 13: infraestrutura BootInfo — histórico consolidado na Fase 12**; não duplicar o bloqueio antigo QW26 já corrigido.
+- [ ] **Passo 14: boot completo até BREW AppMgr** — permanece aberto. `L4_ThreadControl=0x08`, `L4_Ipc=0x00`, `L4_ExchangeRegisters=0x0c`. Handoff inicial para `0x10137000` não prova AEECShell/AppMgr funcional.
 
 ---
 
-### Fase 14: Dynarmic JIT (Core0 ARM11), Ciclo de Vida EFS2 Genérico e UX Dolphin/RPCS3 (Concluída 2026-09-10)
+### Fase 14: JIT, carga de applets e UX — PARCIAL; execução genérica reaberta
 - [x] **Etapa 3 JIT Dynarmic Integrada e Validada (commit `c28d66a`)**:
   - `zeebo_dynarmic_core.h/.cpp` integrando `dynarmic::A32::UserConfig` para ARM1136EJ-S (ARMv6, part `0xB36`) com suporte a Thumb, SVC e MMIO interceptado.
   - Modo `--jit` (AB-testing com Unicorn shadow nas primeiras fatias) e `--jit-solo` (JIT autônomo total) no Core 0. Boot de 11.4M instruções validado sem regressão.
-- [x] **Ciclo de Vida EFS2 Unificado para Qualquer Applet / Jogo (commit `adcb631`)**:
-  - Extração automática de qualquer `.mod` (`reksio.mod`, `tectoy.mod`, etc.) direto de `0:EFS2APPS` ou injeção externa via `--efs2-run=<arquivo>` / `run <arquivo>`.
-  - Despacho transparente ao manipulador do applet via `dispatch_applet_start()`.
+- [ ] **Ciclo de vida real por módulo (reaberto; `adcb631` oferece apenas carga + harness fixo)**:
+  - EFS2 usa catálogo de blocos conhecidos, não extração universal. `--applet=` copia bytes host.
+  - Resolver formato/relocações/entry de DD, criar instância com CLSID correto e usar HandleEvent do objeto retornado; jamais reutilizar `0x10532344` para todo jogo.
 - [x] **Melhorias de Usabilidade Estilo Dolphin/RPCS3/RetroArch (commit `07033e1`)**:
   - Título dinâmico de janela: `Zeebo LLE | Dynarmic JIT | C0: X MIPS | C1: Y MIPS | FPS: Z [RODANDO/PAUSADO]`.
   - Janela redimensionável 4:3 com VSync e letterboxing automático (`SDL_RenderSetLogicalSize(640, 480)`).
@@ -385,46 +394,96 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ---
 
-### Fase 15: Subsistema Gráfico EGL/BREW Real, Decodificação Diag USB e Áudio QDSP5 (Fase Atual)
+### Fase 15: Double Dragon — runtime, assets, imagem e som (ABERTA)
 - [ ] **Desacoplamento do Stub de Tela Azul e Renderização Real do BREW / Z-Wheel**:
   - Substituir o stub de `clear_color(0.1f, 0.2f, 0.8f)` pelo processamento de command buffers e chamadas reais de `IBitmap` / `IDisplay` do BREW.
   - Carregar assets visuais (`slidemodel.qxm`, `.bar`, `.bmp`) da NAND `0:EFS2APPS` para exibição na interface do Z-Wheel.
 - [ ] **Decodificação de Logs via Protocolo Qualcomm Diag (USB / SMD)**:
   - Capturar frames HDLC na interface de diagnóstico USB / SMD para extrair logs `DIAG_MSG_F` do BREW AppMgr e L4 diretamente no console do emulador.
-- [ ] **Pipeline de Áudio Host Contínuo**:
-  - Conectar `UnifiedAudioSink` ao backend de áudio SDL (`SDL_OpenAudioDevice`) para reprodução contínua dos streams PCM/QDSP5 sem dependência de dumps manuais.
+- [ ] **PCM do guest até o host**:
+  - Backend SDL já existe (`d530d4c`); faltam prova de produção/consumo de amostras do jogo, callbacks, sincronização e validação audível. Não basta abrir device.
+- [ ] **Módulo/arquivos/timers reais de DD**: executar a cadeia e gates abaixo antes de declarar renderização comercial.
 
 ---
 
-## Próximos Passos Priorizados
+## Próximos Passos Priorizados — vertical slice Double Dragon
 
-### P0 — Cadeia crítica de boot real
+### P0 — Cadeia crítica (não confundir com quick wins)
 
-1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
-   - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
-   - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
-2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (CONCLUÍDO via ciclo unificado EFS2 e JIT Dynarmic)
-   - Ciclo de vida unificado de applets/jogos EFS2 (`adcb631`) e Dynarmic JIT (`c28d66a`) integrados e validados por execução.
-3. **Passo 15 — Renderização Real da Interface (Z-Wheel/AppMgr) e Telemetria Qualcomm Diag** (EM ABERTO)
-   - Superar a limitação de tela azul estática: conectar o pipeline do BREW IBitmap/IGraphics e Adreno 130 à textura de apresentação do SDL2.
-   - Decodificar e rotear mensagens `DIAG_MSG_F` empacotadas via SMD/USB Diag.
+1. **DD0 — Gates confiáveis e identidade do módulo.** Rejeitar arquivo inválido;
+   registrar App ID, CLSID, hash, formato, base, entry e PC executado. Estado inicial
+   `loaded_only`. O teste negativo desta revisão deve deixar de receber PASS de jogo.
+2. **DD1 — Loader real + instância BREW.** `ddragonz.mod` começa com ARM cru
+   (`04e02de5...`), mas `resolve_mod_entry` só aceita ELF (`zeebo_brew_loader.h:279`).
+   Reutilizar RE/documentação/testkit existentes para confirmar ABI de AEEMod_Load,
+   base/relocação/RW/ZI/imports e objetos IShell/IModule. Executar o entry real,
+   obter módulo → CreateInstance(`0x0102F789`) → applet → HandleEvent real.
+   **Não** tratar entry de módulo como HandleEvent; não basta `entry=load_va`.
+   Gate: PCs/retornos/buffers observados dentro do módulo correto; nenhuma chamada
+   ao handler fixo `0x10532344` usada como substituto. Um probe isolado é progresso
+   de loader, não prova de boot orgânico.
+3. **DD2 — Assets/VFS alcançáveis pelo guest.** Conectar backend de arquivos à
+   interface real identificada no firmware; `open/read/seek/stat/close`, caminhos
+   relativos, EOF/erros, permissões e saves separados. Gate: DD lê seus próprios
+   `data.ggz`/`sound.ggz`, bytes retornados conferem com arquivos host e retirar
+   um asset provoca falha identificável, não sucesso simulado.
+4. **DD3 — Execução contínua, callbacks e input.** O loop atual descarta timers
+   expirados (`zeebo_lle_main.cpp:989-991`) e repinta azul, sem rodar o módulo.
+   Conectar timers one-shot, callbacks de mídia, eventos e tempo ao contexto real.
+   Gate: sequência de teclas avança splash → menu → fase; PCs continuam no jogo,
+   callbacks retornam corretamente e tecla solta não fica presa.
+5. **DD4 — Primeiro frame real.** Resolver objetos IDisplay/IBitmap e, se usados,
+   IGL/IEGL por chamadas/retornos vivos. Reusar rasterizador existente; não inventar
+   o tipo de `[applet+0x2c]` nem supor um framebuffer linear sem prova. O caminho 2D
+   é prioridade junto do 3D: o laboratório já documenta DrawText/DrawRect no DD.
+   Gate: splash e menu reconhecíveis, sequência de frames produzida pelo guest,
+   sem clear azul substituto ou cópia de screenshots do oráculo.
+6. **DD5 — Som do jogo.** Rastrear abertura/leitura de sound.ggz → chamadas de mídia
+   → buffers/comandos → PCM → SDL. O layout AUDPP atual está marcado como hipótese;
+   confirmar contra tráfego real antes de expandir QDSP5. Gate: captura PCM não
+   silenciosa com procedência guest, música contínua e efeitos reagindo ao input;
+   validar escuta no dispositivo real. WAV externo tocado à parte não conta.
+7. **DD6 — Jogável integrado.** Partida de pelo menos 5 minutos com movimento,
+   ataques, dano, música/efeitos, pausa/retomada e saída limpa. Medir FPS do jogo
+   (não repaints do host), velocidade relativa ao oráculo, latência de entrada e
+   underruns de áudio; guardar vídeo/PCM/log e comandos reproduzíveis. Repetir em
+   cold boot. Só então marcar Double Dragon jogável e ampliar catálogo.
 
----
+**Boot LLE obrigatório em paralelo:** Passo 13 (BootInfo) tem marcos históricos;
+Passo 14 (serviços → AEECShell → AppMgr) permanece aberto. Não foi fechado por
+JIT ou injeção de .mod. Reobservar o primeiro bloqueio real com o debugger atual;
+fechar IPC/scheduler/serviços necessários, sem forçar PC ou retorno-sucesso.
+O caminho direto assistido ao módulo pode facilitar diagnóstico, mas seu resultado
+não fecha o caminho de boot pela NAND. AppMgr e Z-Wheel precisam de gates próprios.
 
-### Quick Wins Identificados (Ações Imediatas de Alto Retorno)
+### Quick wins acionáveis (candidatos; estimativas relativas, não promessas de prazo)
 
-1. **QW-AUD1 (Áudio Host via SDL_OpenAudioDevice)**:
-   - *Impacto:* Imediato. Permite ouvir a reprodução de áudio que a Z-Wheel e os jogos já emitem através do `UnifiedAudioSink`.
-   - *Esforço:* Mínimo (20-30 linhas de código no `UnifiedDisplaySink` / `UnifiedAudioSink` inicializando callback SDL de áudio).
-2. **QW-UART1 (Force-Enable MSM7k UART TX/RX no Clock/Reset Controller)**:
-   - *Impacto:* Imediato. Inicializar os bits de clock da UART no MSM_CLK (`0xA8600000`) e auto-armar `UART_CR = 0x05` caso o firmware use polling rápido de TX, garantindo que logs das 3 UARTs apareçam no terminal.
-   - *Esforço:* Mínimo (pequeno patch no registrador de controle da UART / MSM_CLK).
-3. **QW-DIAG1 (Sniffer de Pacotes HDLC/Diag em Canais SMD)**:
-   - *Impacto:* Alto. O Zeebo emite telemetria BREW e L4 em pacotes SMD direcionados ao canal Diag (`0x3000000a`/`0x30000013`). Desempacotar frames com comando `0x79` (LOG) ou `0x1D` (MSG) imprimindo texto no stderr.
-   - *Esforço:* Médio-baixo (parser simples de framing HDLC/Qualcomm Diag no `zeebo_smd_bridge.cpp`).
-4. **QW-GFX1 (Blit de Framebuffer / IDisplay Fallback do BREW AppMgr)**:
-   - *Impacto:* Muito Alto. Substituir o `clear_color(0.1f, 0.2f, 0.8f)` pelo mapeamento de buffer linear de bitmap do BREW (`AEEApplet::m_pIDisplay` / buffer RGB565 em RAM do Applet), permitindo visualizar os elementos gráficos reais do menu ao invés de tela azul.
-   - *Esforço:* Médio (conectar o ponteiro de bitmap do applet ao `SoftRasterizer`).
+| Ordem / ID | Estado | Escopo e ganho | Esforço / dependência | Prova para concluir |
+|---|---|---|---|---|
+| 1 — DD-QW1 | pendente no código; documentação corrigida | Remover PASS universal; separar carga, entry, instância, frame e PCM. Corrigir `test-roms-external` e teste Reksio. | baixo; causa já reproduzida | Arquivo inválido falha; DD permanece `loaded_only` até executar; mutante que reintroduz handler fixo deixa teste vermelho. |
+| 2 — DD-QW2 | pendente | Identidade explícita do pacote: App ID separado de CLSID, manifesto com hashes/paths; impedir aceitar o scan heurístico MIF como autoridade. | baixo-médio; bytes disponíveis | MIF real hoje retorna erroneamente `0x01000100` e mod vazio (probe compilado, exit 1). Exigir `0x0102F789` por metadado validado/override explícito; arquivo truncado ou CLSID inválido é rejeitado. Parser estrutural definitivo exige confirmar layout, não outro scan mágico. |
+| 3 — DD-QW3 | pendente | Probe limitado do módulo ARM cru: disassembly do entry, classificação explícita e trace com orçamento de instruções; reaproveitar testkit/mod_probe. | baixo-médio para diagnóstico; loader completo é DD1 | Provar PCs do próprio DD, ABI/retorno ou primeira dependência faltante; reconhecer formato desconhecido sem chamá-lo de jogo executado. Não despachar AEEMod_Load como evento. |
+| 4 — DD-QW4 | pendente | Backend host de arquivos read-only + overlay de saves, usando árvore Infuse já validada; eliminar cópias/extracões repetidas. | médio; camada host isolada, ligação guest é DD2 | Testes open/read/seek/EOF, bytes dos assets, caminhos relativos, traversal/symlink fora da raiz recusados; hashes da fonte intactos após escrita no overlay. |
+| 5 — DD-QW5 | pendente | Corrigir lifetime do SDL: parar/fechar callbacks antes de destruir dispatcher e recursos usados pela fonte. | baixo; fora de `qdsp5/` | Teste de callback ativo durante teardown e init/shutdown repetidos com ASan; nenhum acesso após destruição. `~ZeeboLLESystem:516` hoje só flush UART; membros `:3592-3593` destroem dispatcher primeiro. |
+| 6 — DD-QW6 | pendente | Serializar produção/mixagem no orquestrador ou passar PCM por fila limitada; honrar frequência negociada do SDL; observar frames/amostras/underruns com origem. | médio; auditar todas as entradas sem editar engines congeladas | Teste concorrente de feed/mix/close, silêncio em underrun, 22.05→44.1 kHz e frequência host alternativa corretos; teste sintético rotulado como teste, nunca áudio de DD. |
+
+**Ordem de execução:** DD-QW1/2/3 primeiro (destravamento do módulo); DD-QW4 e
+DD-QW5/6 podem andar em paralelo. Em seguida DD1→DD2→DD3, com imagem e áudio
+integrados assim que houver chamadas reais. Não priorizar mais jogos antes de DD6.
+
+### Candidatos antigos reconciliados
+
+- **QW-AUD1: parcial.** Saída SDL implementada (`d530d4c`), áudio do jogo não provado;
+  segurança/clock no DD-QW5/6 e validação real no DD5. Congelamento de `qdsp5/`
+  preservado; este plano não altera `QDSP5_TODO` nem engines.
+- **QW-GFX1 / QW45: fase DD4, não quick win garantido.** Não há objeto/buffer guest
+  resolvido que torne isso um simples blit. Contador Adreno e pixels não pretos,
+  isoladamente, aceitam o stub azul e portanto não são gate de jogo.
+- **QW-UART1: adiado.** Não forçar clock/enable só para obter logs; modelar o contrato
+  observado quando bloquear o guest. Não garante que firmware de produção envie UART.
+- **QW-DIAG1: pesquisa adiada.** `0x3000000a` e `0x30000013` são programas RPC
+  ADSPRTOSATOM/AUDMGR, não identificação comprovada de canal Diag. Identificar
+  transporte/framing/comandos reais antes de propor sniffer; não inventar IDs.
 
 ---
 
@@ -582,19 +641,19 @@ que esse mecanismo para de fornecer dados válidos após a primeira entrada da t
 | QW30 | **concluído** | Scheduler Cooperativo L4 (Chaveamento de Contexto no `L4_Ipc`/`ThreadSwitch`) | médio | comutar execução para as threads dos servidores (`ig_naming`, `quartz_servers`, `AMSS`) quando a thread atual ceder no IPC wait (`pick_next_thread` em `zeebo_l4_thread.h` e chaveamento no c0_intr_hook case 0x04) |
 | QW31 | **concluído** | Entrega de registros de serviços/buffers no `ig_naming` e `quartz_servers` | médio | protocolar o envio de registro de interfaces/memsections no `iguana_server_loop` rumo ao handshake com AMSS (`0x10137000`) (`test_l4_ipc_dispatch.cpp`) |
 | QW32 | **concluído** | Handshake do Iguana com AMSS (`0x10137000`) e comutação em `L4_Ipc` wait | médio-alto | despachar IPC cooperativo no `c0_intr_hook` case 0x00 para permitir avanço dos servidores e AMSS (`zeebo_lle_main.cpp`) |
-| QW33 | **concluído** | Handoff para o processo de espaço de usuário do `AEECShell` / BREW | médio-alto | transferir execução do Iguana OS para o ponto de entrada do shell BREW (`0x10137000`) (`zeebo_l4_ipc.h` + `zeebo_lle_main.cpp`) |
-| QW34 | **concluído** | Roteamento do boot target (`FIRSTAPP`) e ciclo de vida do `AEECShell` | médio | conectar flag CLI / boot target (`0 = AppMgr`, `3 = Z-Wheel`) à transição L4/IPC do AMSS e despacho de applets |
-| QW35 | **concluído** | Carregamento e parsing do MIF/MIF2 do AppMgr via partição EFS2 | médio | integrar parser de MIFs do BREW com o pipeline EFS2 da NAND para instanciar applets (`brewappmgr.mif`) (`zeebo_brew_mif.h` + `test_brew_mif.cpp`) |
-| QW36 | **concluído** | Despacho de ciclo de vida e renderização de jogos/applets (Reksio / Double Dragon) | alto | vincular eventos de entrada e pipeline IGL/GLES na execução autônoma de jogos |
-| QW37 | **concluído** | Sincronização de comandos Adreno 130 e ring buffer GPU no frame loop de jogos | alto | garantir flushing e sincronização do rasterizer com swap buffers nos jogos |
-| QW38 | **concluído** | Mapeamento de canais de áudio QDSP5 e resposta de timers para applets comerciais | médio-alto | integrar temporizadores BREW (AEE_SetTimer) e retorno assíncrono de som |
-| QW39 | **proposto** | Integração de canais de áudio de baixo nível e renderização completa de Double Dragon | alto | validar execução orgânica e renderização com áudio do primeiro jogo comercial |
+| QW33 | **parcial; boot aberto** | Handoff inicial AMSS, não AEECShell/AppMgr comprovado | médio-alto | Exigir criação real de applet pelo firmware; entry `0x10137000` não fecha o marco |
+| QW34 | **parcial; gate pendente** | Seleção FIRSTAPP no CLI | médio | Provar AppMgr/Z-Wheel selecionado executando pelo boot, não só log de opção |
+| QW35 | **reaberto (parser incorreto)** | MIF/MIF2 estrutural e identidade BREW | médio | MIF DD real deve resolver CLSID `0x0102F789`; hoje retorna `0x01000100` por scan não estruturado — DD-QW2 |
+| QW36 | **reaberto (falso PASS)** | Lifecycle de jogo por entry/instância/handler real | alto | DD1/DD3; handler fixo `0x10532344` não é Double Dragon nem Reksio |
+| QW37 | **parcial (infraestrutura)** | Flush/finish no rasterizador, sem prova de draw guest | médio-alto | DD4; retirar contador artificial/clear azul do gate |
+| QW38 | **parcial (fila host)** | Timers one-shot sem execução de callbacks no loop | médio-alto | DD3/DD5; callback real e mídia têm que completar no guest |
+| QW39 | **pendente; vertical slice DD1–DD6** | Double Dragon com imagem e áudio reais | alto | Partida controlável, música/efeitos e sequência A/V registrada |
 | QW40 | **concluído (código + TDD)** | Ativação real de thread via `L4_ExchangeRegisters` usando o control REAL do firmware (`0x11e` = RECV\|SEND\|SP\|IP\|HALTFLAG, **sem** o bit DELIVER) em `zeebo_l4_thread.h`/`zeebo_lle_main.cpp` | alto | **Achado por execução real (boot 90s/~11.4M instr):** apesar de QW32-34 registrarem "concluído", o boot real ficava PRESO PERMANENTEMENTE em `0xb000c834` (`L4_Ipc` wait do `iguana_server_loop`) — nenhum handoff de thread jamais ocorria porque o código só ativava threads no bit `DELIVER` (`1<<9`), nunca setado pelo firmware real. Evidência: `ZEEBO_SYSCALL_HIST=1` mostrou `[EXREGS] dest=0x80008001/0x8000c001/0x80010001 control=0x11e` para `ig_naming`/`quartz_servers`/AMSS-BREW, nenhum com DELIVER. Fonte OKL4 2.1.1-fix7 (`exregs.cc`): HALTFLAG setado + HALT limpo = resume/start de thread halted. TDD `test_exregs_activation.cpp` (RED contra produção antiga: control=0x11e não ativa; GREEN com o fix). **Resultado real após fix:** o handoff ocorre de fato — Core0 sai de `0xb000c834`, PC salta para `0x10137000` (AMSS/BREW real) — mas trava em seguida em `0x1039322e` com instrução ARM/Thumb malformada (ver bloqueio QW41) |
 | QW41 | **parcial (código + TDD); novo bloqueio isolado** | Core0 executa código AMSS/BREW real a partir de `0x10137000` | alto | Causa raiz identificada e corrigida em 3 pontos: (1) handoff de thread (`L4_Ipc`/`L4_ThreadSwitch`) não setava o T-bit a partir do IP alvo; (2) retorno de SVC não restaurava o T-bit quando o chamador está fora dos stubs L4 fixos (`0xb0000000-0xb0020000`, ARM) — SVC vindo de AMSS/BREW Thumb (ex. `0x103dcd18`) sempre entra em exceção ARM (hardware real) e o handler nunca restaurava o modo; (3) **achado adicional decisivo**: `uc_reg_read(PC)` no Unicorn nunca retorna o LSB setado, então a cada nova fatia (`uc_emu_start` do loop principal) o T-bit era perdido mesmo que a fatia anterior estivesse rodando em Thumb — corrigido reconstituindo o bit a partir do CPSR real antes de cada `uc_emu_start`. Prova por execução real: Core0 agora executa milhares de instruções Thumb genuínas de `0x10137000` até pelo menos `0x1039322e` (`cbz r4,...` roda como loop legítimo, não mais decode ARM inválido); em execuções subsequentes o boot avança ainda mais, travando em endereços posteriores do range de `ig_naming` (`0xb010333a`), variação atribuída a timing de scheduling cooperativo, não a regressão do fix. TDD `test_svc_thumb_resume.cpp` (RED contra CPSR-write direto/buggy; GREEN com bit0-no-PC). Suite completa + clean-hygiene verdes. **QW42 — 2 hipóteses testadas e descartadas**: (a) perda de T-bit no save de contexto do handoff cooperativo (`cur->ip=cur_pc` sem preservar LSB) — corrigido, stall não mudou; (b) classificador binário de T-bit no retorno de SVC substituído por `pc < 0x10000000` (kernel/libs=ARM, app=Thumb) — RE confirmou que a rotina em `0xb0102cb8` (chamada por BL de dentro do ig_naming, faz `svc #0x1400`/L4_Ipc) é ARM legado fora dos stubs fixos, então o classificador antigo do QW41 (`0xb0000000-0xb0020000`=ARM, resto=Thumb) marcava seu retorno como Thumb incorretamente — hipótese certa quanto ao mecanismo, mas o fix simples por faixa de endereço causou REGRESSÃO (trava bem mais cedo, em `0xb000cda4`, ~145K instruções) porque há SVCs do próprio AMSS/BREW (Thumb, `pc>=0x10000000`) que retornam para stubs específicos dependentes do comportamento antigo — a classificação correta não pode ser só por faixa de PC do chamador, precisa considerar também o destino/stub específico. Ambas tentativas revertidas com segurança (`git checkout HEAD --`); HEAD permanece em `c3115db`.
 | QW42 | **concluído** | Fix da cópia LOCAL ARM do stub de trap-stack do `L4_ExchangeRegisters` (0x0c) dentro do `ig_naming` (`e67e3b4`) | médio | TDD `test_exregs_ig_naming.cpp` RED com classificador genérico antigo, GREEN com o fix restrito à faixa `[0xb0100000,0xb0120000)`; boot real avança p/ `0xb0358bb4`/`0xb03ba634`/memcpy `0xb0400064`; stall `0xb010333a` era artefato de modo errado (PC 2 B dentro de `bl`), não off-by-2 |
 | QW43 | **concluído (análise/RE)** | Causa raiz do "underflow" RLE em `0xb0400000` = bug na SIMULAÇÃO PYTHON de sessão anterior (`r5+1`→`r5+2`), NÃO no firmware/dispatcher | médio | Oráculo Python decodifica 250/252 bytes → 1040/1040 exatos (strings kernel `"spinlockarm.s"`/`"Invalid argument"`); workaround de core testado e REJEITADO/revertido; zloader real (openzeebo) NÃO descomprime (memcpy puro); nenhuma correção C++ necessária |
 | QW44 | **concluído** | Guard T-bit generalizado p/ TODOS os syscalls quando o retorno cai na cópia local ARM do ig_naming (`9ca92a6`); hipótese de truncamento por DMA descartada via Program Header ELF | médio | boot avança além do stall, `ig_naming` mapeado rwx, **14 frames / 32 draws do Adreno renderizados**; frame ainda **PRETO** (draws não conectados ao sink) |
-| QW45 | **proposto** | Conectar os draws do Adreno 130 ao framebuffer p/ produzir pixels reais (frames pretos) | médio-alto | `vram_blank=False` com `pixel_sum` determinístico ≠ 0 sob boot real; evidenciar que os 32 draws alimentam o SoftRasterizer |
+| QW45 | **pendente; DD4, não quick win** | Conectar produtor guest ao framebuffer | alto/RE | Frame reconhecível do jogo + origem dos comandos; rejeitar azul constante e contagem artificial |
 | QW46 | **proposto** | Scheduler real na ordem OKL4: instanciar os servers (`iguana`→`timer`→…→`appmgr`) e retirar a injeção sintética de IPC (MR fake, linhas 2232-2237) | alto | `naming_insert` real chega ao ig_naming (não MR fake); `pick_next_thread` escolhe remetente real; lookup/register subsequente de BREW/AMSS funcionam |
 | QW47 | **concluído** | Modelar as 3 UARTs do MSM7201A (UART1 `0xA9A00000` console, UART2 `0xA9B00000`, UART3 `0xA9C00000`) + captura de TX FIFO no stderr como console de boot (`aea313d`); corrige colisão KEYPAD_BASE (0xA9A00000 era UART1 real) | baixo-médio | TX FIFO acumulado → console em stderr; read-hook fornece TX_READY (UART_SR=0x0C); boot preservado (frame 14/32 draws, `make check` verde) |
 | QW48 | **proposto** | Resolver a re-entrada indevida da 2ª imagem no `__scatterload` (quartz_servers via `lr=0xb0302dd1` ou tabela corrompida por aliasing) — o kernel Iguana completa o scatterload corretamente, o travamento é host | alto | kernel termina reach `0xb0410070` __rt_entry (já verificado); 2ª imagem completa sem `ctrl=0x00`/loop; boot avança para `iguana_server_loop` pós-scatterload |
