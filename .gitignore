@@ -71,3 +71,4 @@ tools/cpp/testkit/build/
 tools/cpp/zeebo_lle_txn_probe
 roms_host/
 tools/cpp/test_video_mmio
+tools/cpp/test_jit_code_hook

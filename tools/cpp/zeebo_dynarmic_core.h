@@ -65,10 +65,19 @@ public:
     uint64_t run(uint64_t max_insns);
     uint64_t total_ticks() const;
     void halt_execution();
+    // Interrompe a fatia atual a partir de dentro de on_code_exec.
+    void halt_from_hook();
     bool step_one_insn();
 
     // Dispatcher de SVC chamado em tempo real
     std::function<void(uint32_t swi)> on_svc;
+
+    // Gancho por INSTRUCAO EXECUTADA. Diferente de MemoryBridge::on_code, que
+    // e disparado pela TRADUCAO de bloco (uma vez por bloco compilado, e nao a
+    // cada execucao): aqui o callback recebe o PC real do motor em execucao e
+    // pode alterar registradores via este mesmo objeto. Quando definido, run()
+    // passa a avancar instrucao a instrucao -- mais lento, porem correto.
+    std::function<void(uint32_t pc)> on_code_exec;
 
     // Habilita fastmem se uma tabela de ponteiros host for providenciada
     void enable_page_table(std::array<std::uint8_t*, 1 << (32 - 12)>* pt);

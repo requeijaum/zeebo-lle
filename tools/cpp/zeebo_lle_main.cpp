@@ -1244,12 +1244,27 @@ public:
                 ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
                 s->handle_peripheral_write(addr, size, val);
             };
-            bridge.on_code = [](void* ud, uint32_t pc) {
-                ZeeboLLESystem* s = (ZeeboLLESystem*)ud;
-                c0_code_hook(s->core0_.uc, pc, 4, s);
-            };
+            // NAO ligar c0_code_hook aqui: MemoryReadCode dispara na TRADUCAO
+            // de bloco, nao a cada instrucao executada, e o hook escreveria
+            // registradores no Unicorn -- que nao e o motor em execucao sob
+            // --jit. O gancho correto e on_code_exec, ligado logo abaixo.
+            bridge.on_code = nullptr;
 
             core0_.jit = std::make_unique<zeebo::jit::DynarmicCore>(bridge);
+            // Gancho por instrucao executada: sincroniza o estado do JIT para o
+            // Unicorn espelho, roda o mesmo c0_code_hook usado pelo backend
+            // interpretado (dispatch BREW, ponte IGL, sondas) e devolve o estado
+            // -- assim uma alteracao de PC feita pelo hook realmente afeta a
+            // execucao. Mesmo padrao ja usado por on_svc.
+            core0_.jit->on_code_exec = [this](uint32_t pc) {
+                core0_.jit->sync_to_unicorn(core0_.uc);
+                const uint32_t pc_before = pc;
+                c0_code_hook(core0_.uc, pc, 4, this);
+                core0_.jit->sync_from_unicorn(core0_.uc);
+                // Se o hook desviou o fluxo (ex.: retorno de chamada IGL
+                // interceptada), encerra a fatia para o novo PC valer.
+                if (core0_.jit->pc() != pc_before) core0_.jit->halt_from_hook();
+            };
             core0_.jit->on_svc = [this](uint32_t /*swi*/) {
                 // Sincroniza estado para que c0_intr_hook inspecione e trate registradores
                 core0_.jit->sync_to_unicorn(core0_.uc);

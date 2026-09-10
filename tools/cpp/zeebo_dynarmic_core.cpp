@@ -87,6 +87,9 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
     uint64_t ticks_left = 0;
     uint64_t ticks_consumed_total = 0;
     bool svc_hit_this_block = false;
+    // Sinalizado quando o gancho por instrucao pede parada (ex.: apos desviar o
+    // PC para tratar uma chamada interceptada).
+    bool halted_by_hook = false;
 
     Impl(MemoryBridge b, Cp15Ids ids) : bridge(b), cp15(ids) {
         config.callbacks = this;
@@ -318,6 +321,10 @@ void DynarmicCore::halt_execution() {
     impl_->jit->HaltExecution();
 }
 
+void DynarmicCore::halt_from_hook() {
+    impl_->halted_by_hook = true;
+}
+
 bool DynarmicCore::step_one_insn() {
     impl_->svc_hit_this_block = false;
     impl_->ticks_left = 1;
@@ -334,6 +341,23 @@ uint64_t DynarmicCore::run(uint64_t max_insns) {
     uint64_t start_ticks = impl_->ticks_consumed_total;
     uint64_t target_ticks = start_ticks + max_insns;
     uint64_t quantum = 64;
+
+    // Com gancho por instrucao ativo nao da para executar blocos inteiros: o
+    // callback precisa ver cada PC executado e poder desviar o fluxo.
+    if (on_code_exec) {
+        while (impl_->ticks_consumed_total < target_ticks) {
+            on_code_exec(impl_->jit->Regs()[15]);
+            if (impl_->halted_by_hook) { impl_->halted_by_hook = false; break; }
+            impl_->svc_hit_this_block = false;
+            impl_->ticks_left = 1;
+            impl_->jit->Step();
+            if (impl_->svc_hit_this_block && on_svc) {
+                on_svc(impl_->last_swi_num);
+                break;
+            }
+        }
+        return impl_->ticks_consumed_total - start_ticks;
+    }
 
     while (impl_->ticks_consumed_total < target_ticks) {
         impl_->svc_hit_this_block = false;
