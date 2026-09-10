@@ -380,7 +380,45 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 ### Fase 14: JIT, carga de applets e UX — PARCIAL; execução genérica reaberta
 - [x] **Etapa 3 JIT Dynarmic Integrada e Validada (commit `c28d66a`)**:
   - `zeebo_dynarmic_core.h/.cpp` integrando `dynarmic::A32::UserConfig` para ARM1136EJ-S (ARMv6, part `0xB36`) com suporte a Thumb, SVC e MMIO interceptado.
-  - Modo `--jit` (AB-testing com Unicorn shadow nas primeiras fatias) e `--jit-solo` (JIT autônomo total) no Core 0. Boot de 11.4M instruções validado sem regressão.
+  - Modo `--jit` (AB-testing com Unicorn shadow nas primeiras fatias) e `--jit-solo` (JIT autônomo total) no Core 0.
+  - **RETRATAÇÃO PARCIAL (2026-09-10)**: a alegação "boot de 11.4M instruções validado sem regressão"
+    NÃO se sustenta. O contador de instruções subia porque o backend girava em falso sobre a MESMA
+    instrução: falhas do Dynarmic caíam em `ExceptionRaised`/`InterpreterFallback` de **corpo vazio**,
+    não consumiam ticks e o laço principal reiniciava no mesmo PC. Contador alto era sintoma do
+    defeito, não prova de execução. Ver `33a83dd` e os quatro defeitos abaixo.
+
+- [x] **Backend recompilado: quatro defeitos corrigidos com RED confirmado (2026-09-10)**:
+  - `b1638d8` — **gancho de código disparava na tradução, não na execução**. `MemoryBridge::on_code`
+    era chamado 1x por bloco traduzido; criado `on_code_exec` (por instrução) + `halt_from_hook()`.
+    Teste: laço de 8 voltas ⇒ 8 execuções vs 1 tradução (`test_jit_code_hook.cpp`, 5/5).
+  - `33a83dd` — **falha silenciosa**. `ExceptionRaised`/`InterpreterFallback` vazios; `run()` não saía
+    do laço na falha; Core0 não consultava `halted`; `state`/`reg`/`backtrace`/`peek` liam o **Unicorn**
+    sob `--jit`, reportando PC=0 de um motor que não executa nada. Passa a relatar
+    `[Core0/JIT] parada em pc=... (fallback de interpretador)` (`test_jit_fault_report.cpp`, 8/8).
+    RED: sem as saídas de laço o teste **trava** (exit 124) — o RED honesto aqui é o travamento.
+  - `24d7d26` — **`CPS` não implementada**. O opcode em `0xf0003adc` é `0xf10800c0` = `cpsie if`
+    (kernel habilitando IRQ/FIQ no boot). O Dynarmic decodifica CPS mas **delega ao interpretador**
+    (`arm_CPS -> InterpretThisInstruction`), que este projeto não acopla. Semântica do encoding A1
+    implementada na nossa camada, sem tocar em fonte de terceiro. Boot: 114.281 ⇒ 1.168.798 instruções.
+  - `5471a8b` — **CP15 não guardava estado**. Toda escrita MCR era descartada (`CompileSendOneWord`
+    ⇒ `NopFn`) e toda leitura fora de MIDR/CTR devolvia zero. O boot escreve TTBR0 (c2) e o controle
+    do sistema (c1) e os lê de volta; o JIT lia 0. Banco indexado por `(opc1,CRn,CRm,opc2)` — indexar
+    só por CRn faria TTBR0/TTBR1 se sobrescreverem (`test_jit_cp15.cpp`, 7/7; RED: 4 falhas lendo 0).
+  - **Resultado negativo registrado**: a hipótese de que os backends divergiam por **flags** foi
+    REFUTADA pelo lockstep (`test_jit_lockstep.cpp`) — NZCV concordam. Não reinvestigar.
+
+- [ ] **Divergência de boot entre backends (ABERTA, próxima na fila)**:
+  - Ferramenta: `--trace-core0=<arq> --trace-limit=N` grava a trajetória do Core0 pelos **dois**
+    backends (o gancho `c0_code_hook` é comum) e `tools/cpp/diff_traces.py` acha a primeira
+    divergência exata de PC/flags/registradores. **Não usar o log periódico** para isso: ele amostra
+    a cada 10 mil instruções, e a "divergência de 8 bytes no ciclo 2" antes relatada era artefato
+    da amostragem, não defeito real.
+  - Estado: primeira divergência recuou de #16723 (CP15) para **#23726**, em
+    `ldreq r3,[r5]` @ `0xf000a1d0` — r3 = `0x10090001` no interpretado, `0` no recompilado.
+    Carga condicional de memória; defeito distinto do CP15.
+  - **O boot continua NÃO fechando.** Contador maior (1,17M no JIT vs 596k no interpretado) **não**
+    é prova de correção — pode significar executar lixo por mais tempo. O que sustenta progresso
+    aqui é a divergência ter recuado, não o contador ter subido.
 - [ ] **Ciclo de vida real por módulo (reaberto; `adcb631` oferece apenas carga + harness fixo)**:
   - EFS2 usa catálogo de blocos conhecidos, não extração universal. `--applet=` copia bytes host.
   - Resolver formato/relocações/entry de DD, criar instância com CLSID correto e usar HandleEvent do objeto retornado; jamais reutilizar `0x10532344` para todo jogo.
