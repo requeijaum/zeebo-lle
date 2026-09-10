@@ -26,14 +26,36 @@ public:
 
     static std::uint64_t NopFn(void*, std::uint32_t, std::uint32_t) { return 0; }
 
+    // Banco de registradores CP15 com estado real.
+    //
+    // Antes, TODA escrita era descartada (NopFn) e toda leitura fora de
+    // MIDR/CTR devolvia zero. O boot do Core0 escreve o controle do sistema
+    // (c1) e a base da tabela de paginas (c2) e depois LE esses valores de
+    // volta: o motor interpretado devolvia o valor escrito, o recompilado
+    // devolvia 0. Primeira divergencia observada entre os backends:
+    // `MRC p15,0,r0,c2,c0,0` (TTBR0) devolvendo 0 em vez de 0x1001c000.
+    //
+    // Guarda por (opc1, CRn, CRm, opc2) para nao confundir registradores
+    // diferentes que compartilham o mesmo CRn.
+    static constexpr unsigned kBankSize = 8 * 16 * 16 * 8;
+    static unsigned slot(unsigned opc1, unsigned CRn, unsigned CRm, unsigned opc2) {
+        return ((opc1 & 7u) << 11) | ((CRn & 15u) << 7) | ((CRm & 15u) << 3) | (opc2 & 7u);
+    }
+
+    std::uint32_t* bank_slot(unsigned opc1, CoprocReg CRn, CoprocReg CRm, unsigned opc2) {
+        return &bank_[slot(opc1, (unsigned)CRn, (unsigned)CRm, opc2)];
+    }
+
     std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg,
                                                      CoprocReg, CoprocReg, unsigned) override {
         return Callback{&NopFn, std::nullopt};
     }
 
-    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, CoprocReg,
-                                               CoprocReg, unsigned) override {
-        return Callback{&NopFn, std::nullopt};
+    CallbackOrAccessOneWord CompileSendOneWord(bool /*two*/, unsigned opc1, CoprocReg CRn,
+                                               CoprocReg CRm, unsigned opc2) override {
+        // MCR: o destino e o proprio slot do banco, entao o valor escrito
+        // persiste e uma leitura posterior o devolve.
+        return bank_slot(opc1, CRn, CRm, opc2);
     }
 
     CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, CoprocReg) override {
@@ -50,8 +72,8 @@ public:
         if (opc1 == 0 && (unsigned)CRn == 0 && (unsigned)CRm == 0 && opc2 == 1) {
             return &ctr_val_;
         }
-        scratch_ = 0;
-        return &scratch_;
+        // Demais registradores: devolve o que foi escrito (zero se nunca).
+        return bank_slot(opc1, CRn, CRm, opc2);
     }
 
     CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, CoprocReg) override {
@@ -74,6 +96,7 @@ private:
     Cp15Ids ids_;
     std::uint32_t midr_val_ = 0;
     std::uint32_t ctr_val_  = 0;
+    std::uint32_t bank_[kBankSize] = {};
     std::uint32_t scratch_  = 0;
     std::uint32_t scratch2_ = 0;
 };

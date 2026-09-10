@@ -489,6 +489,22 @@ public:
         }
     }
 
+    // Traco de execucao para comparar backends (ver --trace-core0).
+    FILE* trace_file_ = nullptr;
+    uint64_t trace_limit_ = 0;
+
+    bool open_trace(const std::string& path, uint64_t limit) {
+        trace_file_ = fopen(path.c_str(), "w");
+        if (!trace_file_) {
+            printf("[trace] nao foi possivel abrir %s\n", path.c_str());
+            return false;
+        }
+        trace_limit_ = limit;
+        printf("[trace] gravando traco do Core0 em %s (limite=%llu insns)\n",
+               path.c_str(), (unsigned long long)limit);
+        return true;
+    }
+
     bool init_control(int port) {
         control_ = std::make_unique<zeebo_lle::ControlServer>();
         register_probes();
@@ -2945,6 +2961,29 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
 
+        // Traco de execucao do Core0. Ambos os backends passam por este hook,
+        // entao gravar aqui produz trajetorias comparaveis instrucao a
+        // instrucao -- ao contrario do log periodico, que amostra a cada 10k
+        // instrucoes e torna impossivel achar a PRIMEIRA divergencia.
+        if (sys->trace_file_) {
+            if (sys->trace_limit_ == 0 || sys->core0_.insns <= sys->trace_limit_) {
+                u32 r[16];
+                for (int i = 0; i < 15; i++) uc_reg_read(uc, UC_ARM_REG_R0 + i, &r[i]);
+                u32 cpsr = 0;
+                uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                u32 opc = 0;
+                uc_mem_read(uc, (u32)ad, &opc, 4);
+                fprintf(sys->trace_file_, "%llu %08x %08x %08x",
+                        (unsigned long long)sys->core0_.insns, (u32)ad,
+                        cpsr & 0xF0000000u, opc);
+                for (int i = 0; i < 15; i++) fprintf(sys->trace_file_, " %08x", r[i]);
+                fputc('\n', sys->trace_file_);
+            } else if (sys->trace_limit_ != 0) {
+                fclose(sys->trace_file_);
+                sys->trace_file_ = nullptr;
+            }
+        }
+
         // Item 4: dispatch BREW (.mod / AEEMod_Load / AEECShell@0x10c874f4).
         if (sys->brew_ && sys->brew_->on_code((u32)ad)) {
             // Quando a AEECShell atinge o vetor de dispatch, é o gatilho para
@@ -3739,6 +3778,8 @@ int main(int argc, char** argv) {
     int control_port = 0;
     bool strict_unmapped = false;
     bool use_jit = false;
+    std::string trace_path;
+    uint64_t trace_limit = 0;
     bool jit_solo = false;
     int cycles = 250;
     int slice_insns = 10000;
@@ -3804,6 +3845,10 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--strict-unmapped") {
             strict_unmapped = true;
+        } else if (arg.rfind("--trace-core0=", 0) == 0) {
+            trace_path = arg.substr(14);
+        } else if (arg.rfind("--trace-limit=", 0) == 0) {
+            trace_limit = strtoull(arg.substr(14).c_str(), nullptr, 0);
         } else if (arg == "--jit") {
             use_jit = true;
         } else if (arg == "--jit-solo") {
@@ -3846,6 +3891,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!trace_path.empty()) sys.open_trace(trace_path, trace_limit);
     if (!sys.init(nand_path, apps_path, amss_path, headless, use_jit)) {
         printf("[Fatal] System initialization failed\n");
         return 1;
