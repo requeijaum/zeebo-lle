@@ -26,6 +26,12 @@ public:
 
     IQdspEngine* engine_for(Engine e);
 
+    // Drena PCM mixado da engine AUDPP para o host (QW-AUD1). Silêncio se ainda
+    // não houver engine/PCM.
+    void mix_audio(int16_t* out, size_t frames) {
+        if (IQdspEngine* eng = engine_for(Engine::Audpp)) eng->mix_audio(out, frames);
+    }
+
 private:
     std::unique_ptr<IQdspEngine> audpp_, jpeg_, vfe_, voice_, audplay_, audrec_;
 };

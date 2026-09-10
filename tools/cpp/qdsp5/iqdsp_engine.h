@@ -30,6 +30,11 @@ public:
     // Processa um comando decodificado. `guest` permite seguir ponteiros do
     // payload (buffers PCM/JPEG em shared RAM). Devolve reply sintético.
     virtual Reply handle(const Command& cmd, const QdspGuest& guest) = 0;
+
+    // Drena PCM mixado para o host (default: silêncio). Só AUDPP implementa de
+    // verdade hoje; permite ao orquestrador puxar áudio real sem conhecer o
+    // tipo concreto da engine (QW-AUD1: ouvir BREW AppMgr/Z-Wheel/jogos).
+    virtual void mix_audio(int16_t* /*out*/, size_t /*frames*/) {}
 };
 
 // Makers por engine (definidos em cada .cpp; padrão make_* do skeleton GPU).

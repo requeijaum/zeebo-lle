@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <functional>
 #include <vector>
 #include <string>
 #include <map>
@@ -416,6 +418,75 @@ private:
     bool                fullscreen_;
 };
 
+// 6. Host Audio Output (SDL2 pull-callback)
+// Puxa PCM já mixado do QDSP5/AUDPP (via Qdsp5Dispatcher::mix_audio) e entrega
+// a um SDL_AudioDevice real — torna audível o boot da BREW AppMgr, Z-Wheel e
+// jogos comerciais (QW-AUD1). Não possui mixer próprio: single-source-of-truth
+// é o UnifiedAudioSink já embutido na engine AUDPP.
+class UnifiedHostAudio {
+public:
+    ~UnifiedHostAudio() { shutdown(); }
+
+    bool init(bool headless, uint32_t sample_rate = 44100) {
+        headless_ = headless;
+        if (headless_) return true;
+        if (SDL_WasInit(SDL_INIT_AUDIO) == 0 && SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+            printf("[Audio] SDL_InitSubSystem(AUDIO) falhou: %s\n", SDL_GetError());
+            return false;
+        }
+
+        SDL_AudioSpec want{}, have{};
+        want.freq = (int)sample_rate;
+        want.format = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples = 1024;
+        want.callback = &UnifiedHostAudio::sdl_callback_trampoline;
+        want.userdata = this;
+
+        dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+        if (dev_ == 0) {
+            printf("[Audio] SDL_OpenAudioDevice falhou: %s\n", SDL_GetError());
+            return false;
+        }
+        SDL_PauseAudioDevice(dev_, 0); // começa a puxar amostras imediatamente
+        printf("[Audio] Host device armado: %d Hz, %d canais, buffer=%d\n", have.freq, have.channels, have.samples);
+        return true;
+    }
+
+    void shutdown() {
+        if (dev_ != 0) {
+            SDL_CloseAudioDevice(dev_);
+            dev_ = 0;
+        }
+    }
+
+    // Chamado pelo orquestrador uma vez, após qdsp_disp_ existir.
+    void set_source(std::function<void(int16_t*, size_t)> mix_fn) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mix_fn_ = std::move(mix_fn);
+    }
+
+private:
+    static void sdl_callback_trampoline(void* userdata, uint8_t* stream, int len) {
+        auto* self = static_cast<UnifiedHostAudio*>(userdata);
+        self->fill_buffer(stream, len);
+    }
+    void fill_buffer(uint8_t* stream, int len) {
+        const size_t frames = (size_t)len / (2 * sizeof(int16_t)); // stereo S16
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (mix_fn_) {
+            mix_fn_(reinterpret_cast<int16_t*>(stream), frames);
+        } else {
+            std::memset(stream, 0, (size_t)len);
+        }
+    }
+
+    std::function<void(int16_t*, size_t)> mix_fn_;
+    SDL_AudioDeviceID dev_{0};
+    bool headless_{true};
+    std::mutex mutex_;
+};
+
 // ---- Core State & Orchestrator Context ----
 enum class CoreBackend {
     Unicorn,
@@ -441,6 +512,17 @@ class ZeeboLLESystem {
 public:
     ZeeboLLESystem() {
         core1_state_ = nullptr;
+    }
+    ~ZeeboLLESystem() {
+        flush_uarts();
+    }
+    void flush_uarts() {
+        for (int i = 1; i <= 3; ++i) {
+            if (!uart_buffers_[i].empty()) {
+                fprintf(stderr, "[UART#%d] %s\n", i, uart_buffers_[i].c_str());
+                uart_buffers_[i].clear();
+            }
+        }
     }
 
     bool init_control(int port) {
@@ -1060,9 +1142,17 @@ public:
         smd_ = std::make_unique<UnifiedSMDBridge>();
         sink_ = std::make_unique<UnifiedDisplaySink>();
         sink_->init(headless);
+        host_audio_ = std::make_unique<UnifiedHostAudio>();
+        host_audio_->init(headless);
 
         // Initialize QDSP5 Dispatcher for Audio RPC & DSP Engine
         qdsp_disp_ = std::make_unique<zeebo::qdsp5::Qdsp5Dispatcher>();
+        if (host_audio_) {
+            auto* disp_ptr = qdsp_disp_.get();
+            host_audio_->set_source([disp_ptr](int16_t* out, size_t frames) {
+                if (disp_ptr) disp_ptr->mix_audio(out, frames);
+            });
+        }
         qdsp_disp_->on_completion = [this](u32 tcb, u32 sig) {
             printf("[QDSP5/RPC] Completion callback fired: TCB=0x%08x, sig=0x%08x -> posting RPC Reply (Prog 0x31000013 / 0x3000000b)\n",
                    tcb, sig);
@@ -2054,6 +2144,11 @@ private:
         uc_mem_map(core0_.uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, UART2_BASE, UART_SIZE, UC_PROT_ALL);
         uc_mem_map(core0_.uc, UART3_BASE, UART_SIZE, UC_PROT_ALL);
+
+        // Core 1 (Modem ARM9) também tem acesso ao barramento periférico AHB de UARTs
+        uc_mem_map(core1_.uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
+        uc_mem_map(core1_.uc, UART2_BASE, UART_SIZE, UC_PROT_ALL);
+        uc_mem_map(core1_.uc, UART3_BASE, UART_SIZE, UC_PROT_ALL);
 
         // OKL4 L4e virtual layout (refs/okl4-2.1.1-fix7 arch/arm/pistachio/include/config.h):
         //   MISC_AREA @ 0xff000000, USER_UTCB_PAGE = 0xff000000, ref em +0xff0.
@@ -3115,17 +3210,31 @@ private:
         else if (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) {
             gpu_->write((u32)(addr - ADRENO130_BASE), value);
         }
-        // UART TX FIFO write -> console
+        // UART TX FIFO write -> console com identificador explícito [UART#1, #2, #3]
         else if ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
                  (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
                  (addr >= UART3_BASE && addr < UART3_BASE + UART_SIZE)) {
+            const int uart_id = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? 1 :
+                                (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ? 2 : 3;
+            const u32 base = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? UART1_BASE :
+                             (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ? UART2_BASE : UART3_BASE;
+            const u32 off = (u32)(addr - base);
             const unsigned char ch = (unsigned char)(value & 0xFF);
-            static u32 line_bytes = 0;
-            if (ch == '\n') { fprintf(stderr, "\n"); line_bytes = 0; }
-            else if (ch == '\r') { /* swallow CR */ }
-            else if (ch >= 0x20 || ch == '\t') {
-                fputc(ch, stderr);
-                if (++line_bytes >= 200) { fprintf(stderr, "\n"); line_bytes = 0; }
+
+            // Trata escritas no TX FIFO (offset 0x0C) ou no registrador de dados da UART
+            if (off == UART_OFF_TF || off == 0x00) {
+                if (ch == '\n') {
+                    fprintf(stderr, "[UART#%d] %s\n", uart_id, uart_buffers_[uart_id].c_str());
+                    uart_buffers_[uart_id].clear();
+                } else if (ch == '\r') {
+                    /* swallow CR */
+                } else if (ch >= 0x20 || ch == '\t') {
+                    uart_buffers_[uart_id] += (char)ch;
+                    if (uart_buffers_[uart_id].size() >= 200) {
+                        fprintf(stderr, "[UART#%d] %s\n", uart_id, uart_buffers_[uart_id].c_str());
+                        uart_buffers_[uart_id].clear();
+                    }
+                }
             }
         }
         // Keypad write
@@ -3359,6 +3468,19 @@ private:
     // DADO do heap), marcando a word suja p/ restaurar o código pristino no fetch.
     static void c1_heap_read_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        (void)size;
+        const bool is_uart = (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
+        if (is_uart && type == UC_MEM_READ) {
+            const u32 base = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? UART1_BASE
+                           : (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ? UART2_BASE
+                           : UART3_BASE;
+            const u32 off = (u32)(addr - base);
+            if (off == UART_OFF_SR) {
+                u32 sr_val = 0x000C; // TX_READY | TX_EMPTY
+                uc_mem_write(uc, (u32)addr, &sr_val, 4);
+                return;
+            }
+        }
         if (!sys->rex_split_id_ || type != UC_MEM_READ || !rex_in_heap((u32)addr)) return;
         u32 a=(u32)addr, off=a-REX_HEAP_VA_BASE, n=(u32)size;
         if (off+n <= sys->rex_heap_shadow_.size()) {
@@ -3369,6 +3491,13 @@ private:
 
     static void c1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        if (type == UC_MEM_WRITE &&
+            ((addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ||
+             (addr >= UART2_BASE && addr < UART2_BASE + UART_SIZE) ||
+             (addr >= UART3_BASE && addr < UART3_BASE + UART_SIZE))) {
+            sys->handle_peripheral_write((uint32_t)addr, size, (uint32_t)value);
+            return;
+        }
         // ── Split I/D do heap REX: escrita de DADO na janela 0xf0000000+2MB ──────
         // Grava no shadow (RAM de dados) e marca a word suja p/ restaurar o código
         // pristino no próximo fetch (o store do Unicorn commita APÓS este hook, então
@@ -3408,6 +3537,7 @@ private:
     std::set<u32> c1_breakpoints_;
     std::map<u32, std::string> c0_script_hooks_;
     std::map<u32, std::string> c1_script_hooks_;
+    std::string uart_buffers_[4]; // buffers de linha formatada por UART (1, 2, 3)
     uint64_t c0_poll_d4a8_iters_ = 0; // Item 3: contador de iterações do poll 0xb000d4a8
 
     // Aliasing físico estilo PCSX2/Dolphin: pool de host da APPS_RAM + VTLB LUT.
@@ -3453,6 +3583,7 @@ private:
     std::unique_ptr<UnifiedInput> input_;
     std::unique_ptr<UnifiedSMDBridge> smd_;
     std::unique_ptr<UnifiedDisplaySink> sink_;
+    std::unique_ptr<UnifiedHostAudio> host_audio_;
     std::unique_ptr<zeebo::qdsp5::Qdsp5Dispatcher> qdsp_disp_;
     std::unique_ptr<zeebo::gpu::IGpuRasterizer> rast_;
     std::unique_ptr<zeebo::gpu::IglHook> igl_hook_;

@@ -85,6 +85,7 @@ public:
 
     // Exposto p/ o smoke test drenar PCM mixado e provar por WAV.
     void mix(int16_t* out, size_t frames) { sink_.mix_samples(out, frames); }
+    void mix_audio(int16_t* out, size_t frames) override { sink_.mix_samples(out, frames); }
     uint32_t out_rate() const { return out_rate_; }
 
 private:
