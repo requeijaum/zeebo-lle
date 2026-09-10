@@ -670,7 +670,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     **`MRC p15, 0, r0, c10, c0, 0`** (registrador de TLB lockdown). `r0` = `0xc0` no
     interpretado contra `0` no recompilado.
 
-- [x] **CP15 `c10` (TLB lockdown) é "reads ignored" — RESOLVIDO; divergência do boot ZERADA**:
+- [x] **CP15 `c10` (TLB lockdown) — divergência do boot ZERADA (mas ver RESSALVA do TRM abaixo)**:
   - Diagnóstico: `r0` **já valia `0xc0` antes** do `MRC` (instrução #67392 = `mov r0,#0xc0`), e
     **nenhuma escrita a `c10` ocorre antes** no traço. Ou seja, `0xc0` não é conteúdo do
     registrador nem valor de reset: o interpretado simplesmente **preserva** `r0`, enquanto o
@@ -698,6 +698,57 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **Próximo passo**: implementar `LDM_usr` e `RFE` na nossa camada (mesmo padrão de `CPS` e
     `c10`). São o par de retorno de tratador de exceção e o **último obstáculo conhecido** entre
     o backend recompilado e a continuação do boot.
+
+- [ ] **RESSALVA DO TRM: o `c10` NÃO é "reads ignored" no silício — dívida técnica aberta**:
+  - Os TRMs foram convertidos para markdown (`docs/remote/md/`) e o **DDI0211K §3.3.22** contradiz
+    o modelo do QEMU: o TLB Lockdown Register é *"32-bit **read/write** register"*, com campos
+    reais — `[0] P` (preserve), `[28:26] Victim` (0-7, incrementa sozinho após table walk que
+    escreve na região de lockdown), `[25:1]` e `[31:29]` SBZ/UNP. **Reset = 0.**
+  - O QEMU trata como `ARM_CP_NOP` ("reads ignored") porque **não modela lockdown de TLB** — é uma
+    simplificação do emulador, não o comportamento do ARM1136. Nossa implementação copiou essa
+    simplificação.
+  - **O firmware usa o registrador de verdade**: há **8 escritas** (`MCR p15,0,rX,c10,c0,0`) em
+    `0xf0009de4`..`0xf0009e64`, e a sequência em `0xf0009dd4` é um **read-modify-write** clássico:
+
+        e3a03102  mov r3,#0x80000000        ; base
+        e1a037c3  asr r3,r3,#15             ; MVA
+        ee1a0f10  MRC p15,0,r0,c10,c0,0     ; LE o c10
+        e3800001  orr r0,r0,#1              ; liga o bit P (preserve)
+        ee0a0f10  MCR p15,0,r0,c10,c0,0     ; escreve de volta
+
+  - **Por que o boot converge mesmo assim**: preservar `r0` faz o RMW produzir `0xc0|1 = 0xc1`, que
+    é o que o interpretado também produz — os backends concordam. Mas `0xc0` **não é conteúdo
+    legítimo do `c10`**: os bits 6-7 caem em `[25:1]` SBZ/UNP, que um `c10` real não guardaria.
+    É `r0` remanescente do escopo anterior, que o modelo do QEMU deixa passar. **Os dois backends
+    concordam sobre um valor que o silício não produziria.**
+  - **Consequência honesta**: a paridade entre backends está correta e a divergência foi realmente
+    zerada, mas ambos podem estar divergindo do hardware real neste ponto. Como o Unicorn é o nosso
+    único oráculo executável, ele não consegue revelar esse erro — só o TRM revela.
+  - **Correção devida** (não urgente: não bloqueia o boot): modelar `c10` como registrador real com
+    reset 0, mascarando SBZ/UNP na escrita e devolvendo o conteúdo guardado na leitura. Isso vai
+    **reintroduzir a divergência** contra o Unicorn em `#67395` — o teste terá de comparar contra o
+    **TRM**, não contra o oráculo. Requer decidir explicitamente que o TRM ganha do Unicorn quando
+    os dois discordam.
+
+- [x] **TRMs convertidos para markdown (`docs/remote/md/`) — pesquisáveis por grep**:
+  - `arm1136_trm.md` (1,4 MB, 26.590 linhas) do DDI0211K r1p5 — **Core0**, ARM1136EJ-S.
+  - `arm926ejs_trm.md` (346 KB, 6.489 linhas) do DDI0198E r0p5 — **Core1**, ARM926EJ-S (AMSS).
+  - Conversão por `markitdown` 0.1.6 (41 s e 11 s). Completude verificada de ponta a ponta (capa →
+    glossário final), não apenas por tamanho do arquivo.
+  - **Não versionar os `.md`**: são derivados de PDFs de terceiros (ARM, "Non-Confidential /
+    Unrestricted Access", mas com copyright). São ferramenta local de consulta, como os PDFs.
+  - Ganho concreto: o TRM passou a ser **grep-ável**, e foi assim que a contradição do `c10` acima
+    apareceu. Em 934 páginas de PDF ela não teria sido encontrada por leitura.
+  - Confirmações úteis para `LDM_usr`/`RFE` (bloqueio atual), do próprio TRM:
+    - Regra do `^` (bit S): *"For all STMs and LDMs that **do not load the PC**, stores or restores
+      the **User mode banked registers** instead of the current mode registers"*; e *"For LDMs that
+      **do** load the PC, indicates that the **CPSR is loaded from the SPSR**"*. Ou seja, o mesmo bit
+      S seleciona duas semânticas distintas conforme o PC esteja na lista — é exatamente a divisão
+      `LDM_usr` vs `LDM_eret` do Dynarmic. Nosso `0xf000bcac` (`ldmib r13,{r0-r14}^`) **não** tem PC
+      na lista → é banco de USUÁRIO, sem tocar CPSR.
+    - `RFE` e `SRS` estão na lista de instruções que **não podem ser executadas condicionalmente**
+      (são incondicionais, campo `cond` = `0b1111`). Isso vale para o decodificador: não tente
+      avaliar condição nelas.
   - **Aviso de método**: ao extrair registradores do traço, conferir o índice das colunas contra
     uma linha crua antes de tirar conclusão — foi exatamente esse descuido que gerou o
     diagnóstico errado de "ponteiro 0x2" e a caçada inútil ao acesso desalinhado.
