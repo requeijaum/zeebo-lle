@@ -26,12 +26,27 @@
 #include <cstring>
 #include <vector>
 #include <unicorn/unicorn.h>
+// map_one_aliased() e todo o bloco de mapeamento vivem atras deste guard
+// (zeebo_l4_mmu.h:277-536). Sem defini-lo, o teste compilaria sem enxergar a
+// funcao de producao -- que foi justamente a falha original deste arquivo.
+#define ZEEBO_L4_MMU_WITH_UNICORN 1
 #include "zeebo_l4_mmu.h"
 
 static int falhas = 0;
 static void check(bool cond, const char* nome) {
     std::printf("  [%s] %s\n", cond ? "ok" : "FALHA", nome);
     if (!cond) falhas++;
+}
+
+// Monta um MapItem com fpage de 4KB (size_log2=12) rwx, apontando para `phys`.
+// Encoding conforme zeebo_l4_mmu.h: fpage bits[0:2]=rwx, bits[4:9]=size_log2,
+// vaddr nos bits altos; PhysDesc = phys_base >> 6 (granularidade de 64B).
+static zeebo_l4::MapItem mk_item(uint64_t va, uint64_t phys) {
+    const uint32_t rwx = 7u;                 // r|w|x
+    const uint32_t sz  = 12u;                // 2^12 = 4KB
+    uint32_t fp = (uint32_t)(va & ~0xFFFu) | (sz << 4) | rwx;
+    uint32_t pd = (uint32_t)(phys >> 6);
+    return zeebo_l4::decode_item(pd, fp);
 }
 
 int main() {
@@ -53,26 +68,37 @@ int main() {
         return 2;
     }
 
-    // 1. Primeiro mapeamento: VA -> buffer ANTIGO, no Unicorn e na LUT.
-    uc_err e1 = uc_mem_map_ptr(uc, VA, TAM, UC_PROT_ALL, antigo.data());
-    check(e1 == UC_ERR_OK, "primeiro uc_mem_map_ptr aceito");
+    // Este teste chama a FUNCAO DE PRODUCAO map_one_aliased(). Antes ele
+    // reimplementava o comportamento correto a mao (com a linha do bug
+    // comentada), entao passaria verde mesmo se zeebo_l4_mmu.h regredisse --
+    // provava o harness, nao o codigo. Agora a regressao e detectada de fato.
+
+    // A pool fisica precisa cobrir dois enderecos fisicos distintos, para que
+    // duas fpages sobre o MESMO VA resolvam para host_ptrs diferentes.
+    const uint64_t PHYS_ANTIGO = 0x00000000ull;
+    const uint64_t PHYS_NOVO   = 0x00001000ull;
+    std::vector<uint8_t> poolbuf(2 * TAM, 0);
+    std::memcpy(poolbuf.data(),       &VAL_ANTIGO, 4);   // phys 0x0000
+    std::memcpy(poolbuf.data() + TAM, &VAL_NOVO,   4);   // phys 0x1000
+
+    zeebo_l4::PhysPool pool;
+    pool.phys_base = PHYS_ANTIGO;
+    pool.size = 2 * TAM;
+    pool.host = poolbuf.data();
 
     zeebo_l4::VtlbLut lut;
-    lut.map(VA, TAM, antigo.data());
 
-    // 2. Segundo mapeamento do MESMO VA para outro host_ptr: o Unicorn RECUSA
-    //    com UC_ERR_MAP e mantem o buffer antigo.
-    uc_err e2 = uc_mem_map_ptr(uc, VA, TAM, UC_PROT_ALL, novo.data());
-    check(e2 == UC_ERR_MAP, "segundo uc_mem_map_ptr devolve UC_ERR_MAP (host_ptr imutavel)");
+    // 1. Primeira fpage: VA -> phys ANTIGO. O Unicorn adota este host_ptr.
+    zeebo_l4::MapItem it1 = mk_item(VA, PHYS_ANTIGO);
+    uc_err e1 = zeebo_l4::map_one_aliased(uc, it1, pool, &lut);
+    check(e1 == UC_ERR_OK, "primeira map_one_aliased aceita (host_ptr adotado)");
 
-    // 3. O comportamento CORRETO: como o Unicorn nao trocou o host_ptr, a LUT
-    //    tambem NAO pode trocar. Se trocar, as duas fontes divergem.
-    //
-    //    Esta e a linha que reproduz o bug antigo. Mantida comentada para
-    //    documentar o RED; descomente-la faz o teste falhar, provando que o
-    //    teste detecta a regressao:
-    //
-    //        lut.map(VA, TAM, novo.data());   // <-- bug de map_one_ptr
+    // 2. Segunda fpage: MESMO VA, phys NOVO. O uc_mem_map_ptr interno devolve
+    //    UC_ERR_MAP e o Unicorn MANTEM o buffer antigo (host_ptr e imutavel).
+    //    A funcao de producao nao pode atualizar a LUT neste caso.
+    zeebo_l4::MapItem it2 = mk_item(VA, PHYS_NOVO);
+    uc_err e2 = zeebo_l4::map_one_aliased(uc, it2, pool, &lut);
+    check(e2 == UC_ERR_OK, "segunda map_one_aliased retorna OK (protecao reajustada)");
 
     uint32_t via_uc = 0, via_lut = 0;
     uc_mem_read(uc, VA, &via_uc, 4);
@@ -82,15 +108,17 @@ int main() {
     check(via_uc == VAL_ANTIGO, "Unicorn serve o buffer ANTIGO apos UC_ERR_MAP");
     check(via_lut == via_uc,    "VTLB e Unicorn concordam no mesmo VA");
 
-    // 4. Controle negativo: se a LUT for atualizada apesar do UC_ERR_MAP, as
-    //    fontes DEVEM divergir. Confirma que o teste tem poder de deteccao.
+    // 3. Controle positivo do instrumento: a pool/LUT REALMENTE distinguem os
+    //    dois buffers. Sem isto, "concordam" poderia ser trivialmente verdade.
+    check(pool.host_of(PHYS_ANTIGO) != pool.host_of(PHYS_NOVO),
+          "controle positivo: os dois phys resolvem para host_ptrs distintos");
     {
-        zeebo_l4::VtlbLut lut_bug;
-        lut_bug.map(VA, TAM, antigo.data());
-        lut_bug.map(VA, TAM, novo.data());   // o bug
+        zeebo_l4::VtlbLut lut_ctl;
+        lut_ctl.map(VA, TAM, pool.host_of(PHYS_NOVO));
         uint32_t v = 0;
-        lut_bug.read_u32(VA, &v);
-        check(v != via_uc, "controle negativo: atualizar a LUT apos UC_ERR_MAP divergiria");
+        lut_ctl.read_u32(VA, &v);
+        check(v == VAL_NOVO, "controle positivo: a LUT serviria VAL_NOVO se atualizada");
+        check(v != via_uc,   "controle negativo: atualizar a LUT apos UC_ERR_MAP divergiria");
     }
 
     uc_close(uc);

@@ -40,7 +40,7 @@ test_jit_lockstep: test_jit_lockstep.cpp zeebo_dynarmic_core.cpp zeebo_dynarmic_
 	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ test_jit_lockstep.cpp zeebo_dynarmic_core.cpp $(DYNARMIC_LIBS) -lunicorn
 
 test_jit_lost_write: test_jit_lost_write.cpp zeebo_l4_mmu.h
-	$(CXX) $(CXXFLAGS) -o $@ test_jit_lost_write.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_jit_lost_write.cpp -lunicorn
 
 test_jit_unmapped_asymmetry: test_jit_unmapped_asymmetry.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_jit_unmapped_asymmetry.cpp -lunicorn
@@ -51,7 +51,7 @@ test_jit_cp15_tlb_lockdown: test_jit_cp15_tlb_lockdown.cpp
 test_jit_ldm_usr_rfe: test_jit_ldm_usr_rfe.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_jit_ldm_usr_rfe.cpp -lunicorn
 
-test_vtlb_remap_asymmetry: test_vtlb_remap_asymmetry.cpp
+test_vtlb_remap_asymmetry: test_vtlb_remap_asymmetry.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -o $@ test_vtlb_remap_asymmetry.cpp -lunicorn
 
 test_uc_cpu_model_order: test_uc_cpu_model_order.cpp
