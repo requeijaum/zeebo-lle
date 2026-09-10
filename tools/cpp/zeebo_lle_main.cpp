@@ -2270,6 +2270,13 @@ private:
         // em load_amss. Sem esses mapeamentos os uc_mem_write dos segmentos falham
         // silenciosamente e o Core1 pega UC_ERR_FETCH_UNMAPPED em 0xf0000000.
         uc_mem_map(core1_.uc, 0xf0000000, 0x01000000, UC_PROT_ALL); // Kernel/REX High VA
+        // Janela de page tables do OKL4 (VIRT_ADDR_PGTABLE). O kernel escreve as
+        // page tables por ESTE alias -- medido: escritas nao mapeadas em
+        // 0xf4000000 (w32) e 0xf4023fc0 (w8) vindas de 0xf000a7a0/0xf000a7b8,
+        // com offset 0x23fc0 espelhando 0xf0024000. Sem esta janela as escritas
+        // caem no vazio, add_mapping le a page table de volta como zero e
+        // retorna false -> "Assertion r != 0 failed in init.cc".
+        uc_mem_map(core1_.uc, 0xf4000000, 0x00100000, UC_PROT_ALL);
         uc_mem_map(core1_.uc, 0xb0000000, 0x01000000, UC_PROT_ALL); // AMSS user/task VA
 
         // Janela de RELOCAcao do REX (transicao 0xf0017740..0xf001774c).
