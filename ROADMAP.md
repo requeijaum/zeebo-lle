@@ -463,6 +463,30 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Referência normativa disponível localmente (não buscar na web): `docs/remote/` traz
     `DDI0211K_arm1136_r1p5_trm.pdf` (934 pp., ARM1136 = Core0) e
     `DDI0198E_arm926ejs_r0p5_trm.pdf` (264 pp., ARM926EJ-S = Core1).
+
+- [x] **Resultado NEGATIVO — LDR desalinhado NÃO é a causa da divergência #23726**
+      (`test_jit_unaligned_ldr.cpp`; registrado para ninguém reinvestigar):
+  - Hipótese: a instrução que diverge é `ldreq r3,[r5]` com **r5 = 0x00000002**, uma carga de
+    endereço **desalinhado**. O TRM do ARM1136 (DDI0211K, p.210) diz que o bit U vale 0 no reset
+    e que nesse modo o processador "treats unaligned loads as rotated aligned data accesses".
+    Seria uma explicação limpa: interpretado rotacionando, recompilado lendo literal.
+  - **Refutada por medição.** Controle que separa os dois modelos: memória `11223344 55667788`,
+    `ldr` de `+2`. O modelo rotacionado daria `0x33441122`; o Unicorn como ARM1176 devolve
+    **`0x77881122`** = leitura **literal**. Logo o acesso desalinhado está habilitado (U=1) e ler
+    byte-a-byte do endereço cru — como a VTLB faz — está **correto**. Nada a consertar aqui.
+  - Cuidado metodológico: com memória zerada além da palavra, "rotação" e "leitura literal" dão
+    **o mesmo resultado**. O primeiro teste que escrevi não distinguia os dois e teria
+    "confirmado" a hipótese errada; foi preciso um caso com **duas palavras não nulas adjacentes**.
+  - O teste ficou no `check` como **regressão** (trava a concordância dos motores em carga
+    desalinhada, para que uma futura "correção" não introduza rotação indevida). Ele **passa** —
+    não reproduz o defeito do boot.
+  - **A causa real segue ABERTA** e é de outra natureza: os dois motores executam a mesma
+    instrução, no mesmo PC, com as mesmas flags (`nzcv=0x60000000`, Z=1 nos dois), lendo o
+    **mesmo endereço**, e obtêm valores diferentes (`0x10090001` vs `0`). Divergem no **conteúdo
+    da memória**, não na semântica da instrução. Note que `r5 = 0x2` é um ponteiro absurdo: a
+    corrupção provavelmente nasce **antes**, e #23726 é só onde ela fica visível.
+  - Próximo passo sugerido: comparar o **conteúdo da memória** entre os backends (não só
+    registradores) e rastrear quem escreveu — ou deixou de escrever — a região lida.
 - [ ] **Ciclo de vida real por módulo (reaberto; `adcb631` oferece apenas carga + harness fixo)**:
   - EFS2 usa catálogo de blocos conhecidos, não extração universal. `--applet=` copia bytes host.
   - Resolver formato/relocações/entry de DD, criar instância com CLSID correto e usar HandleEvent do objeto retornado; jamais reutilizar `0x10532344` para todo jogo.
