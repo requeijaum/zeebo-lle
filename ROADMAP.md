@@ -1469,6 +1469,57 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW67-QW69 — Core0: o bit T se perde no RETORNO do kernel para o Iguana  **[CAUSA RAIZ LOCALIZADA]**
+
+Continuacao do QW64-66. Duas hipoteses minhas refutadas antes de achar o ponto real.
+
+**Hipotese A (minha, da mensagem anterior) — `e_entry` com LSB=1 perdido: REFUTADA.**
+
+    e_entry do APPS = 0x10000000, LSB=0
+
+O dump em `0x10000000` desassembla como ARM valido e idiomatico — boot de
+primeiro estagio legitimo, exatamente como deve ser:
+
+    b 0x10000014 ; msr cpsr_fc,#0xd3 ; mcr p15,0,r0,c1,c0,0 (SCTLR)
+    ldr sp,[pc,#0x1c] ; add r0,pc,#4 ; bl 0x100168b0 ; b 0x10000038
+
+Nao ha' bit perdido. Nada a corrigir ali.
+
+**Hipotese B — propagacao do T entre slices: JA' ESTA' CORRETA.** O codigo
+(linha ~1600) reconstitui o T do CPSR: `start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u)`.
+Se o CPSR chega com T=0, ele propaga T=0 fielmente. Nao e' o defeito.
+
+**Onde esta' de fato — cadeia completa de saltos do Core0 (so' 3 transicoes):**
+
+| Faixa | PC | CPSR | T |
+|---|---|---|---|
+| `00 -> 10` | `0x10000000` | `0x400001d3` | 0 | entry ARM, correto |
+| `10 -> f0` | `0xf00124a4` | `0x800001d3` | 0 | entra no kernel |
+| `f0 -> b0` | `0xb000c73c` | `0x60000010` | 0 | **volta ao Iguana — AQUI** |
+
+Desassemble de `0xb000c73c`:
+
+    ARM  : capstone nao produz UMA instrucao valida
+    THUMB: 0xb000c73a  adds r0, r6, #0
+           0xb000c73c  blx  r1          <<< nosso PC
+           0xb000c73e  mov  r8, r8      (nop canonico Thumb)
+
+O padrao `ldr r0,[r6] / ldr r1,[r0,#4] / adds r0,r6,#0 / blx r1` e' despacho de
+metodo virtual. Os `mov r8,r8` sao assinatura inequivoca de Thumb.
+
+> **Causa raiz:** o kernel devolve o controle ao Iguana em `0xb000c73c` com
+> `cpsr=0x60000010` (modo User, **T=0**), mas o destino e' codigo **Thumb**.
+> O CPSR do usuario e' restaurado **sem o bit T**. Esperado: `0x60000030`.
+
+Consistente com todas as medicoes anteriores: T=1 nunca aparece em 4M amostras,
+passo de 4 bytes em codigo Thumb, e o "laco" `b000afdc..affc` e' lixo decodificado.
+
+**Fix ainda NAO aplicado — de proposito.** A licao do QW66 (patch inerte que
+teria virado falso "causa raiz corrigida") exige controle negativo antes de
+qualquer correcao. O fix deve restaurar o T no retorno kernel->usuario e ser
+comparado no mesmo binario contra o comportamento atual.
+
+
 ### QW64-QW66 — Core0 executa codigo Thumb em modo ARM  **[CAUSA PARCIAL MEDIDA — fix tentado FALHOU]**
 
 **O endereco no ROADMAP estava errado.** O Core0 nao esta' no laco
