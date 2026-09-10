@@ -464,6 +464,35 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     `DDI0211K_arm1136_r1p5_trm.pdf` (934 pp., ARM1136 = Core0) e
     `DDI0198E_arm926ejs_r0p5_trm.pdf` (264 pp., ARM926EJ-S = Core1).
 
+- [x] **Estado de RESET do CP15 corrigido — lição vinda do FONTE do QEMU (`test_jit_cp15_reset.cpp`)**:
+  - Método: em vez de só interrogar o binário, li `target/arm/tcg/cpu32.c` do QEMU. Como o
+    Unicorn é fork do QEMU, **essas definições são as que o nosso motor interpretado usa** — logo
+    servem de especificação para o recompilado, sem copiar uma linha de código.
+  - Valores do QEMU para a família (idênticos em 1136, 1136_r2 e 1176):
+
+        ctr          = 0x01dd20d2
+        reset_sctlr  = 0x00050078   <-- NÃO é zero (bits W/P/D/L ligados)
+        midr         = 0x4107b362 (1136_r2) / 0x4117b363 (1136) / 0x410fb767 (1176)
+
+  - **Defeito encontrado**: nosso banco CP15 nascia inteiramente **zerado**. Uma leitura de
+    `SCTLR` (c1,c0,0) antes da primeira escrita devolvia `0`, enquanto o interpretado devolvia
+    `0x00050078`. É a mesma classe do defeito de `5471a8b`, mas de outra origem: lá o banco não
+    guardava o que era **escrito**; aqui não tinha o valor **inicial**. O boot do AMSS faz
+    read-modify-write de SCTLR, então partindo de 0 todos os bits de reset se perdiam.
+  - Também corrigidos, pelo mesmo motivo: `ctr` (era `0x1D152152`, valor sem procedência) e
+    `midr`, que agora acompanha o modelo realmente configurado no Unicorn (`arm1176`).
+  - RED confirmado: com o código anterior, **3 asserções falham** (SCTLR `0x00050078` vs `0`,
+    CTR `0x01dd20d2` vs `0x1d152152`, MIDR `0x410fb767` vs `0x4107b362`). GREEN: 3/3.
+    `make check` = exit 0, sem falhas.
+  - **Resultado honesto sobre o boot: a divergência NÃO se moveu.** Continua em **#23726**, com
+    os mesmos valores (`r3 = 0x10090001` vs `0`) e as mesmas contagens (596.725 vs 1.168.764
+    instruções). A correção elimina uma divergência real de estado entre os backends, mas **não
+    é a causa** da parada do boot. Registrado assim para não virar falso progresso.
+  - Isto **resolve parcialmente** a incoerência de identidade de CPU descrita acima: os dois
+    backends agora respondem `arm1176`. Continua **em aberto** qual é a CPU correta do Zeebo — o
+    TRM que temos é do ARM1136 r1p5, o que sugere que o certo seria alinhar tudo à família 1136,
+    não ao 1176. Trocar exige refazer os traços (muda o oráculo).
+
 - [ ] **Incoerência de identidade de CPU entre os dois backends (ACHADO — pendente de decisão)**:
   - Levantado ao investigar o que o QEMU teria a ensinar (o Unicorn é um **fork do QEMU**, então
     o modelo de CPU dele *é* o modelo do QEMU; ver seção de licença abaixo).
@@ -513,9 +542,19 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     `arm1136`, `arm1136-r2`, `arm1176` e `arm926`. Foi assim que a incoerência de MIDR acima foi
     medida. **Aprender comportamento observando o binário é legítimo e não cria obra derivada**;
     copiar o fonte é que cria.
-  - Uso recomendado: tratar QEMU/Unicorn como **oráculo executável** (comparar comportamento) e o
-    TRM em `docs/remote/` como **referência normativa**, escrevendo a implementação por conta
-    própria — exatamente o método já usado em `CPS` e `CP15`.
+  - **O fonte do QEMU serve como ESPECIFICAÇÃO, sem ser copiado.** `target/arm/tcg/cpu32.c`
+    contém os valores de reset de cada CPU (`midr`, `ctr`, `reset_sctlr`, `reset_auxcr`, features).
+    Como o Unicorn é fork do QEMU, esses são **exatamente** os valores que o nosso motor
+    interpretado usa — ou seja, são a especificação contra a qual o recompilado tem de bater.
+    Ler um valor numérico de referência e implementá-lo por conta própria **não é obra derivada**;
+    copiar a implementação seria. Foi assim que o defeito de `reset_sctlr` foi encontrado.
+  - Arquivos do QEMU com maior valor para este projeto (para consulta futura):
+    `target/arm/tcg/cpu32.c` (definições/reset das CPUs ARM32),
+    `target/arm/cpu.h` (bits de SCTLR e flags de feature).
+  - Uso recomendado: tratar QEMU/Unicorn como **oráculo executável** (comparar comportamento), o
+    fonte do QEMU como **fonte de valores de referência**, e o TRM em `docs/remote/` como
+    **referência normativa** — escrevendo a implementação por conta própria, exatamente o método
+    já usado em `CPS`, `CP15` e no reset do CP15.
 
 - [x] **Resultado NEGATIVO — LDR desalinhado NÃO é a causa da divergência #23726**
       (`test_jit_unaligned_ldr.cpp`; registrado para ninguém reinvestigar):

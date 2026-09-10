@@ -32,10 +32,27 @@ struct MemoryBridge {
     void     (*on_code)(void* ud, uint32_t pc) = nullptr;
 };
 
-// IDs CP15 reais para o ARM1136EJ-S do MSM7201A
+// Identidade e estado de reset do CP15.
+//
+// Os valores vem do fonte do QEMU (target/arm/tcg/cpu32.c), que e a MESMA
+// definicao usada pelo Unicorn (fork do QEMU) e portanto pelo nosso motor
+// interpretado. Manter os dois backends com a mesma identidade e pre-requisito
+// para o lockstep valer.
+//
+// Padrao = arm1176, porque e o modelo que o emulador realmente configura
+// (UC_CPU_ARM_1176 em zeebo_lle_main.cpp, zeebo_boot.cpp, zeebo_dual_core.cpp).
+// ATENCAO: se um dia o Core0 for alinhado a familia ARM1136 (o TRM que temos e
+// do ARM1136 r1p5), trocar TAMBEM estes valores — ver ROADMAP, "Incoerencia de
+// identidade de CPU". Referencia do QEMU:
+//   arm1136_r2: midr=0x4107b362  arm1136: midr=0x4117b363  arm1176: midr=0x410fb767
+//   ctr=0x01dd20d2 e reset_sctlr=0x00050078 nos tres.
 struct Cp15Ids {
-    uint32_t midr = 0x4107B362; // ARM1136 family (part 0xB36)
-    uint32_t ctr  = 0x1D152152;
+    uint32_t midr = 0x410FB767; // arm1176 (QEMU cpu32.c)
+    uint32_t ctr  = 0x01DD20D2; // idem
+    // Valor de RESET do registrador de controle do sistema (SCTLR, c1,c0,0).
+    // NAO e zero: traz W/P/D/L ligados. Um banco zerado fazia o boot perder
+    // esses bits no primeiro read-modify-write.
+    uint32_t sctlr_reset = 0x00050078;
 };
 
 class DynarmicCore {

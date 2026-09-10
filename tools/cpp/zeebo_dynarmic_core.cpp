@@ -22,6 +22,7 @@ public:
         scratch2_ = 0;
         midr_val_ = ids.midr;
         ctr_val_  = ids.ctr;
+        apply_reset_state(ids.sctlr_reset);
     }
 
     static std::uint64_t NopFn(void*, std::uint32_t, std::uint32_t) { return 0; }
@@ -44,6 +45,15 @@ public:
 
     std::uint32_t* bank_slot(unsigned opc1, CoprocReg CRn, CoprocReg CRm, unsigned opc2) {
         return &bank_[slot(opc1, (unsigned)CRn, (unsigned)CRm, opc2)];
+    }
+
+    // Aplica o estado de RESET do CP15. O banco nasce zerado, mas o hardware
+    // nao: o registrador de controle do sistema (SCTLR, c1,c0,0) tem valor de
+    // reset 0x00050078 (bits W/P/D/L ligados) segundo o fonte do QEMU, que e a
+    // mesma definicao usada pelo Unicorn. Sem isto, a primeira leitura de SCTLR
+    // devolvia 0 e o boot perdia esses bits no read-modify-write.
+    void apply_reset_state(std::uint32_t sctlr_reset) {
+        *bank_slot(0, static_cast<CoprocReg>(1), static_cast<CoprocReg>(0), 0) = sctlr_reset;
     }
 
     std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg,
