@@ -466,6 +466,47 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     - **Paridade dos backends em 3.000.000 de instruções: divergência ZERO** (antes o
       máximo medido era 400.000).
 
+### Auditoria de emuladores de terceiros (2026-09-10) — o que se confirmou na fonte
+
+Pesquisa delegada sobre PCSX2/Dolphin, Azahar/Citra, Ryujinx/Eden, emuladores de
+feature phone e QEMU. **Só entram aqui afirmações que eu verifiquei na fonte real**;
+o resto foi descartado. Nada de código de terceiros foi copiado.
+
+- **Nenhum emulador consultado resolve o nosso problema de instrução privilegiada —
+  todos o EVITAM por serem HLE.** No Azahar (`src/core/arm/dynarmic/arm_dynarmic.cpp:83`)
+  o `InterpreterFallback` é literalmente `UNREACHABLE_MSG` ("Should never happen"):
+  como o kernel do 3DS é reimplementado em C++, o guest nunca executa modo supervisor
+  e as 6 instruções nunca aparecem. Confirmado baixando o arquivo. Nós somos LLE e
+  **temos** que executá-las — foi o que fizemos em `559dcf9`, e a decisão de
+  implementar na nossa camada (em vez de delegar) está validada.
+- **Delegar ao interpretador seria um beco sem saída em host ARM64**: no Dynarmic,
+  `backend/arm64/emit_arm64_a32.cpp:37` faz `ASSERT_FALSE("Interpret should never be
+  emitted.")`, enquanto só o backend x64 (`backend/x64/a32_emit_x64.cpp:1133`) chama
+  `InterpreterFallback`. Verificado no fonte local. Nosso host é x86_64 hoje, mas a
+  interceptação pré-tradução que adotamos é a única portável para handhelds ARM64.
+- **CP15 "reads ignored" não existe na API do Dynarmic — o idioma é ponteiro-sumidouro**:
+  o Citra/Azahar (`arm_dynarmic_cp15.cpp:29-49`) devolve `&state.cp15_flush_prefetch_buffer`,
+  `&state.cp15_data_sync_barrier` etc. para escritas que devem ser NOP, e
+  `std::monostate{}` para o resto. Confirma independentemente a limitação que
+  encontramos sozinhos e valida nosso `emulate_reads_ignored_cp15`.
+- **O Dynarmic já traz um comparador Unicorn↔JIT** (`tests/A32/fuzz_arm.cpp`), sob
+  licença **permissiva** (0BSD) — diferente de PCSX2/Dolphin/Citra/QEMU, que são
+  copyleft. Detalhe aproveitável: `fuzz_arm.cpp:429` normaliza o PC porque "Qemu
+  doesn't do Thumb transitions??" — classe de falso-positivo que pode nos morder ao
+  comparar Unicorn (QEMU) contra Dynarmic. Irrelevante hoje (boot é 100% ARM), mas
+  registrado para quando houver Thumb.
+- **Não existe emulador público do Qualcomm MSM7201A.** Há apenas um RFC de 2026-05
+  na lista qemu-devel, sem código. O parente mais próximo é o `qemu-calypso` (baseband
+  TI Calypso, dois cores + firmware não-patcheado), que **não declara licença** — tratar
+  como todos-os-direitos-reservados, só arquitetura. O `zeebo-lle` não tem precedente
+  público rodando AMSS/L4/REX.
+- **Critério de aceitação adotado do qemu-calypso**: a plataforma só está emulada quando
+  **mais de um** dump de firmware boota sem hacks específicos. Distingue "emulo o
+  MSM7201A" de "fiz este dump andar". Vale como gate futuro do boot LLE.
+- **Estratégia validada por FirmWire (BSD-3)**: rodar firmware real e **stubar
+  explicitamente** as partes intratáveis (rádio/L1/DSP). Aplica-se diretamente ao Zeebo,
+  que é "um celular sem rádio".
+
 - [ ] **CP15 exercitado pelo boot vs. o que modelamos (levantado 2026-09-10)**:
     Inventário dos `MCR p15` realmente executados no boot, por (CRn,CRm,opc1,opc2):
 
