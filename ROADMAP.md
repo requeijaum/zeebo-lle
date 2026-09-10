@@ -420,7 +420,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - **Resultado negativo registrado**: a hipótese de que os backends divergiam por **flags** foi
     REFUTADA pelo lockstep (`test_jit_lockstep.cpp`) — NZCV concordam. Não reinvestigar.
 
-- [ ] **Divergência de boot entre backends (ABERTA, próxima na fila)**:
+- [x] **Divergência de boot entre backends — ZERADA (`28fdf79`); resta implementar `LDM_usr`/`RFE`**:
   - Ferramenta: `--trace-core0=<arq> --trace-limit=N` grava a trajetória do Core0 pelos **dois**
     backends (o gancho `c0_code_hook` é comum) e `tools/cpp/diff_traces.py` acha a primeira
     divergência exata de PC/flags/registradores. **Não usar o log periódico** para isso: ele amostra
@@ -433,7 +433,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     é prova de correção — pode significar executar lixo por mais tempo. O que sustenta progresso
     aqui é a divergência ter recuado, não o contador ter subido.
 
-- [ ] **Inventário do que o Dynarmic NÃO traduz (levantado 2026-09-10; ver `scan_unimplemented.py`)**:
+- [x] **Inventário do que o Dynarmic NÃO traduz — COMPLETO: exatamente 6 A32 (`a60d92b`)**:
   - O Dynarmic delega ao interpretador apenas **6 instruções A32**, todas de modo privilegiado —
     verificado em `third_party/dynarmic/.../translate/impl/`:
     `arm_CPS`, `arm_RFE`, `arm_SRS` (`status_register_access.cpp`) e
@@ -531,7 +531,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
     se a divergência do boot se move. Trocar o modelo do Unicorn muda o comportamento do
     oráculo — refazer os traços depois.
 
-- [ ] **QEMU como fonte de aprendizado: o que dá e o que NÃO dá para usar (licença)**:
+- [x] **QEMU como fonte de aprendizado: decidido — ler/compreender sim, copiar não (`6c94135`)**:
   - **Restrição legal (decidir antes de copiar qualquer linha)**: QEMU é **GPLv2**. Copiar código
     dele para este projeto tornaria o resultado uma obra derivada sob GPLv2. O `Dynarmic` que
     usamos é **licença permissiva** (estilo ISC/0BSD: "permission to use, copy, modify, and/or
@@ -599,7 +599,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Próximo passo: comparar o **conteúdo da memória** entre os backends (não só
     registradores) e rastrear quem escreveu — ou deixou de escrever — a região lida.
 
-- [ ] **Divergência #23726 caracterizada (investigação em curso; `diff_memory.py`)**:
+- [x] **Divergência #23726 — RESOLVIDA (`f4bac04`): escrita perdida + assimetria de mapeamento**:
   - **CORREÇÃO de um erro anterior deste ROADMAP**: eu havia registrado que a carga era
     `ldreq r3,[r5]` com **`r5 = 0x00000002`** (ponteiro absurdo, sugerindo memória corrompida).
     **Estava errado** — eu lia a coluna errada do traço. O formato real da linha é
