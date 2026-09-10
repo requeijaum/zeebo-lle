@@ -5,9 +5,25 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LLE_PROBE="$HERE/zeebo_lle_mod_probe"
-TDIR="/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests"
+# Suite de vetores fora do repo. Permite sobrepor sem editar o script.
+TDIR="${ZEEBO_CPUTESTS_DIR:-/home/rafaelfrequiao/projects/zeebo-emulator/testkit/cputests}"
 OUT="$TDIR/build"
 STEPS=200
+
+# Diretorio ausente ou sem vetores nao pode terminar com sucesso: um laco que
+# nao roda nenhum caso sairia com 0 pass / 0 fail e codigo 0 (falso verde).
+if [ ! -d "$TDIR" ]; then
+    echo "ERRO: suite de vetores nao encontrada em $TDIR"
+    echo "      defina ZEEBO_CPUTESTS_DIR apontando para o diretorio correto."
+    exit 2
+fi
+shopt -s nullglob
+vectors=("$TDIR"/*.s)
+if [ "${#vectors[@]}" -eq 0 ]; then
+    echo "ERRO: nenhum vetor .s em $TDIR — nada foi executado."
+    exit 2
+fi
+mkdir -p "$OUT"
 
 [ -x "$LLE_PROBE" ] || {
     echo "Building zeebo_lle_mod_probe..."
@@ -19,7 +35,7 @@ fail=0
 
 echo "=== Zeebo LLE ARM11 Conformance Tests against testkit/cputests ==="
 
-for s in "$TDIR"/*.s; do
+for s in "${vectors[@]}"; do
     name="$(basename "${s%.s}")"
     bin="$OUT/$name.bin"
     exp="$TDIR/$name.expected"
@@ -57,5 +73,9 @@ for s in "$TDIR"/*.s; do
 done
 
 echo
-echo "=== LLE SUMMARY: $pass pass, $fail fail ==="
+echo "=== LLE SUMMARY: $pass pass, $fail fail (de ${#vectors[@]} vetores) ==="
+if [ "$((pass + fail))" -eq 0 ]; then
+    echo "ERRO: nenhum vetor executado — resultado nao conta como aprovacao."
+    exit 2
+fi
 [ "$fail" -eq 0 ] || exit 1

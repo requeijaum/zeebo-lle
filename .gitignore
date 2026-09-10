@@ -13,8 +13,11 @@ tools/cpp/zeebo_elf
 tools/cpp/zeebo_devices_test
 tools/cpp/zeebo_lle_main
 tools/cpp/zeebo_lle_mod_probe
+tools/cpp/zeebo_harness
 tools/cpp/test_save_state
 tools/cpp/test_audio_sink
+tools/cpp/test_audio_lifetime
+tools/cpp/test_elf_bounds
 tools/cpp/gpu/gpu_smoke
 tools/cpp/gpu/gpu_smoke_gl
 tools/cpp/gpu/igl_smoke

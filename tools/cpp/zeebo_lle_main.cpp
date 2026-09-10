@@ -449,12 +449,15 @@ public:
             return false;
         }
         SDL_PauseAudioDevice(dev_, 0); // começa a puxar amostras imediatamente
+        out_rate_ = have.freq > 0 ? (uint32_t)have.freq : sample_rate;
         printf("[Audio] Host device armado: %d Hz, %d canais, buffer=%d\n", have.freq, have.channels, have.samples);
         return true;
     }
 
     void shutdown() {
         if (dev_ != 0) {
+            // SDL_CloseAudioDevice espera a callback corrente terminar; depois
+            // disso nenhuma nova chamada a mix_fn_ pode ocorrer.
             SDL_CloseAudioDevice(dev_);
             dev_ = 0;
         }
@@ -465,6 +468,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         mix_fn_ = std::move(mix_fn);
     }
+
+    // Frequencia realmente negociada com o host (DD-QW6). Difere de 44100 quando
+    // o SDL aplica ALLOW_FREQUENCY_CHANGE; o mixer precisa reamostrar para ela.
+    uint32_t out_rate() const { return out_rate_; }
 
 private:
     static void sdl_callback_trampoline(void* userdata, uint8_t* stream, int len) {
@@ -483,6 +490,7 @@ private:
 
     std::function<void(int16_t*, size_t)> mix_fn_;
     SDL_AudioDeviceID dev_{0};
+    uint32_t out_rate_{44100};
     bool headless_{true};
     std::mutex mutex_;
 };
@@ -514,6 +522,14 @@ public:
         core1_state_ = nullptr;
     }
     ~ZeeboLLESystem() {
+        // DD-QW5: a callback do SDL roda em outra thread e usa qdsp_disp_ por
+        // ponteiro cru. Os membros sao destruidos em ordem inversa de declaracao,
+        // o que liberaria o dispatcher ANTES de ~UnifiedHostAudio parar a callback.
+        // Fecha o device e solta a fonte aqui, antes de qualquer destruicao.
+        if (host_audio_) {
+            host_audio_->shutdown();
+            host_audio_->set_source(nullptr);
+        }
         flush_uarts();
     }
     void flush_uarts() {
@@ -980,6 +996,14 @@ public:
         bool run = true;
 
         while (run) {
+            // O servidor de controle so e atendido pelo laco principal; sem isto
+            // um cliente conectado durante o modo applet fica sem resposta ate
+            // o processo encerrar (cano quebrado do lado do agente).
+            if (control_) {
+                auto reqs = control_->Drain();
+                for (auto& req : reqs) process_control_request(req, (int)frames);
+                if (quit_requested_) { run = false; break; }
+            }
             auto t_now = std::chrono::steady_clock::now();
             uint32_t elapsed_ms = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_tick_prev).count();
             if (elapsed_ms > 0) {
@@ -1053,7 +1077,10 @@ public:
                        (unsigned long long)timer_dispatches, total);
                 t_last = now;
             }
+            // Headless com control server fica vivo esperando comandos: sem uma
+            // pausa o laco ocuparia um nucleo inteiro em repaints inuteis.
             if (!headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            else if (control_) std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
         if (core0_.uc && h_stub) uc_hook_del(core0_.uc, h_stub);
@@ -3847,8 +3874,10 @@ int main(int argc, char** argv) {
                                     (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
                                     (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
             bool life_ok = sys.dispatch_applet_start(app_label);
-            // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0) ou GUI.
-            if (life_ok && (max_seconds > 0.0 || !headless)) {
+            // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0),
+            // GUI, ou um cliente de controle esperando comandos (senão o processo
+            // encerraria antes de responder).
+            if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }
             return life_ok ? 0 : 1;
@@ -3863,7 +3892,7 @@ int main(int argc, char** argv) {
         } else {
             // Executa ciclo de vida automático para applet/jogo externo (estilo Zeebx/Dolphin run game)
             bool life_ok = sys.dispatch_applet_start(applet_path);
-            if (life_ok && (max_seconds > 0.0 || !headless)) {
+            if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }
             return life_ok ? 0 : 1;
