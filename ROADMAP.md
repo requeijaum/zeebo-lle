@@ -1469,6 +1469,105 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW81-QW87 — Causa raiz do Core0: **um unico address space para todas as tasks**  **[MEDIDO — bloqueio arquitetural]**
+
+Com o teto de 45s removido (QW78-80), rodei ate 180s: `insns=640.944.226`, sem
+crash, mas **`MapControl` congelado em 756** e o PC sempre em `b04000xx`.
+
+**QW81-QW83 — onde o tempo e gasto (histograma nao-filtrado, STATS §1)**
+
+Bucket de 64KB: `b040` absorve **100% do crescimento** (50M por janela); todo o
+resto congelado. Histograma fino dentro do bucket:
+
+    b0400064: 32.164.200   ldrb r6,[r0]
+    b0400066: 32.164.200   adds r0,#1
+    b0400068: 32.164.199   strb r6,[r1]
+    b040006a: 32.164.199   adds r1,#1
+    b040006c: 32.164.199   subs r4,#1
+    b040006e: 32.164.199   bne  b0400064
+
+O laco **interno** de copia literal roda ~32 milhoes de vezes — mas o probe no
+laco **externo** (`b040004a`) so disparou **32 vezes**, e progredindo
+(`parados=0`). As duas medidas nao batiam; nao concluí antes de reconciliar.
+
+**QW84 — o contador estoura**
+
+    entrada#1..#8   r4 = 1, 4, 2, 2, 1, 1, 1, 1     (sadio)
+    entrada#59      r4 = 0xFFFFFFFF (4.294.967.295)  <<<
+
+`subs r4,#1` com `r4=0` faz **underflow**: o laco passa a copiar ~4 bilhoes de
+bytes. Na entrada#59 o `dst` **volta ao inicio** (`0xb04151a4`, o mesmo do #1).
+
+**QW85 — por que o comprimento veio 0**
+
+    call#1  src=0xb04155b4 dst=0xb04151a4 len=1040  bytes=72 01 65 b4 55 41 b0 23
+    call#2  src=0xb04155b4 dst=0xb04151a4 len=1040  bytes=01 00 00 00 01 00 00 00
+    CTRL (b0400040): 01c08fe2 nas duas  -> a leitura de memoria esta sadia
+
+A **mesma** descompressao roda duas vezes com argumentos identicos; na segunda a
+fonte ja foi sobrescrita. A conta fecha: `dst + len = 0xb04151a4 + 0x410 =
+0xb04155b4 = src`. **O destino termina exatamente onde a fonte comeca** —
+descompressao **in-place** com buffers adjacentes, layout legitimo e comum.
+
+> **Isso nao e bug do descompressor.** In-place e correto rodando **uma vez**.
+> A pergunta certa nao era "por que o LZ trava", e sim **"por que roda duas vezes"**.
+
+**QW86 — nao e laco: sao duas tasks**
+
+    call#1  lr=0xb040001c  sp=0xb0046f7c
+    call#2  lr=0xb040001c  sp=0xb0327e3c   <- SP completamente diferente
+
+Pilhas distintas = contextos distintos (um laco reusaria o SP). O chamador e um
+**interpretador de tabela de init**:
+
+    b0400000  b   b0400008           ; entry point da task
+    b0400008  add r0, pc, #0x28      ; base da tabela (PC-relativo)
+    b040000c  ldm r0, {sl, fp}       ; sl=inicio, fp=fim
+    b040001c  cmp sl, fp             ; fim da tabela?
+    b0400020  beq b0410070           ; sim -> segue o boot
+    b0400024  ldm sl!, {r0,r1,r2,r3} ; entrada: src, dst, len, handler
+    b0400028  sub lr, pc, #0x14      ; lr = b040001c  (CONSTANTE por construcao)
+    b0400034  bx  r3                 ; chama o handler (descompressor)
+
+`sub lr,pc,#0x14` explica o LR identico nas duas chamadas: e constante, **nao**
+indica o mesmo chamador dinamico.
+
+**QW87 — a causa raiz, confirmada por medicao E por estrutura**
+
+Log de mapeamentos: **63 paginas fisicas mapeadas em mais de um space L4**.
+
+    phys=0x10200000 -> space=0x80000100 (va 0x10200000 e va 0xb0f00000)
+                    -> space=0x80010001 (va 0x10200000)
+
+No codigo: **um unico `uc_open` para o Core0** (linha 1228). Um `uc_engine` = um
+espaco de enderecos. `handle_map_control` recebe `sid` mas **o sid nao seleciona
+espaco nenhum** — todo mapeamento cai no mesmo `uc`.
+
+O L4 cria multiplos address spaces; o emulador os **colapsa num unico mapa
+plano**. Tasks que deveriam estar isoladas enxergam a memoria uma da outra.
+
+**Cadeia completa, do sintoma a raiz:**
+
+| # | Fato medido | QW |
+|---|---|---|
+| 1 | Core0 "travado" em `b0400064`, 32M insns/janela | QW83 |
+| 2 | laco interno roda com `r4 = 0xFFFFFFFF` | QW84 |
+| 3 | `r4` estourou porque o comprimento lido foi **0** | QW84 |
+| 4 | leu 0 porque a **fonte ja estava sobrescrita** | QW85 |
+| 5 | sobrescrita porque a descompressao e **in-place** (`dst+len == src`) | QW85 |
+| 6 | in-place executada **duas vezes**, SPs distintos = **2 tasks** | QW86 |
+| 7 | as tasks compartilham memoria: **1 address space** no emulador | QW87 |
+
+O item 5 e comportamento legitimo do firmware. **O defeito e o item 7.**
+
+Isto e a mesma raiz do bloqueio ja registrado ("SMEM nao compartilhada",
+mapeamentos `[aliased]`), vista de outro angulo: **o emulador nao modela address
+spaces separados.**
+
+**Fix necessario (nao implementado):** um `uc_engine` por task, ou TLB virtual
+comutada por `sid` em `handle_map_control`. Mudanca estrutural — parei aqui para
+decidir o caminho.
+
 ### QW78-QW80 — SIGSEGV: invalidacao de TB nao e' reentrante em code hook  **[CORRIGIDO]**
 
 O `exit=139` estava catalogado como "segfault de host pre-existente". **Nao era.**
