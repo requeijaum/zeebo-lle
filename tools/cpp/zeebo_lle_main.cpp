@@ -2574,7 +2574,14 @@ private:
         // que rex_heap_init (0xf0002cd4) particione o heap sem corromper o .text.
         rex_heap_pristine_.assign(REX_HEAP_VA_SIZE, 0);
         uc_mem_read(core1_.uc, REX_HEAP_VA_BASE, rex_heap_pristine_.data(), REX_HEAP_VA_SIZE);
-        rex_heap_shadow_.assign(REX_HEAP_VA_SIZE, 0);
+        // O shadow de DADOS comeca zerado, mas 0xf000004c cai dentro desta janela
+        // e o REX espera ler ali a BASE DA RAM (0x00a00000). Como toda leitura de
+        // dado nesta faixa passa a vir do shadow, semear a RAM do Unicorn nao
+        // basta -- o scanner 0xf0017448 leria 0 e desistiria (panic 0xf0017890).
+        // Por isso o shadow nasce como COPIA do pristino: os dados inicializados
+        // do AMSS (incluindo 0xf000004c) continuam visiveis, e so as escritas
+        // posteriores do REX divergem do .text.
+        rex_heap_shadow_ = rex_heap_pristine_;
         rex_heap_dirty_.clear();
         rex_split_id_ = true;
         printf("[System][Core1] Split I/D do heap REX armado: janela 0x%08x+%uKB "
@@ -2584,45 +2591,67 @@ private:
         return true;
     }
 
-    // Preenche uma tabela de regioes de RAM em 0x00a1d73c.
+    // Semeia a tabela de regioes de RAM consultada pelo scanner do REX
+    // (0xf0017448). Endereco e formato foram DESMONTADOS do firmware em runtime,
+    // nao supostos -- a versao anterior escrevia em 0x00a1d73c com descritores de
+    // 16 bytes e era comprovadamente inerte (o scanner nunca lia aquele endereco).
     //
-    // ATENCAO -- ESTA SEMEADURA E INERTE (medido, nao suposto). Um vigia
-    // UC_HOOK_MEM_READ sobre TODA a memoria do Core1 mostra que o scanner
-    // 0xf0017448 NUNCA le 0x00a1d73c: ele le 0x00000054 com size=2 (halfword,
-    // pc=0xf0017458). Ou seja, nem o endereco nem o formato (descritores de 16
-    // bytes) conferem com o que o firmware realmente consulta.
+    // Codigo real do scanner:
+    //   f001744c  ldr   r3, [pc, #0xac]     ; lit1 = 0x00024000
+    //   f0017450  ldr   r1, [r1]            ; base = 0x00a00000
+    //   f0017454  add   r3, r1, r3
+    //   f0017458  ldrh  r2, [r3, #0x54]     ; COUNT (halfword) @ base+0x24054
+    //   f001745c  cmp   r2, #0
+    //   f0017468  bls   0xf00174f8          ; count == 0 -> desiste -> panic
+    //   f001746c  ldr   r3, [pc, #0x90]     ; lit2 = 0x000241f0
+    //   f0017474  add   r1, r1, r3          ; TABELA @ base+0x241f0
+    //   ...laco, passo de 8 bytes (f0017480: add r1, r1, #8):
+    //   f0017488  ldrb  r2, [r1]            ; byte0
+    //   f001748c  and   r3, r2, #0xf
+    //   f0017490  cmp   r3, #0xf            ; low nibble deve ser 0xf
+    //   f00174a0  lsrs  r2, r2, #4          ; high nibble deve ser 0
+    //   f00174a8  ldrb  r3, [r1, #1]
+    //   f00174ac  tst   r3, #2              ; bit 1 do byte1 deve estar LIMPO
+    //   f00174b4  ldr   r3, [r1]            ; base da regiao
+    //   f00174b8  ldr   r2, [r1, #4]        ; teto da regiao
     //
-    // O Core1 continua caindo no panic dead-loop 0xf0017890 no ciclo 01 do boot
-    // com esta funcao ativa. O comentario anterior afirmava que ela evitava esse
-    // panic; isso e falso. Mantida apenas por ser inofensiva (escreve em RAM que
-    // ninguem le) ate que o formato real da estrutura em 0x54 seja determinado.
-    // NAO tratar o Core1 como funcional por causa desta funcao.
-    void seed_rex_region_table() {
-        const u32 SRC = 0x00a1d73c;
-        auto w32 = [&](u32 a, u32 v){ uc_mem_write(core1_.uc, a, &v, 4); };
-        w32(SRC + 0x00, 0x00a00000); // entry0.base
-        w32(SRC + 0x04, 0x00c00000); // entry0.limite+1 (teto)
-        w32(SRC + 0x08, 0x0000000f); // entry0.attr (low-nibble 0xf => MATCH)
-        w32(SRC + 0x0c, 0x00000000); // entry0.reservado
-        w32(SRC + 0x18, 0x00000000); // entry1.attr = 0 => terminador
+    // Portanto a entrada tem 8 bytes: uma palavra de base cujos 10 bits baixos
+    // carregam os flags (low nibble 0xf, high nibble 0, bit 9 limpo) e uma
+    // palavra de teto. O scanner limpa esses bits com bic #0x3fc / bic #3.
+    void w32_c1(u32 a, u32 v) { uc_mem_write(core1_.uc, a, &v, 4); }
 
-        // Le de volta o que foi escrito. A mensagem anterior afirmava
-        // "checagem 0xf0017448 -> 0" como TEXTO FIXO, sem verificar nada: dava a
-        // impressao de que o scanner do REX havia validado a tabela quando nenhuma
-        // checagem era feita. Relatar so o que foi medido.
-        u32 rb_base = 0, rb_top = 0, rb_attr = 0, rb_term = 0;
-        uc_mem_read(core1_.uc, SRC + 0x00, &rb_base, 4);
-        uc_mem_read(core1_.uc, SRC + 0x04, &rb_top, 4);
-        uc_mem_read(core1_.uc, SRC + 0x08, &rb_attr, 4);
-        uc_mem_read(core1_.uc, SRC + 0x18, &rb_term, 4);
-        const bool ok = (rb_base == 0x00a00000) && (rb_top == 0x00c00000)
-                     && (rb_attr == 0x0000000f) && (rb_term == 0);
-        printf("[System][Core1] Tabela de regioes REX escrita @0x%08x "
-               "(base=0x%08x teto=0x%08x attr=0x%02x) - releitura %s\n",
-               SRC, rb_base, rb_top, rb_attr, ok ? "confere" : "DIVERGE");
-        if (!ok) {
-            printf("[System][Core1] AVISO: a tabela nao sobreviveu a escrita.\n");
-        }
+    void seed_rex_region_table() {
+        const u32 BASE  = 0x00a00000;
+
+        // INICIALIZACAO FALTANTE (medida, nao suposta): o scanner faz
+        //   f0017450  ldr r1, [r1]   ; r1 = 0xf000004c
+        // e espera encontrar ali a BASE DA RAM. Sem ninguem escrever esse valor,
+        // r1 vira 0, todo o resto do calculo (base+0x24054, base+0x241f0) aponta
+        // para o endereco errado e o scanner desiste em 0xf0017468 -> panic.
+        // Rastreado com [PATH]: em f0017454 r1=00000000 (deveria ser 0x00a00000).
+        w32_c1(0xf000004c, BASE);
+        const u32 COUNT = BASE + 0x24054;   // halfword
+        const u32 TABLE = BASE + 0x241f0;   // entradas de 8 bytes
+
+        auto w32 = [&](u32 a, u32 v){ uc_mem_write(core1_.uc, a, &v, 4); };
+        auto w16 = [&](u32 a, u16 v){ uc_mem_write(core1_.uc, a, &v, 2); };
+
+        // Uma regiao: [0x00a00000, 0x00c00000). Flags no low nibble = 0xf,
+        // high nibble 0 e bit 1 do byte 1 limpo, como o scanner exige.
+        w32(TABLE + 0x00, (0x00a00000 & ~0x3ffu) | 0x0f);
+        w32(TABLE + 0x04, (0x00c00000 & ~0x3ffu));
+        w16(COUNT, 1);
+
+        // Releitura: relatar so o que foi medido (ver commit 0715130).
+        u16 rb_cnt = 0; u32 rb_e0 = 0, rb_e1 = 0;
+        uc_mem_read(core1_.uc, COUNT, &rb_cnt, 2);
+        uc_mem_read(core1_.uc, TABLE + 0x00, &rb_e0, 4);
+        uc_mem_read(core1_.uc, TABLE + 0x04, &rb_e1, 4);
+        const bool ok = (rb_cnt == 1) && ((rb_e0 & 0xf) == 0xf)
+                     && ((rb_e0 >> 4 & 0xf) == 0) && ((rb_e1 & 2) == 0);
+        printf("[System][Core1] Tabela de regioes REX: count@0x%08x=%u "
+               "entry0@0x%08x={base=0x%08x teto=0x%08x} - releitura %s\n",
+               COUNT, rb_cnt, TABLE, rb_e0, rb_e1, ok ? "confere" : "DIVERGE");
     }
 
     // Item 5: liga a vtable gpIGL/gpIEGL do guest ao IglGuestBridge. Idempotente.
@@ -2663,6 +2692,7 @@ private:
         uc_hook_add(core1_.uc, &h_r1, UC_HOOK_MEM_READ, (void*)c1_heap_read_hook, this,
                     REX_HEAP_VA_BASE, REX_HEAP_VA_BASE + REX_HEAP_VA_SIZE - 1);
         uc_hook_add(core1_.uc, &h_u1, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c1_unmapped_hook, this, 0, ~0ULL);
+
 
 
         // Instala capture hook do QDSP5 para monitorar pacotes ONCRPC no Core 1
