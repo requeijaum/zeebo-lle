@@ -403,6 +403,16 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	./test_control_server
 	./test_probe_registry
 	./test_save_state
+	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
+	./test_l4_mmu
+	./test_l4_thread_table
+	./test_exregs_activation
+	./test_l4_ipc_msgtag
+	./test_l4_ipc_dispatch
+	./test_brew_mif
+	./test_l4_mmu_uc
+	./test_l4_kip_trap
+	./test_l4_mmu_txn
 	@echo "[check] zeebo_bootinfo_harness compilou (compile-only; NAO valida bytes reais)."
 	@echo "[check] Para validacao real-byte da NAND rode: make test-bootinfo-real"
 

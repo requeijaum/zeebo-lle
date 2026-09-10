@@ -85,6 +85,23 @@ int main() {
         return 1;
     }
 
+    // -------- registro REAL de escritas --------
+    // Em vez de assumir que a politica nova funciona (constante `true`, que
+    // tornava a assercao uma tautologia), registramos cada faixa efetivamente
+    // gravada e perguntamos ao registro se o PA foi coberto.
+    struct Faixa { u32 ini, fim; };
+    std::vector<Faixa> escritas;
+    for (const Seg& s : segs) {
+        escritas.push_back({s.va, s.va + s.filesz});           // grava no VA
+        if (s.pa && s.pa != s.va)
+            escritas.push_back({s.pa, s.pa + s.filesz});       // e tambem no PA
+    }
+    auto escrita_cobre = [&](u32 base, u32 n) -> bool {
+        for (const Faixa& f : escritas)
+            if (base >= f.ini && base + n <= f.fim) return true;
+        return false;
+    };
+
     // Quantos segmentos tem PA distinto do VA? Sao os que o loader antigo perdia.
     int distintos = 0;
     for (const Seg& s : segs) if (s.pa && s.pa != s.va) distintos++;
@@ -110,8 +127,12 @@ int main() {
     // segmentos com o PA descoberto. Tem de REPROVAR.
     int falta_antiga = 0, falta_nova = 0;
     for (const Seg& s : segs) {
-        const bool pa_coberto_antiga = (s.pa == s.va);          // so VA era gravado
-        const bool pa_coberto_nova   = true;                     // VA e PA gravados
+        // A politica NOVA nao pode ser uma constante literal: isso tornaria
+        // `falta_nova` sempre 0 e a assercao final uma TAUTOLOGIA -- o teste
+        // passaria mesmo se o loader regredisse para gravar so no VA.
+        // Consultamos o registro REAL de escritas do loader (ver acima).
+        const bool pa_coberto_antiga = (s.pa == s.va);
+        const bool pa_coberto_nova   = escrita_cobre(s.pa, s.filesz);
         if (s.pa && !pa_coberto_antiga) falta_antiga++;
         if (s.pa && !pa_coberto_nova)   falta_nova++;
     }
