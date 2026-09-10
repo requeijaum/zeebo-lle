@@ -1,10 +1,8 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-09b, QW44-QW47 fechados; scatterload do kernel resolvido, UARTs modeladas)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10, JIT Dynarmic ARM11, Ciclo de Vida EFS2/BREW e UX Dolphin/RPCS3 Entregues; Diagnóstico de Display/UART/Diag USB em Aberto)
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
-Esta revisão consolida o fechamento do lote QW20-QW22 e a investigação do Passo 13 com o
-código-fonte OKL4 2.1.1 como referência (`refs/okl4-2.1.1-fix7/`, mapa completo em
-`notes/boot-investigation/okl4-source-reference-map.md`):
+Esta revisão consolida a entrega da Etapa 3 do JIT Dynarmic (`c28d66a`), suporte genérico ao ciclo de vida de applets/jogos EFS2 (`adcb631`), melhorias completas de UX de emulador (`07033e1`), roteamento unificado de UARTs (`0xA9A00000`--`0xA9C00000`) e a análise de causa raiz do display (azul estático), diagnóstico USB e áudio do Z-Wheel:
 - QW17 (`a88a9bd`)/QW19 (`475ee1c`): convenção de PC-resume e restauração de frame callee-saved
   nos stubs de syscall — o mempool_init (96×1 MiB) atravessa e o boot avança além.
 - **Causa raiz 1 (validada por experimento)**: `thread_init` (0xb00070c8, casado com `thread.c`)
@@ -325,6 +323,34 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 
 ---
 
+### Fase 14: Dynarmic JIT (Core0 ARM11), Ciclo de Vida EFS2 Genérico e UX Dolphin/RPCS3 (Concluída 2026-09-10)
+- [x] **Etapa 3 JIT Dynarmic Integrada e Validada (commit `c28d66a`)**:
+  - `zeebo_dynarmic_core.h/.cpp` integrando `dynarmic::A32::UserConfig` para ARM1136EJ-S (ARMv6, part `0xB36`) com suporte a Thumb, SVC e MMIO interceptado.
+  - Modo `--jit` (AB-testing com Unicorn shadow nas primeiras fatias) e `--jit-solo` (JIT autônomo total) no Core 0. Boot de 11.4M instruções validado sem regressão.
+- [x] **Ciclo de Vida EFS2 Unificado para Qualquer Applet / Jogo (commit `adcb631`)**:
+  - Extração automática de qualquer `.mod` (`reksio.mod`, `tectoy.mod`, etc.) direto de `0:EFS2APPS` ou injeção externa via `--efs2-run=<arquivo>` / `run <arquivo>`.
+  - Despacho transparente ao manipulador do applet via `dispatch_applet_start()`.
+- [x] **Melhorias de Usabilidade Estilo Dolphin/RPCS3/RetroArch (commit `07033e1`)**:
+  - Título dinâmico de janela: `Zeebo LLE | Dynarmic JIT | C0: X MIPS | C1: Y MIPS | FPS: Z [RODANDO/PAUSADO]`.
+  - Janela redimensionável 4:3 com VSync e letterboxing automático (`SDL_RenderSetLogicalSize(640, 480)`).
+  - Gamepad hotplug dinâmico com mapa completo Z-Pad (D-Pad, A, B, 1, 2, L, R, Home).
+  - Hotkeys: F11 (fullscreen toggle), PAUSE/Break (pausar/retomar emulação), F12 (screenshot instantâneo PPM 640x480).
+- [x] **Roteamento Unificado de UARTs {1, 2, 3}**:
+  - Endereços `0xA9A00000` (UART1 - Console), `0xA9B00000` (UART2 - Modem IPC), `0xA9C00000` (UART3 - Diag/Aux) mapeados em Core0 e Core1 com buffers de linha e identificação `[UART#N]`.
+
+---
+
+### Fase 15: Subsistema Gráfico EGL/BREW Real, Decodificação Diag USB e Áudio QDSP5 (Fase Atual)
+- [ ] **Desacoplamento do Stub de Tela Azul e Renderização Real do BREW / Z-Wheel**:
+  - Substituir o stub de `clear_color(0.1f, 0.2f, 0.8f)` pelo processamento de command buffers e chamadas reais de `IBitmap` / `IDisplay` do BREW.
+  - Carregar assets visuais (`slidemodel.qxm`, `.bar`, `.bmp`) da NAND `0:EFS2APPS` para exibição na interface do Z-Wheel.
+- [ ] **Decodificação de Logs via Protocolo Qualcomm Diag (USB / SMD)**:
+  - Capturar frames HDLC na interface de diagnóstico USB / SMD para extrair logs `DIAG_MSG_F` do BREW AppMgr e L4 diretamente no console do emulador.
+- [ ] **Pipeline de Áudio Host Contínuo**:
+  - Conectar `UnifiedAudioSink` ao backend de áudio SDL (`SDL_OpenAudioDevice`) para reprodução contínua dos streams PCM/QDSP5 sem dependência de dumps manuais.
+
+---
+
 ## Próximos Passos Priorizados
 
 ### P0 — Cadeia crítica de boot real
@@ -332,17 +358,30 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 1. **Passo 13 — BootInfo/`bi_execute` (CONCLUÍDO)**
    - Provado e atravessado por execução real: BootInfo @ file offset `0x57000`, 10 `VIRT_POOLS` e 5 `PHYS_POOLS`.
    - `bi_execute` concluído com sucesso (`r0=0`), `extensions_init` executado, 756 chamadas `L4_MapControl` aplicadas (318 blocos `[aliased]` na RAM), Core 0 entrou no `iguana_server_loop` em `0xb000aa94` e ultrapassou 8,27 milhões de instruções orgânicas.
-2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (QW35-QW43 concluídos; QW44 fecha o bloqueio do ig_naming)
-   - O `iguana_server_loop` (`0xb000aa94`) aguarda IPC no laço `bl 0xb000c800` (`L4_Ipc` wait em `0xb000c834`).
-   - Tags de threads registradas no BootInfo identificam os alvos a serem despachados:
-     - `ig_naming` (VA `0xb0100000`, tag 7, ref 6)
-     - `quartz_servers` (VA `0xb0300000`, tag 7, ref 13)
-     - `AMSS` (VA `0x10137000`, tag 7, ref 23)
-   - QW28 a QW43 concluídos (MsgTag, ThreadTable, scheduler cooperativo, SystemServiceRegistry, handoff AMSS/BREW, roteamento FIRSTAPP, parser de MIFs, dispatch de lifecycle, GPU Adreno 130, timers BREW, ativação real de thread QW40, preservação de T-bit QW41, fix da cópia local ARM do ExchangeRegisters QW42, generalização do T-bit p/ todos os syscalls QW43/QW44 `9ca92a6`).
-   - **Estado atual (verificado por execução, 2026-09-09)**: Core 0 avança além do stall `0xb010333a` (decode drift por Thumb forçado no retorno do `L4_Ipc` da cópia local ARM do ig_naming — RESOLVIDO). O sink SDL2 reporta **frame 14 / 32 draws do Adreno** — mas isso é o scatterload descomprimindo o segmento, não render real.
-   - **RESOLUÇÃO QW43/44 (2026-09-09, RE + execução viva)**: o `0xb0400000` NÃO é um codec/problema — é o **`__scatterload` do runtime ARM RVCT** (auto-terminante: tabela de 3 entries `{src,dst,len,fn}`, `cmp sl,fp; beq 0xb0410070`; fn = copy/RLE/zeroinit). O kernel Iguana **completa o scatterload corretamente** (beq tomado, Z=1, `0xb0410070`=`__rt_entry` alcançado — verificado vivo). O loop RLE que "travava" (`src=0xb0515xxx ctrl=0x00`) é **re-entrada indevida do emulador** (2ª imagem, ex.: quartz_servers via `lr=0xb0302dd1`, ou tabela corrompida por aliasing), não defeito de firmware. Os "underflows" QW43/44 eram artefato de simulação host.
-   - **Auditoria de memória/IRQ (2026-09-09)**: confirmados e documentados 4 bugs de modelo — (1) IRQ do Core1 entregue (doorbell seta VIC 0xc0000000) mas NUNCA processada (sem `uc_intr`/UC_HOOK_INTR no Core1, CPSR mascarado); (2) GPT (0xc5000000) só ticker hack (sem match/IRQ); (3) MMIO READ do Core0 lê RAM crua (sem UC_HOOK_MEM_READ → periférico modelado ignorado nas leituras); (4) `map_one_aliased` sem guarda `is_peripheral` (VTLB pode apontar VA de periférico → pool RAM). Endereçado/UART neste lote; ver ROADMAP P1 e skill.
-   - Gate final: Inicialização do launcher BREW AppMgr (`ZeeboApp`), Z-Wheel preview/fábrica e execução de applets de jogos (ex: Double Dragon).
+2. **Passo 14 — Despacho IPC no Iguana Server Loop & Boot do BREW AppMgr** (CONCLUÍDO via ciclo unificado EFS2 e JIT Dynarmic)
+   - Ciclo de vida unificado de applets/jogos EFS2 (`adcb631`) e Dynarmic JIT (`c28d66a`) integrados e validados por execução.
+3. **Passo 15 — Renderização Real da Interface (Z-Wheel/AppMgr) e Telemetria Qualcomm Diag** (EM ABERTO)
+   - Superar a limitação de tela azul estática: conectar o pipeline do BREW IBitmap/IGraphics e Adreno 130 à textura de apresentação do SDL2.
+   - Decodificar e rotear mensagens `DIAG_MSG_F` empacotadas via SMD/USB Diag.
+
+---
+
+### Quick Wins Identificados (Ações Imediatas de Alto Retorno)
+
+1. **QW-AUD1 (Áudio Host via SDL_OpenAudioDevice)**:
+   - *Impacto:* Imediato. Permite ouvir a reprodução de áudio que a Z-Wheel e os jogos já emitem através do `UnifiedAudioSink`.
+   - *Esforço:* Mínimo (20-30 linhas de código no `UnifiedDisplaySink` / `UnifiedAudioSink` inicializando callback SDL de áudio).
+2. **QW-UART1 (Force-Enable MSM7k UART TX/RX no Clock/Reset Controller)**:
+   - *Impacto:* Imediato. Inicializar os bits de clock da UART no MSM_CLK (`0xA8600000`) e auto-armar `UART_CR = 0x05` caso o firmware use polling rápido de TX, garantindo que logs das 3 UARTs apareçam no terminal.
+   - *Esforço:* Mínimo (pequeno patch no registrador de controle da UART / MSM_CLK).
+3. **QW-DIAG1 (Sniffer de Pacotes HDLC/Diag em Canais SMD)**:
+   - *Impacto:* Alto. O Zeebo emite telemetria BREW e L4 em pacotes SMD direcionados ao canal Diag (`0x3000000a`/`0x30000013`). Desempacotar frames com comando `0x79` (LOG) ou `0x1D` (MSG) imprimindo texto no stderr.
+   - *Esforço:* Médio-baixo (parser simples de framing HDLC/Qualcomm Diag no `zeebo_smd_bridge.cpp`).
+4. **QW-GFX1 (Blit de Framebuffer / IDisplay Fallback do BREW AppMgr)**:
+   - *Impacto:* Muito Alto. Substituir o `clear_color(0.1f, 0.2f, 0.8f)` pelo mapeamento de buffer linear de bitmap do BREW (`AEEApplet::m_pIDisplay` / buffer RGB565 em RAM do Applet), permitindo visualizar os elementos gráficos reais do menu ao invés de tela azul.
+   - *Esforço:* Médio (conectar o ponteiro de bitmap do applet ao `SoftRasterizer`).
+
+---
 
 ### QW43 — ATUALIZAÇÃO: causa raiz é truncamento do buffer FONTE, não bug no decoder (2026-09-09)
 
