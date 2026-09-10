@@ -647,10 +647,29 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
   - Teste `test_jit_lost_write.cpp` trava o contrato, com controle positivo (página mapeada:
     escreve e relê o valor) e o caso real (`0xf401ffc0`: escrita **rejeitada** e leitura falha
     junto). 5/5.
-  - **Ressalva honesta**: provar a perda silenciosa **não** é o mesmo que consertar o boot.
-    Falta decidir *por que* `0xf401f000` não está mapeado — se a região deveria ter sido criada
-    por um `L4_MapControl` que o recompilado não executou, ou se falta uma janela na init. O
-    conserto certo é **mapear a região** (ou propagar o erro), não silenciar o sintoma.
+  - **CORRIGIDO — a assimetria era o mapeamento sob demanda.** O motivo de `0xf401f000` não
+    estar mapeado no recompilado:
+    - No interpretado, o store parte do **código emulado**, dispara `UC_HOOK_MEM_WRITE_UNMAPPED`
+      e o `c0_unmapped_hook` faz *"map dynamically to continue discovery"* (`uc_mem_map` da
+      página) — a escrita então **acontece**.
+    - No recompilado, a escrita passa por `bridge.write32` → `uc_mem_write()`, que é **API
+      externa e não dispara hooks**. O handler nunca roda, ninguém mapeia, e a escrita se perde
+      com `UC_ERR_WRITE_UNMAPPED` (7) — retorno que era descartado.
+    - Conserto: dar **paridade** ao caminho recompilado — ao receber `UC_ERR_WRITE_UNMAPPED`,
+      mapear a página e repetir a escrita, exatamente o que o interpretado já fazia. Não é
+      silenciar o sintoma: é replicar a política de descoberta que o outro backend usa.
+  - Teste `test_jit_unmapped_asymmetry.cpp` (7/7) reproduz a assimetria em engine isolado, sem
+    firmware: prova que `uc_mem_write()` falha e **não** chama o hook, enquanto o mesmo store
+    executado como código emulado chama o hook, mapeia e persiste o valor.
+  - **RESULTADO MEDIDO — a divergência recuou de #23726 para #67395** (2,8× mais fundo), e o
+    recompilado passou de 23.726 para **118.326 instruções** antes de parar. Agora ele para
+    exatamente em `0xf000bcac` = `ldmib r13,{r0-r14}^` (`LDM_usr`), uma das instruções que o
+    Dynarmic não traduz e que eu havia catalogado como pendente — ou seja, o boot avançou até o
+    próximo obstáculo **já conhecido e inventariado**.
+  - Nova primeira divergência (#67395): `pc=0xf0009de0`, precedida de `0xee1a0f10` =
+    **`MRC p15, 0, r0, c10, c0, 0`** (registrador de TLB lockdown). `r0` = `0xc0` no
+    interpretado contra `0` no recompilado — é o mesmo padrão de CP15 não modelado que já
+    resolvi duas vezes (`5471a8b`, `b1f1eae`), agora em `c10`.
   - **Aviso de método**: ao extrair registradores do traço, conferir o índice das colunas contra
     uma linha crua antes de tirar conclusão — foi exatamente esse descuido que gerou o
     diagnóstico errado de "ponteiro 0x2" e a caçada inútil ao acesso desalinhado.

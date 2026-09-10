@@ -1314,8 +1314,34 @@ public:
                 // NAO dispara UC_HOOK_MEM_WRITE. Sem isto o vigia fica cego no
                 // JIT e reportaria "zero escritas" para qualquer faixa.
                 s->note_write(0, addr, 4, val, s->core0_.jit ? s->core0_.jit->pc() : 0);
-                s->vtlb_.write_u32(addr, val);
-                if (s->core0_.uc) uc_mem_write(s->core0_.uc, addr, &val, 4);
+                const bool ok_vtlb = s->vtlb_.write_u32(addr, val);
+                uc_err e = UC_ERR_OK;
+                if (s->core0_.uc) {
+                    e = uc_mem_write(s->core0_.uc, addr, &val, 4);
+                    // Paridade com o backend interpretado: um acesso a pagina
+                    // nao mapeada vindo do codigo emulado dispara
+                    // c0_unmapped_hook, que mapeia a pagina sob demanda
+                    // ("map dynamically to continue discovery") e deixa a
+                    // escrita acontecer. Como uc_mem_write() e API externa,
+                    // ela NAO dispara hooks: sem este retry a escrita sumiria
+                    // em silencio e a releitura devolveria zero — que era
+                    // exatamente a divergencia #23726.
+                    if (e == UC_ERR_WRITE_UNMAPPED) {
+                        uc_mem_map(s->core0_.uc, addr & ~0xFFFULL, 0x1000, UC_PROT_ALL);
+                        e = uc_mem_write(s->core0_.uc, addr, &val, 4);
+                    }
+                }
+                // Diagnostico: QUAL dos dois caminhos aceitou a escrita. Sem
+                // isto nao da para distinguir "VTLB nao mapeou" de "o Unicorn
+                // recusou" — os dois retornos eram descartados em silencio.
+                if (s->watch_file_ && addr >= s->watch_lo_ && addr < s->watch_hi_) {
+                    fprintf(s->watch_file_,
+                            "  ^-- vtlb=%s uc=%s(%d)%s\n",
+                            ok_vtlb ? "ACEITOU" : "REJEITOU",
+                            e == UC_ERR_OK ? "ACEITOU" : "REJEITOU", (int)e,
+                            (!ok_vtlb && e != UC_ERR_OK) ? "  <<< ESCRITA PERDIDA" : "");
+                    fflush(s->watch_file_);
+                }
             };
             bridge.is_peripheral = [](void* /*ud*/, uint32_t addr) -> bool {
                 return is_core0_peripheral(addr);
