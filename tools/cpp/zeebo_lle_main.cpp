@@ -2584,9 +2584,19 @@ private:
         return true;
     }
 
-    // Preenche a tabela de regioes de RAM esperada pelo scanner do REX (0xf0017448)
-    // no endereco fisico 0x00a1d73c. Sem ela o scanner retorna -1 e o REX entra em
-    // panic dead-loop em 0xf0017890 antes de reconfigurar a MMU/relocar.
+    // Preenche uma tabela de regioes de RAM em 0x00a1d73c.
+    //
+    // ATENCAO -- ESTA SEMEADURA E INERTE (medido, nao suposto). Um vigia
+    // UC_HOOK_MEM_READ sobre TODA a memoria do Core1 mostra que o scanner
+    // 0xf0017448 NUNCA le 0x00a1d73c: ele le 0x00000054 com size=2 (halfword,
+    // pc=0xf0017458). Ou seja, nem o endereco nem o formato (descritores de 16
+    // bytes) conferem com o que o firmware realmente consulta.
+    //
+    // O Core1 continua caindo no panic dead-loop 0xf0017890 no ciclo 01 do boot
+    // com esta funcao ativa. O comentario anterior afirmava que ela evitava esse
+    // panic; isso e falso. Mantida apenas por ser inofensiva (escreve em RAM que
+    // ninguem le) ate que o formato real da estrutura em 0x54 seja determinado.
+    // NAO tratar o Core1 como funcional por causa desta funcao.
     void seed_rex_region_table() {
         const u32 SRC = 0x00a1d73c;
         auto w32 = [&](u32 a, u32 v){ uc_mem_write(core1_.uc, a, &v, 4); };
@@ -2595,8 +2605,24 @@ private:
         w32(SRC + 0x08, 0x0000000f); // entry0.attr (low-nibble 0xf => MATCH)
         w32(SRC + 0x0c, 0x00000000); // entry0.reservado
         w32(SRC + 0x18, 0x00000000); // entry1.attr = 0 => terminador
-        printf("[System][Core1] Tabela de regioes REX semeada @0x%08x "
-               "(base=0x00a00000 teto=0x00c00000 attr=0x0f) - checagem 0xf0017448 -> 0\n", SRC);
+
+        // Le de volta o que foi escrito. A mensagem anterior afirmava
+        // "checagem 0xf0017448 -> 0" como TEXTO FIXO, sem verificar nada: dava a
+        // impressao de que o scanner do REX havia validado a tabela quando nenhuma
+        // checagem era feita. Relatar so o que foi medido.
+        u32 rb_base = 0, rb_top = 0, rb_attr = 0, rb_term = 0;
+        uc_mem_read(core1_.uc, SRC + 0x00, &rb_base, 4);
+        uc_mem_read(core1_.uc, SRC + 0x04, &rb_top, 4);
+        uc_mem_read(core1_.uc, SRC + 0x08, &rb_attr, 4);
+        uc_mem_read(core1_.uc, SRC + 0x18, &rb_term, 4);
+        const bool ok = (rb_base == 0x00a00000) && (rb_top == 0x00c00000)
+                     && (rb_attr == 0x0000000f) && (rb_term == 0);
+        printf("[System][Core1] Tabela de regioes REX escrita @0x%08x "
+               "(base=0x%08x teto=0x%08x attr=0x%02x) - releitura %s\n",
+               SRC, rb_base, rb_top, rb_attr, ok ? "confere" : "DIVERGE");
+        if (!ok) {
+            printf("[System][Core1] AVISO: a tabela nao sobreviveu a escrita.\n");
+        }
     }
 
     // Item 5: liga a vtable gpIGL/gpIEGL do guest ao IglGuestBridge. Idempotente.
@@ -2637,6 +2663,7 @@ private:
         uc_hook_add(core1_.uc, &h_r1, UC_HOOK_MEM_READ, (void*)c1_heap_read_hook, this,
                     REX_HEAP_VA_BASE, REX_HEAP_VA_BASE + REX_HEAP_VA_SIZE - 1);
         uc_hook_add(core1_.uc, &h_u1, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c1_unmapped_hook, this, 0, ~0ULL);
+
 
         // Instala capture hook do QDSP5 para monitorar pacotes ONCRPC no Core 1
         zeebo::qdsp5::install_capture_hook(core1_.uc);
