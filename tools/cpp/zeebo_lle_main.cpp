@@ -455,6 +455,12 @@ struct CoreState {
     u32 slide_blank_run = 0;    // insns blank/NOP consecutivas (slide real)
 };
 
+// Ring buffer do console do kernel OKL4 no Core1 (medido no firmware:
+// putchar em 0xf000e6e0, indice em 0xf001da64, wrap em 0x800).
+static constexpr u32 OKL4_CON_IDX  = 0xf001da64;
+static constexpr u32 OKL4_CON_BUF  = 0xf001da68;
+static constexpr u32 OKL4_CON_SIZE = 0x800;
+
 class ZeeboLLESystem {
 public:
     ZeeboLLESystem() {
@@ -2700,6 +2706,40 @@ private:
         // Core 1 hooks
         uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
+
+        // Console do kernel OKL4 (Core1). O putchar do kernel (0xf000e6e0) grava
+        // byte a byte num ring buffer em 0xf001da68 com indice em 0xf001da64
+        // (`strb r0,[r2,r3]` / `str r1,[ip]`, wrap em 0x800). Espelhar essas
+        // escritas da o log do kernel -- foi assim que o banner
+        // "OKL4 - (provider: Open Kernel Labs)" apareceu pela primeira vez.
+        // Sem isso o Core1 falha em silencio e so resta o PC para adivinhar.
+        {
+            static uc_hook h_con;
+            uc_hook_add(core1_.uc, &h_con, UC_HOOK_MEM_WRITE,
+                        (void*)+[](uc_engine*, uc_mem_type, uint64_t addr,
+                                   int size, int64_t value, void*) {
+                            if (size != 1) return;
+                            if (addr < OKL4_CON_BUF || addr >= OKL4_CON_BUF + OKL4_CON_SIZE) return;
+                            static char linha[1024];
+                            static size_t n = 0;
+                            char c = (char)(value & 0xff);
+                            if (c >= 32 && c < 127) {
+                                if (n < sizeof(linha) - 1) linha[n++] = c;
+                            } else if (n) {
+                                linha[n] = 0;
+                                printf("[OKL4] %s\n", linha);
+                                fflush(stdout);
+                                n = 0;
+                            }
+                            if (n == sizeof(linha) - 1) {
+                                linha[n] = 0;
+                                printf("[OKL4] %s\n", linha);
+                                fflush(stdout);
+                                n = 0;
+                            }
+                        }, this, 0, ~0ULL);
+        }
+
 
         uc_hook_add(core1_.uc, &h_m1, UC_HOOK_MEM_WRITE, (void*)c1_mem_hook, this, 0, ~0ULL);
         // Split I/D do heap REX: leitura de DADO na janela 0xf0000000+2MB injeta o shadow.
