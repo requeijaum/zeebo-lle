@@ -332,8 +332,9 @@ private:
 // 5. Host Display Sink (SDL2 + Snapshot)
 class UnifiedDisplaySink {
 public:
-    UnifiedDisplaySink() : window_(nullptr), renderer_(nullptr), texture_(nullptr), headless_(true) {}
+    UnifiedDisplaySink() : window_(nullptr), renderer_(nullptr), texture_(nullptr), controller_(nullptr), headless_(true), fullscreen_(false) {}
     ~UnifiedDisplaySink() {
+        if (controller_) SDL_GameControllerClose(controller_);
         if (texture_)  SDL_DestroyTexture(texture_);
         if (renderer_) SDL_DestroyRenderer(renderer_);
         if (window_)   SDL_DestroyWindow(window_);
@@ -343,12 +344,29 @@ public:
         headless_ = headless;
         if (headless_) return true;
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) return false;
+
+        // Auto-conecta o primeiro Gamepad / Controller detectado (estilo RetroArch/Dolphin)
+        for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+            if (SDL_IsGameController(i)) {
+                controller_ = SDL_GameControllerOpen(i);
+                if (controller_) {
+                    printf("[Input/Gamepad] Conectado: %s\n", SDL_GameControllerName(controller_));
+                    break;
+                }
+            }
+        }
+
         window_ = SDL_CreateWindow("Zeebo LLE Unified Emulator (MSM7201A)",
                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                   FB_WIDTH, FB_HEIGHT, SDL_WINDOW_SHOWN);
+                                   FB_WIDTH, FB_HEIGHT,
+                                   SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         if (!window_) return false;
-        renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED);
+        renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
         if (!renderer_) renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        if (renderer_) {
+            // Mantém aspect ratio 4:3 (640x480) limpo em qualquer redimensionamento de janela
+            SDL_RenderSetLogicalSize(renderer_, FB_WIDTH, FB_HEIGHT);
+        }
         texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB565, SDL_TEXTUREACCESS_STREAMING, FB_WIDTH, FB_HEIGHT);
         return texture_ != nullptr;
     }
@@ -360,11 +378,42 @@ public:
             SDL_RenderPresent(renderer_);
         }
     }
+    void set_title(const std::string& title) {
+        if (!headless_ && window_) {
+            SDL_SetWindowTitle(window_, title.c_str());
+        }
+    }
+    void toggle_fullscreen() {
+        if (!headless_ && window_) {
+            fullscreen_ = !fullscreen_;
+            SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        }
+    }
+    void on_controller_added(int device_index) {
+        if (!headless_ && !controller_ && SDL_IsGameController(device_index)) {
+            controller_ = SDL_GameControllerOpen(device_index);
+            if (controller_) {
+                printf("[Input/Gamepad] Conectado dinamicamente: %s\n", SDL_GameControllerName(controller_));
+            }
+        }
+    }
+    void on_controller_removed(int instance_id) {
+        if (controller_) {
+            SDL_Joystick* joy = SDL_GameControllerGetJoystick(controller_);
+            if (joy && SDL_JoystickInstanceID(joy) == instance_id) {
+                printf("[Input/Gamepad] Desconectado: %s\n", SDL_GameControllerName(controller_));
+                SDL_GameControllerClose(controller_);
+                controller_ = nullptr;
+            }
+        }
+    }
 private:
-    SDL_Window*   window_;
-    SDL_Renderer* renderer_;
-    SDL_Texture*  texture_;
-    bool          headless_;
+    SDL_Window*         window_;
+    SDL_Renderer*       renderer_;
+    SDL_Texture*        texture_;
+    SDL_GameController* controller_;
+    bool                headless_;
+    bool                fullscreen_;
 };
 
 // ---- Core State & Orchestrator Context ----
@@ -1365,16 +1414,26 @@ public:
                 }
             }
 
-            // Telemetria de FPS e MIPS periódica
+            // Telemetria de FPS e MIPS periódica + Título Dinâmico na Janela (estilo Dolphin/RPCS3)
             double telemetry_elapsed = std::chrono::duration<double>(now - last_telemetry_time).count();
-            if (show_fps && telemetry_elapsed >= 1.0) {
+            if (telemetry_elapsed >= 1.0) {
                 uint64_t d_c0 = core0_.insns - last_c0_insns;
                 uint64_t d_c1 = core1_.insns - last_c1_insns;
                 double mips_c0 = (double)d_c0 / (telemetry_elapsed * 1000000.0);
                 double mips_c1 = (double)d_c1 / (telemetry_elapsed * 1000000.0);
                 double fps = (double)total_rendered_frames / (total_elapsed > 0 ? total_elapsed : 1.0);
-                printf("[Telemetry] t=%.1fs | C0=%.2f MIPS (pc=0x%08x) | C1=%.2f MIPS (pc=0x%08x) | Video FPS=%.2f (quadros=%llu)\n",
-                       total_elapsed, mips_c0, core0_.entry, mips_c1, core1_.entry, fps, (unsigned long long)total_rendered_frames);
+                if (show_fps) {
+                    printf("[Telemetry] t=%.1fs | C0=%.2f MIPS (pc=0x%08x) | C1=%.2f MIPS (pc=0x%08x) | Video FPS=%.2f (quadros=%llu)\n",
+                           total_elapsed, mips_c0, core0_.entry, mips_c1, core1_.entry, fps, (unsigned long long)total_rendered_frames);
+                }
+                char title_buf[160];
+                snprintf(title_buf, sizeof(title_buf),
+                         "Zeebo LLE [%s] | C0: %.1f MIPS | C1: %.1f MIPS | FPS: %.1f | %s",
+                         (core0_.backend == CoreBackend::Dynarmic ? "Dynarmic JIT" : "Unicorn LLE"),
+                         mips_c0, mips_c1, fps,
+                         (paused_ ? "PAUSADO" : "RODANDO"));
+                sink_->set_title(title_buf);
+
                 last_telemetry_time = now;
                 last_c0_insns = core0_.insns;
                 last_c1_insns = core1_.insns;
@@ -1384,7 +1443,34 @@ public:
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) return;
-                if (ev.type == SDL_KEYDOWN) {
+                if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                    sink_->on_controller_added(ev.cdevice.which);
+                } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    sink_->on_controller_removed(ev.cdevice.which);
+                } else if (ev.type == SDL_KEYDOWN) {
+                    // Hotkeys globais padrão de emulador (F11 Fullscreen, Space Pause, F12 Screenshot)
+                    if (ev.key.keysym.sym == SDLK_F11) {
+                        sink_->toggle_fullscreen();
+                        continue;
+                    }
+                    if (ev.key.keysym.sym == SDLK_PAUSE) {
+                        paused_ = !paused_;
+                        printf("[Emulator] Emulação %s\n", paused_ ? "PAUSADA" : "RETOMADA");
+                        continue;
+                    }
+                    if (ev.key.keysym.sym == SDLK_F12) {
+                        const u16* cur_fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
+                        if (cur_fb) {
+                            char fname[64];
+                            snprintf(fname, sizeof(fname), "zeebo_screenshot_%llu.ppm", (unsigned long long)total_rendered_frames);
+                            save_ppm(cur_fb, fname);
+                            printf("[Emulator] Screenshot salvo: %s\n", fname);
+                        } else {
+                            printf("[Emulator] Screenshot falhou: framebuffer indisponível.\n");
+                        }
+                        continue;
+                    }
+
                     switch (ev.key.keysym.sym) {
                         case SDLK_z: case SDLK_RETURN: input_->press_key(ZEEBO_KEY_A, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_A, true); break;
                         case SDLK_x: case SDLK_ESCAPE: input_->press_key(ZEEBO_KEY_B, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_B, true); break;
@@ -1414,29 +1500,35 @@ public:
                     }
                 } else if (ev.type == SDL_CONTROLLERBUTTONDOWN) {
                     switch (ev.cbutton.button) {
-                        case SDL_CONTROLLER_BUTTON_A:          input_->press_key(ZEEBO_KEY_A, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_B:          input_->press_key(ZEEBO_KEY_B, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_X:          input_->press_key(ZEEBO_KEY_C, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_Y:          input_->press_key(ZEEBO_KEY_D, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->press_key(ZEEBO_KEY_UP, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_A:          input_->press_key(ZEEBO_KEY_A, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_A, true); break;
+                        case SDL_CONTROLLER_BUTTON_B:          input_->press_key(ZEEBO_KEY_B, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_B, true); break;
+                        case SDL_CONTROLLER_BUTTON_X:          input_->press_key(ZEEBO_KEY_C, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_1, true); break;
+                        case SDL_CONTROLLER_BUTTON_Y:          input_->press_key(ZEEBO_KEY_D, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_2, true); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->press_key(ZEEBO_KEY_UP, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_UP, true); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->press_key(ZEEBO_KEY_DOWN, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_DOWN, true); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->press_key(ZEEBO_KEY_LEFT, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_LEFT, true); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->press_key(ZEEBO_KEY_RIGHT, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_RIGHT, true); break;
+                        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  dispatch_zpad_to_brew(zeebo::brew::ZP_3, true); break;
+                        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: dispatch_zpad_to_brew(zeebo::brew::ZP_4, true); break;
+                        case SDL_CONTROLLER_BUTTON_BACK:
                         case SDL_CONTROLLER_BUTTON_GUIDE:
-                        case SDL_CONTROLLER_BUTTON_START:      input_->press_key(ZEEBO_KEY_HOME, core0_.uc); break;
+                        case SDL_CONTROLLER_BUTTON_START:      input_->press_key(ZEEBO_KEY_HOME, core0_.uc); dispatch_zpad_to_brew(zeebo::brew::ZP_HOME, true); break;
                     }
                 } else if (ev.type == SDL_CONTROLLERBUTTONUP) {
                     switch (ev.cbutton.button) {
-                        case SDL_CONTROLLER_BUTTON_A:          input_->release_key(ZEEBO_KEY_A); break;
-                        case SDL_CONTROLLER_BUTTON_B:          input_->release_key(ZEEBO_KEY_B); break;
-                        case SDL_CONTROLLER_BUTTON_X:          input_->release_key(ZEEBO_KEY_C); break;
-                        case SDL_CONTROLLER_BUTTON_Y:          input_->release_key(ZEEBO_KEY_D); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->release_key(ZEEBO_KEY_UP); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->release_key(ZEEBO_KEY_DOWN); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->release_key(ZEEBO_KEY_LEFT); break;
-                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->release_key(ZEEBO_KEY_RIGHT); break;
+                        case SDL_CONTROLLER_BUTTON_A:          input_->release_key(ZEEBO_KEY_A); dispatch_zpad_to_brew(zeebo::brew::ZP_A, false); break;
+                        case SDL_CONTROLLER_BUTTON_B:          input_->release_key(ZEEBO_KEY_B); dispatch_zpad_to_brew(zeebo::brew::ZP_B, false); break;
+                        case SDL_CONTROLLER_BUTTON_X:          input_->release_key(ZEEBO_KEY_C); dispatch_zpad_to_brew(zeebo::brew::ZP_1, false); break;
+                        case SDL_CONTROLLER_BUTTON_Y:          input_->release_key(ZEEBO_KEY_D); dispatch_zpad_to_brew(zeebo::brew::ZP_2, false); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_UP:    input_->release_key(ZEEBO_KEY_UP); dispatch_zpad_to_brew(zeebo::brew::ZP_UP, false); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  input_->release_key(ZEEBO_KEY_DOWN); dispatch_zpad_to_brew(zeebo::brew::ZP_DOWN, false); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  input_->release_key(ZEEBO_KEY_LEFT); dispatch_zpad_to_brew(zeebo::brew::ZP_LEFT, false); break;
+                        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input_->release_key(ZEEBO_KEY_RIGHT); dispatch_zpad_to_brew(zeebo::brew::ZP_RIGHT, false); break;
+                        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  dispatch_zpad_to_brew(zeebo::brew::ZP_3, false); break;
+                        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: dispatch_zpad_to_brew(zeebo::brew::ZP_4, false); break;
+                        case SDL_CONTROLLER_BUTTON_BACK:
                         case SDL_CONTROLLER_BUTTON_GUIDE:
-                        case SDL_CONTROLLER_BUTTON_START:      input_->release_key(ZEEBO_KEY_HOME); break;
+                        case SDL_CONTROLLER_BUTTON_START:      input_->release_key(ZEEBO_KEY_HOME); dispatch_zpad_to_brew(zeebo::brew::ZP_HOME, false); break;
                     }
                 }
             }
@@ -3411,6 +3503,8 @@ static void print_usage(const char* prog) {
     printf("Opções de Execução e Boot:\n");
     printf("  --boot-appmgr              Força o boot no BREW Appmgr (FIRSTAPP:0, padrão jailbreak)\n");
     printf("  --boot-zwheel              Força o boot na Z-Wheel / ZeeboApp (FIRSTAPP:3, padrão fábrica)\n");
+    printf("  --jit                      Habilita Dynarmic JIT para Core0 (ARM11 APPS)\n");
+    printf("  --jit-solo                 Executa JIT solo sem lockstep shadow de Unicorn\n");
     printf("  --applet=<caminho.mod>     Carrega e injeta aplicativo BREW (.mod) externamente\n");
     printf("  --efs2-ls[=<sufixo>]       Lista dirents da partição 0:EFS2APPS da NAND (filtro opc., ex: .mod)\n");
     printf("  --efs2-run=<arquivo>       Extrai um applet direto do EFS2 (ex: reksio.mod) e injeta via BrewLoader\n");
@@ -3419,12 +3513,17 @@ static void print_usage(const char* prog) {
     printf("  --slice=<N>                Instruções por fatia de ciclo por core (padrão: 10000)\n");
     printf("  --seconds=<N>              Tempo máximo de execução em segundos reais (0 = ilimitado)\n");
     printf("\nOpções Gráficas e Telemetria:\n");
-    printf("  --gui, -g, --window        Abre janela interativa SDL2 (640x480 RGB565)\n");
+    printf("  --gui, -g, --window        Abre janela interativa SDL2 (640x480 RGB565 redimensionável)\n");
     printf("  --headless                 Execução em console sem abrir janela gráfica (padrão)\n");
     printf("  --fps                      Exibe estatísticas contínuas: FPS, MIPS de C0 e C1\n");
     printf("  --dump-frames=<DIR>        Exporta sequência contínua de frames em PPM para <DIR>\n");
     printf("  --zwheel-preview           Abre preview interativo do pipeline gráfico da Z-Wheel\n");
     printf("  --zwheel-preview-headless  Testa preview gráfico em modo headless (para CI)\n");
+    printf("\nAtalhos e Controles no Modo GUI:\n");
+    printf("  F11                        Alternar modo Janela / Tela Cheia (Fullscreen)\n");
+    printf("  PAUSE                      Pausar / Retomar execução da CPU\n");
+    printf("  F12                        Capturar Screenshot instantâneo (PPM)\n");
+    printf("  Gamepad / Z-Pad            D-Pad, Botões A/B/1/2/Home mapeados automaticamente\n");
     printf("\nOpções de Debug e Controle:\n");
     printf("  --control-port=<PORTA>     Habilita servidor de controle remoto/debug na porta TCP\n");
     printf("  --strict-unmapped          (opt-in) Interrompe deterministicamente no primeiro acesso NAO mapeado desconhecido e captura evidencia estruturada (core/PC/addr/width/dir/type/value); default inalterado\n");
@@ -3596,12 +3695,13 @@ int main(int argc, char** argv) {
         printf("[EFS2] Carregando applet '%s' direto da NAND 0:EFS2APPS...\n", efs2_run.c_str());
         if (!sys.load_applet_from_efs2(efs2_run, 0x12000000)) {
             printf("[Warn] Falha ao carregar applet do EFS2: %s\n", efs2_run.c_str());
-        } else if (efs2_run == "274755" || efs2_run == "reksio.mod" || efs2_run == "tectoy.mod") {
-            // Applet / Jogo (Z-Wheel 274755, Reksio reksio.mod, TecToy tectoy.mod):
+        } else {
+            // Applet / Jogo (Z-Wheel 274755, Reksio reksio.mod, TecToy tectoy.mod ou qualquer .mod do EFS2):
             // após injetar o payload do EFS2, instancia o ciclo de vida do applet despachando
             // EVT_APP_START ao manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344).
             std::string app_label = (efs2_run == "274755") ? "Z-Wheel (274755)" :
-                                    (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" : "TecToy (tectoy.mod)";
+                                    (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
+                                    (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
             bool life_ok = sys.dispatch_applet_start(app_label);
             // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0) ou GUI.
             if (life_ok && (max_seconds > 0.0 || !headless)) {
@@ -3616,6 +3716,13 @@ int main(int argc, char** argv) {
         printf("[Applet] Loading external applet into memory: %s\n", applet_path.c_str());
         if (!sys.load_applet(applet_path, 0x12000000)) {
             printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
+        } else {
+            // Executa ciclo de vida automático para applet/jogo externo (estilo Zeebx/Dolphin run game)
+            bool life_ok = sys.dispatch_applet_start(applet_path);
+            if (life_ok && (max_seconds > 0.0 || !headless)) {
+                sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
+            }
+            return life_ok ? 0 : 1;
         }
     }
 

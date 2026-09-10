@@ -323,10 +323,17 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
     int prot = fpage_to_uc_prot(it.fpage);
     if (prot == 0) prot = 1; // pelo menos legível para não criar região inútil
 
+    // UC_ERR_MAP (sobreposição com região já existente, ex.: scratch/IO) apenas
+    // reajusta a proteção com uc_mem_protect.
+    // Se falhar com UC_ERR_NOMEM (ex.: fpage de 4MB tentando mapear sobre range que cruza
+    // ou colide de forma incompatível com região prévia de DMA), tenta split ou protect fallback.
     uc_err e = uc_mem_map(uc, base, (size_t)msize, prot);
-    if (e == UC_ERR_MAP) {
-        // Já mapeado (overlap): apenas reajusta a proteção.
-        e = uc_mem_protect(uc, base, (size_t)msize, prot);
+    if (e == UC_ERR_MAP || e == UC_ERR_NOMEM) {
+        // Já mapeado ou conflito de chunk: tenta reajustar proteção
+        uc_err ep = uc_mem_protect(uc, base, (size_t)msize, prot);
+        if (ep == UC_ERR_OK) {
+            e = UC_ERR_OK;
+        }
     }
 
     // --- Sonda de páginas vazias (Item 2) ---------------------------------
