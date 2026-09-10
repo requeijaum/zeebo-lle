@@ -3596,15 +3596,14 @@ int main(int argc, char** argv) {
         printf("[EFS2] Carregando applet '%s' direto da NAND 0:EFS2APPS...\n", efs2_run.c_str());
         if (!sys.load_applet_from_efs2(efs2_run, 0x12000000)) {
             printf("[Warn] Falha ao carregar applet do EFS2: %s\n", efs2_run.c_str());
-        } else if (efs2_run == "274755") {
-            // Z-Wheel (ZeeboApp, AEECLSID 0x01070798): após injetar o gnode/metadado
-            // de 274755 do EFS2, instancia o ciclo de vida do applet despachando
+        } else if (efs2_run == "274755" || efs2_run == "reksio.mod" || efs2_run == "tectoy.mod") {
+            // Applet / Jogo (Z-Wheel 274755, Reksio reksio.mod, TecToy tectoy.mod):
+            // após injetar o payload do EFS2, instancia o ciclo de vida do applet despachando
             // EVT_APP_START ao manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344).
-            bool life_ok = sys.dispatch_applet_start("Z-Wheel (274755)");
-            // Passo 11: loop interativo/contínuo. O modo de teste unitário
-            // (--seconds=0 sem GUI) executa apenas 1 frame estático do lifecycle
-            // e NÃO entra no loop, preservando test-efs2-zwheel. Entra no loop
-            // quando há tempo requerido (--seconds=N, N>0) ou modo interativo (GUI).
+            std::string app_label = (efs2_run == "274755") ? "Z-Wheel (274755)" :
+                                    (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" : "TecToy (tectoy.mod)";
+            bool life_ok = sys.dispatch_applet_start(app_label);
+            // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0) ou GUI.
             if (life_ok && (max_seconds > 0.0 || !headless)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }

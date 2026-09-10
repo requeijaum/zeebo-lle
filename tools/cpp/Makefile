@@ -177,6 +177,12 @@ test-efs2-zwheel-loop: zeebo_lle_main
 	  && echo "PASS: --efs2-run=274755 --seconds=1 executou o loop interativo contínuo (Passo 11)." \
 	  || (echo "FAIL: loop interativo do applet 274755 não encerrou corretamente"; exit 1)
 
+test-efs2-game-reksio: zeebo_lle_main
+	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=reksio.mod --seconds=1 \
+	  | grep -q "PASS: Jogo/Applet 'Reksio (reksio.mod)' entrou em execução" \
+	  && echo "PASS: --efs2-run=reksio.mod --seconds=1 executou o jogo comercial Reksio." \
+	  || (echo "FAIL: execução do jogo reksio.mod falhou"; exit 1)
+
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
 
@@ -307,7 +313,7 @@ clean:
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
