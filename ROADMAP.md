@@ -1425,7 +1425,13 @@ sobre o formato deste codec proprietário (inexistente publicamente).
    (via debug agent / control-port, não terminal direto) para decidir (a) vs (b) com evidência
    cruzada, antes de qualquer nova tentativa de correção.
 
-### QW56 — [CAUSA RAIZ] Split I/D corrompe a BSS/`.data` do kernel  **[CORRIGIDO]**
+### QW56 — Split I/D corrompe a BSS/`.data` do kernel  **[PARCIALMENTE INVALIDADO — ver QW58]**
+
+> ⚠ **Esta secao foi refutada em parte.** O clobber do `.bss` descrito aqui e' real,
+> mas a conclusao "causa raiz do panic do TCB" e' **FALSA**, e a guarda aplicada era
+> **assimetrica** (so' no read path), o que **destruiu o pool do kmem**. Ler a QW58
+> antes de confiar em qualquer numero desta secao. O texto abaixo fica como registro
+> do raciocinio original.
 
 **Provado por medicao** (interpretador puro): `shadow[f001a538]=0x00000100` vs
 `uc[f001a538]=0x00000000`. O `init_tcb_allocator` roda, escreve certo, e a RAM do
@@ -1463,7 +1469,65 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
-### QW57 — `Assertion trace_buffer failed` (tracebuffer.cc:116) **[ABERTO — nova fronteira]**
+### QW57 — `Assertion trace_buffer failed` (tracebuffer.cc:116) **[RESOLVIDO — era artefato do QW56]**
 
-Nova parada do Core1, bem depois do TCB. O kernel espera um buffer de trace que nao
-provemos. Investigar se e' memoria dedicada esperada por memdesc ou init faltante.
+Nao era fronteira nova: era **consequencia da guarda assimetrica do QW56**, que
+destruia o pool do `kmem`. Com a guarda simetrica (QW58) o assert desaparece.
+Ver QW58 para a medicao.
+
+### QW58 — [AUTO-CORRECAO] a guarda do QW56 era assimetrica e quebrou o pool do kmem
+
+**O commit `6760e3b` estava errado.** A guarda foi aplicada so' no caminho de
+LEITURA (`c1_heap_read_hook`), mas o caminho de ESCRITA (`c1_mem_hook`) continuou
+gravando no shadow em toda a janela. Resultado: acima de `REX_KERNEL_FILESZ` a
+escrita ia para o shadow e a leitura vinha da RAM crua do Unicorn — **escrita e
+leitura em memorias diferentes**, e todo o `.bss` virou lixo.
+
+**Medicao** (mesmo binario, unica variavel = a guarda; probe em `f0002b7c`/`f0002c60`,
+`b7c` como controle positivo do instrumento):
+
+| config | pool alloc ok | insert (`f0002d80`) | `head` | onde parou |
+|---|---|---|---|---|
+| sem guarda (pre-`6760e3b`) | 63/64 | 41 | `0x00000000` | panic TCB (thread.cc:1273) |
+| guarda ASSIMETRICA (`6760e3b`) | **0/8** | **0** | `0x00000000` | assert tracebuffer.cc:116 |
+| guarda SIMETRICA (QW58) | 63/64 | 41 | `0xf000f800` | panic TCB (thread.cc:1273) |
+
+**Correcao**: aplicar a mesma condicao no write path (`off < REX_KERNEL_FILESZ`),
+mantendo escrita e leitura coerentes.
+
+**Conclusao que invalida o QW56**: a guarda e' **neutra** para o panic do TCB. Com
+ela, sem ela, ou simetrica, o kernel para no mesmo ponto. O clobber do `.bss` e'
+um defeito real do nosso modelo, mas **nao e' a causa do panic do TCB**.
+
+**Licao (gate §7 do MORE_INFO)**: o controle negativo do QW56 estava correto nos
+fatos e errado na leitura. "Sem guarda para no panic A; com guarda avanca ate' B"
+foi lido como progresso, quando B so' era alcancado porque a estrutura por baixo
+tinha sido destruida. **Avancar de panic nao e' progresso** — e' o "contador maior
+!= correcao" na sua forma mais convincente.
+
+### QW59 — [ERRO DE INSTRUMENTO] o probe do panic do TCB era falso positivo
+
+O probe imprimia `>>> ponto do panic thread.cc:1273 alcancado` em `pc == 0xf0016bec`.
+Desassemblado: `f0016bec` e' o **`beq f0016d14`**, isto e', o TESTE — executado em
+todo boot, com ou sem falha. O panic real e' o destino `f0016d14`; o `printf` de
+thread.cc:1273 esta' em `f0016bac` (`mov r2,#0x4f0` + `add r2,r2,#9` = 1273).
+
+Medido com o pool sao (guarda simetrica), instrumentando os guardas de verdade:
+
+    [QW59] allocate_tcb RETORNOU r0=0xf000ce1c (tcb)     <- SUCESSO
+    [QW59] f000c3a4 RETORNOU r0=0x00000001  => ok        <- 1o guarda passa
+    [QW59] f000c240 RETORNOU r0=0x00000001  => ok        <- 2o guarda passa
+
+**Ou seja: nao ha panic do TCB.** `allocate_tcb` devolve um TCB valido e os dois
+guardas passam. O "panic" que persegui era o rotulo mentiroso do meu proprio probe.
+
+**Estado real do Core1** (histograma nao-filtrado, `STATS_TECHNIQUES.md` §1):
+o Core1 executa >4M instrucoes e emite **491 `L4_MapControl`** com **140 VAs
+distintos** progredindo (`b0e00000`, `b0e01000`, ... `phys=0x10055000`+). Nao esta'
+travado — esta' fazendo setup de espaco de enderecamento. A ultima linha do console
+(`creating root server`) e' apenas o ultimo `printf`, nao o ponto de parada.
+
+**Aplicacao do `STATS_TECHNIQUES.md` §1**: o histograma que eu usava filtrava
+`pc >= 0xf0000000 && pc < 0xf0020000` ANTES de contar — poder zero contra a
+hipotese "o hook e' cego fora da faixa". Trocado por `hi[pc >> 28]` cobrindo os
+16 nibbles + janela fina. Foi o que revelou o trafego real.

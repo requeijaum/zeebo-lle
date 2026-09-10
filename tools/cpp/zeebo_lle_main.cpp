@@ -3672,7 +3672,13 @@ private:
                         reg(UC_ARM_REG_R0),
                         reg(UC_ARM_REG_R0)==0 ? "<== NULL! causa do panic" : "ok");
             } else if (pc == 0xf0016bec) {
-                fprintf(stderr,"[TCB] >>> ponto do panic thread.cc:1273 alcancado\n");
+                // CORRECAO (QW59): f0016bec e' o `beq f0016d14`, ou seja o TESTE,
+                // nao o panic. Ele e' executado em TODO boot, com ou sem falha --
+                // o rotulo antigo ("ponto do panic alcancado") era falso positivo
+                // e me fez ler boots saudaveis como panic. O panic real e' o
+                // destino f0016d14; o printf de thread.cc:1273 fica em f0016bac.
+                fprintf(stderr,"[TCB] teste f0016bec (beq): %s\n",
+                        (reg(UC_ARM_REG_R0) & 0xff) ? "passou" : "vai desviar p/ f0016d14");
             } else if (pc == 0xf001681c) {
                 fprintf(stderr,"[TCB] init_tcb_allocator ENTRA (f001681c)\n");
             } else if (pc == 0xf00162d8) {
@@ -3983,7 +3989,12 @@ private:
         // não adianta restaurar aqui — faríamos e o store sobrescreveria de novo).
         if (sys->rex_split_id_ && type == UC_MEM_WRITE && rex_in_heap((u32)addr)) {
             u32 a=(u32)addr, off=a-REX_HEAP_VA_BASE, n=(u32)size;
-            if (off+n <= sys->rex_heap_shadow_.size()) {
+            // QW58: SIMETRIA com c1_heap_read_hook. A leitura nao serve o shadow
+            // acima de REX_KERNEL_FILESZ (.bss); se a escrita continuasse gravando
+            // la', escrita e leitura viveriam em memorias diferentes e toda
+            // variavel do .bss viraria lixo -- foi o que matou o pool do kmem
+            // (medido: 63 alocacoes OK sem a guarda, 0 com a guarda assimetrica).
+            if (off < REX_KERNEL_FILESZ && off+n <= sys->rex_heap_shadow_.size()) {
                 for (u32 i=0;i<n;i++)
                     sys->rex_heap_shadow_[off+i] = (u8)((value>>(8*i)) & 0xff);
                 for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
