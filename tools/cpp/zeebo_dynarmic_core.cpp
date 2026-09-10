@@ -196,12 +196,30 @@ struct DynarmicCore::Impl final : public Dynarmic::A32::UserCallbacks {
         ticks_left = 0;
     }
 
-    void ExceptionRaised(std::uint32_t /*pc*/, Dynarmic::A32::Exception /*exc*/) override {
+    // Guarda a ultima excecao para o chamador poder relatar. Descartar isso
+    // fazia uma instrucao invalida virar laco silencioso: o quantum terminava,
+    // o laco principal reiniciava a execucao no mesmo PC e o contador subia
+    // para sempre sem que nada indicasse a falha.
+    bool exception_pending = false;
+    std::uint32_t exception_pc = 0;
+    Dynarmic::A32::Exception exception_kind{};
+
+    void ExceptionRaised(std::uint32_t pc, Dynarmic::A32::Exception exc) override {
+        exception_pending = true;
+        exception_pc = pc;
+        exception_kind = exc;
         ticks_left = 0;
     }
 
-    void InterpreterFallback(std::uint32_t /*pc*/, std::size_t /*num_instructions*/) override {
-        // Fallback no-op
+    bool fallback_pending = false;
+    std::uint32_t fallback_pc = 0;
+
+    void InterpreterFallback(std::uint32_t pc, std::size_t /*num_instructions*/) override {
+        // Sem interpretador acoplado, continuar daqui repetiria a mesma
+        // instrucao indefinidamente. Registra e para o quantum.
+        fallback_pending = true;
+        fallback_pc = pc;
+        ticks_left = 0;
     }
 
     void AddTicks(std::uint64_t ticks) override {
@@ -218,6 +236,17 @@ DynarmicCore::DynarmicCore(MemoryBridge bridge, Cp15Ids cp15)
     : impl_(std::make_unique<Impl>(bridge, cp15)) {}
 
 DynarmicCore::~DynarmicCore() = default;
+
+DynarmicCore::Fault DynarmicCore::take_fault() {
+    Fault f;
+    f.raised = impl_->exception_pending;
+    f.interpreter_fallback = impl_->fallback_pending;
+    f.pc = impl_->exception_pending ? impl_->exception_pc : impl_->fallback_pc;
+    f.kind = static_cast<uint32_t>(impl_->exception_kind);
+    impl_->exception_pending = false;
+    impl_->fallback_pending = false;
+    return f;
+}
 
 void DynarmicCore::set_regs_zero() {
     impl_->jit->Regs().fill(0);
@@ -351,6 +380,9 @@ uint64_t DynarmicCore::run(uint64_t max_insns) {
             impl_->svc_hit_this_block = false;
             impl_->ticks_left = 1;
             impl_->jit->Step();
+            // Uma instrucao invalida nao consome ticks: sem esta saida o laco
+            // repete o mesmo PC para sempre (o que travava o boot em silencio).
+            if (impl_->exception_pending || impl_->fallback_pending) break;
             if (impl_->svc_hit_this_block && on_svc) {
                 on_svc(impl_->last_swi_num);
                 break;
@@ -365,6 +397,10 @@ uint64_t DynarmicCore::run(uint64_t max_insns) {
         impl_->ticks_left = std::min(quantum, remaining);
 
         impl_->jit->Run();
+
+        // Idem para o caminho de blocos: sem ticks consumidos e sem esta
+        // saida, target_ticks nunca e atingido e run() nao retorna.
+        if (impl_->exception_pending || impl_->fallback_pending) break;
 
         if (impl_->svc_hit_this_block) {
             // Se houve SVC, executa o dispatcher registrado passando o número real

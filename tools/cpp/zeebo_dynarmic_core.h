@@ -69,6 +69,17 @@ public:
     void halt_from_hook();
     bool step_one_insn();
 
+    // Falha da ultima fatia executada. Sem isto, uma instrucao invalida ou um
+    // fallback de interpretador viram laco silencioso: o PC fica parado e o
+    // contador de instrucoes sobe indefinidamente, sem qualquer diagnostico.
+    struct Fault {
+        bool raised = false;         // excecao (instrucao indefinida etc.)
+        bool interpreter_fallback = false;
+        uint32_t pc = 0;
+        uint32_t kind = 0;           // Dynarmic::A32::Exception, como inteiro
+    };
+    Fault take_fault();
+
     // Dispatcher de SVC chamado em tempo real
     std::function<void(uint32_t swi)> on_svc;
 

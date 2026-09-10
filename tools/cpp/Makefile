@@ -36,6 +36,9 @@ test_audio_lifetime: test_audio_lifetime.cpp zeebo_audio_sink.h
 
 # Limites do leitor de cabecalhos de programa contra arquivos incoerentes.
 # Gancho por instrucao do backend recompilado (DD-JIT).
+test_jit_fault_report: test_jit_fault_report.cpp zeebo_dynarmic_core.cpp zeebo_dynarmic_core.h
+	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ test_jit_fault_report.cpp zeebo_dynarmic_core.cpp $(DYNARMIC_LIBS) -lunicorn
+
 test_jit_code_hook: test_jit_code_hook.cpp zeebo_dynarmic_core.cpp zeebo_dynarmic_core.h
 	$(CXX) $(CXXFLAGS) $(DYNARMIC_INCS) -o $@ test_jit_code_hook.cpp zeebo_dynarmic_core.cpp $(DYNARMIC_LIBS) -lunicorn
 
@@ -334,6 +337,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	ASAN_OPTIONS=detect_leaks=0 ./test_video_mmio
 	@echo "== JIT: gancho por instrucao executada =="
 	./test_jit_code_hook
+	./test_jit_fault_report
 	./test_control_server
 	./test_probe_registry
 	./test_save_state
@@ -342,7 +346,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
+	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_control_server test_l4_mmu test_l4_mmu_uc test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming *.o

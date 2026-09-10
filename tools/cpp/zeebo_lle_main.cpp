@@ -480,6 +480,15 @@ public:
         }
     }
 
+    // Comandos de inspecao leem sempre o Unicorn. Sob --jit quem executa e o
+    // Dynarmic, entao sem este espelhamento eles reportariam registradores
+    // parados (PC=0), descrevendo um motor que nao esta rodando.
+    void mirror_jit_state_for_inspection() {
+        if (core0_.backend == CoreBackend::Dynarmic && core0_.jit) {
+            core0_.jit->sync_to_unicorn(core0_.uc);
+        }
+    }
+
     bool init_control(int port) {
         control_ = std::make_unique<zeebo_lle::ControlServer>();
         register_probes();
@@ -1417,7 +1426,11 @@ public:
 
             // Step Core 0 (ARM11)
             uc_err e0 = UC_ERR_OK;
-            if (core0_.backend == CoreBackend::Dynarmic && core0_.jit) {
+            // Core1 ja respeitava seu halted; Core0 nao consultava o dele, entao
+            // uma parada por falha era reimpressa a cada ciclo.
+            if (core0_.halted) {
+                // nada a executar
+            } else if (core0_.backend == CoreBackend::Dynarmic && core0_.jit) {
                 // Sincroniza estado inicial do Unicorn para o Dynarmic no ciclo 0
                 if (c == 0) {
                     core0_.jit->sync_from_unicorn(core0_.uc);
@@ -1426,6 +1439,18 @@ public:
                 uint64_t ticks_run = core0_.jit->run(slice_insns);
                 (void)ticks_run;
                 core0_.entry = core0_.jit->pc();
+                // O caminho Unicorn abaixo checa o erro da fatia; este nao
+                // checava nada. Uma instrucao invalida entao virava laco
+                // silencioso: PC parado, contador de instrucoes subindo.
+                auto fault = core0_.jit->take_fault();
+                if (fault.raised || fault.interpreter_fallback) {
+                    printf("[Core0/JIT] parada em pc=0x%08x (%s, kind=%u) apos %llu insns\n",
+                           fault.pc,
+                           fault.raised ? "excecao" : "fallback de interpretador",
+                           fault.kind, (unsigned long long)core0_.insns);
+                    fflush(stdout);
+                    core0_.halted = true;
+                }
                 // Sincroniza de volta para garantir que hooks/inspeções vejam os registradores atualizados
                 core0_.jit->sync_to_unicorn(core0_.uc);
             } else {
@@ -1635,6 +1660,7 @@ public:
                 req->reply.set_value("{\"ok\":false,\"error\":\"invalid_core\"}");
                 return;
             }
+            mirror_jit_state_for_inspection();
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             u32 pc = 0, lr = 0, sp = 0, r11 = 0;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
@@ -1768,6 +1794,7 @@ public:
             return;
         }
         if (req->cmd == "state") {
+            mirror_jit_state_for_inspection();
             u32 c0_pc = 0, c1_pc = 0;
             uc_reg_read(core0_.uc, UC_ARM_REG_PC, &c0_pc);
             uc_reg_read(core1_.uc, UC_ARM_REG_PC, &c1_pc);
@@ -1892,6 +1919,7 @@ public:
                 req->reply.set_value("{\"ok\":false,\"error\":\"invalid_register\"}");
                 return;
             }
+            mirror_jit_state_for_inspection();
             uc_engine* uc = (req->core == 1) ? core1_.uc : core0_.uc;
             int r_idx = (int)req->i0;
             int reg_id = UC_ARM_REG_R0 + r_idx;
