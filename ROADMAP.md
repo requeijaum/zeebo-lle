@@ -1,4 +1,21 @@
-# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10, JIT Dynarmic ARM11, Ciclo de Vida EFS2/BREW e UX Dolphin/RPCS3 Entregues; Diagnóstico de Display/UART/Diag USB em Aberto)
+# Zeebo LLE Emulator — ROADMAP (rev 2026-09-10b, Áudio Host Real via SDL2 [QW-AUD1] Entregue; Double Dragon AUSENTE na NAND 1.1.2 atual — só reksio.mod/tectoy.mod)
+
+## Nota de sessão (2026-09-10b)
+- **QW-AUD1 implementado e testado**: `UnifiedHostAudio` (SDL_AudioDevice pull-callback) conectado ao mixer real do
+  AUDPP/QDSP5 (`Qdsp5Dispatcher::mix_audio` -> `AudppEngine::mix_audio` -> `UnifiedAudioSink`). Ativo só em `--gui`
+  (headless permanece silencioso, sem custo). Boot `--gui --efs2-run=tectoy.mod` com `SDL_AUDIODRIVER=dummy`
+  abriu device 44100Hz/2ch/buffer=1024 e completou o ciclo de vida do Z-Wheel normalmente. Commit `d530d4c`.
+- **Double Dragon NÃO está presente na NAND 1.1.2.bin montada** (`nand/1.1.2.bin`). Varredura completa dos 69.634
+  dirents de `0:EFS2APPS` (`--efs2-ls=*.mod --efs2-ls-max=69634`) só retorna `reksio.mod` e `tectoy.mod`. Strings de
+  Double Dragon existem apenas como texto de loja/descrição de produto (multi-idioma), não como binário de jogo.
+  O arquivo `Downloads/temp/.../Double Dragon (Brazil) (Es,Pt).7z` no host é uma ROM No-Intro separada (7z real,
+  não extraível ainda no ambiente atual — falha silenciosa do `7z x`, cabeçalho começa com bytes nulos, precisa
+  investigação/instalação de suporte a 7z antes de tentar montar como NAND alternativa).
+- Commit `2d52ef5`: filtro `*termo` (contains, não só sufixo) e `--efs2-ls-max=` no CLI `--efs2-ls`, usados para
+  confirmar a ausência de Double Dragon de forma exaustiva (sem adivinhar).
+- Próximo passo honesto para "ver e ouvir... Double Dragon": (a) obter um dump de NAND real do cartucho Double
+  Dragon (ou extrair o 7z do host corretamente) e apontar `--nand=`/paths equivalentes para essa imagem; (b) só
+  então repetir o pipeline EFS2→BrewLoader→dispatch já provado com reksio.mod/tectoy.mod.
 
 Low-level emulation of the Zeebo: boot the REAL firmware from the NAND dump on an
 emulated Qualcomm MSM7201A (ARM11 apps core + ARM9 modem coprocessor + QDSP5), no HLE of BREW.
