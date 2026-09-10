@@ -3854,6 +3854,26 @@ private:
             }
         }
 
+        // [PROBE] faixa servida do pristino, selecionavel por env para permitir
+        // CONTROLE NEGATIVO (MORE_INFO §7): a mesma mecanica numa faixa
+        // irrelevante deve NAO destravar o boot. Se destravar, o instrumento
+        // provou a si mesmo, nao a causa.
+        //   ZEEBO_PROBE=rodata  -> f000e000..f0010000 (tabela de tamanhos, hipotese)
+        //   ZEEBO_PROBE=control -> f0012000..f0014000 (faixa vizinha, sem uso conhecido)
+        //   ZEEBO_PROBE unset   -> desligado (baseline)
+        {
+            static int mode = -1;
+            if (mode < 0) {
+                const char* e = getenv("ZEEBO_PROBE");
+                mode = (!e) ? 0 : (strcmp(e, "rodata") == 0 ? 1
+                                : (strcmp(e, "control") == 0 ? 2 : 0));
+            }
+            u32 lo = (mode == 1) ? 0xf000e000u : (mode == 2) ? 0xf0012000u : 0;
+            if (mode && a >= lo && a < lo + 0x2000u) {
+                uc_mem_write(uc, a, &sys->rex_heap_pristine_[off], n);
+                return;
+            }
+        }
         uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
         for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
     }

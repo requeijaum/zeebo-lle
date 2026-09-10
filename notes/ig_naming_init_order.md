@@ -59,6 +59,12 @@ ig_naming is the **name server**: peers REGISTER, then LOOK UP. On boot it enter
   models the intended handshake as `msg.mr = {0x16, 0x10137000, 0, 1}` (register amss's
   entry) — **plausible but unconfirmed** as the literal first message.
 
+> ⚠ **RECLASSIFICADO (ver `notes/core1_boot_estado_real.md`, 2026-09-10).**
+> (A) T-bit no branch 0x00: **ja corrigido** (zeebo_lle_main.cpp:3063/3069).
+> (B) "no real sender thread": nao e latente, e **inalcancavel** — medido ZERO
+> L4_Ipc e ZERO ExchangeRegisters no boot (8 SVCs, todos 0x14 MapControl). Todo
+> o `case 0x00`, incluindo a injecao sintetica MR1=0x16, e codigo morto aqui.
+
 ## 4. What the LLE is missing / doing wrong
 
 Two distinct problems, in priority order:

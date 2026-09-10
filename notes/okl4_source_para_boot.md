@@ -42,7 +42,14 @@ timer_server_loop();                              // espera IPC (reply/wait)
 4. (etc. servers OKL4: memsection, trace, event, vbus...)
 5. AEECShell / AppMgr → Z-Wheel applet
 
-## Causa raiz do stall (2 bloqueios, em ordem)
+> ⚠ **STATUS DESATUALIZADO (ver `notes/core1_boot_estado_real.md`, 2026-09-10).**
+> O fix 1 (T-bit) **JÁ FOI APLICADO** — o guard foi generalizado para dentro do
+> proprio `apply_tbit` (zeebo_lle_main.cpp:3063/3069) e vale para TODOS os
+> syscalls, inclusive o 0x00. O fix 2 (scheduler) e **inalcancavel**: medicao do
+> hook de syscall mostra 8 SVCs no boot inteiro, todos 0x14 (MapControl), ZERO
+> L4_Ipc. O boot morre ANTES de qualquer IPC, no laco de page-table walk.
+
+## Causa raiz do stall (2 bloqueios, em ordem) — SUPERADO, ver aviso acima
 1. **T-bit bug (físico, primeiro)**: branch `syscall==0x00` (linha 2452 em zeebo_lle_main.cpp) usa `apply_tbit(pc)` cru; força Thumb no retorno do L4_Ipc do ig_naming (cópia local ARM em 0xb010xxxx) → decode drift → stall em 0xb010333a. QW42 corrigiu SÓ o 0x0c, não o 0x00.
 2. **Scheduler (lógico)**: só o ig_naming está agendado; nenhum server dispara `naming_insert` real → nenhum IPC chega.
 
