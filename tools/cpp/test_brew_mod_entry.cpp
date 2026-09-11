@@ -36,6 +36,12 @@ static u32 enc_b(u32 insn_va, u32 target, bool link = false) {
 }
 
 int main() {
+    // Proveniência exibida deve corresponder ao caminho de resolução real.
+    assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_ELF)) == "ELF e_entry");
+    assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_RAW_BRANCH)) == "MOD cru branch inicial");
+    assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_RAW_START)) == "MOD cru início direto");
+    assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_NONE)) == "não resolvido");
+
     std::printf("=== Test BREW MOD entry / elf2mod prefix (Bug 3) ===\n");
 
     const u32 LB = 0x10200000; // base típica (>0x1000)

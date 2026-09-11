@@ -36,6 +36,15 @@ enum EntryKind : u32 {
     ENTRY_RAW_START  = 3, // MOD cru: AEEMod_Load começa direto no load_va
 };
 
+inline const char* entry_kind_label(u32 kind) {
+    switch (kind) {
+        case ENTRY_ELF:        return "ELF e_entry";
+        case ENTRY_RAW_BRANCH: return "MOD cru branch inicial";
+        case ENTRY_RAW_START:  return "MOD cru início direto";
+        default:               return "não resolvido";
+    }
+}
+
 // ClassID BREW de um applet. 0 = "qualquer" (casa com o primeiro CreateInstance).
 struct AppletModule {
     std::string host_path;      // caminho do .mod no host
@@ -334,7 +343,10 @@ public:
         prepare_elf2mod_prefix(load_va);
         printf("[BREW] payload '%s' injetado em 0x%08x (%u bytes)%s\n", origin.c_str(), load_va, sz,
                mod_.entry_va ? "" : " [entry AEEMod_Load não resolvido do header]");
-        if (mod_.entry_va) printf("[BREW] AEEMod_Load do módulo @ 0x%08x [infer ELF e_entry]\n", mod_.entry_va);
+        if (mod_.entry_va) {
+            printf("[BREW] AEEMod_Load do módulo @ 0x%08x [%s]\n",
+                   mod_.entry_va, entry_kind_label(mod_.entry_kind));
+        }
         return true;
     }
 
