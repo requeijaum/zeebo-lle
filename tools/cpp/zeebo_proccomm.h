@@ -30,6 +30,19 @@ enum : pc_u32 {
     PCOM_OFF_APP_STATUS  = 0x04,
     PCOM_OFF_APP_DATA1   = 0x08,
     PCOM_OFF_APP_DATA2   = 0x0c,
+
+    // Host-model "shadow" pending state, kept in the SAME shared backing so both
+    // core views (Core0 issue, Core1 service) agree without touching the
+    // guest-visible ProcComm words. The guest never reads these offsets; they
+    // live past the guest ProcComm/MDM block (0x00..0x1f).
+    //
+    // QW99 Bug 6: the pending flag is the SOLE source of truth for
+    // "a command awaits the modem". It must NOT be re-derived from APP_COMMAND,
+    // because the id PCOM_CMD_RESET_MODEM (0x1) is numerically identical to the
+    // completion sentinel PCOM_CMD_DONE (0x1) — deriving pending-ness from
+    // APP_COMMAND would treat a freshly-issued RESET_MODEM as already done.
+    PCOM_OFF_PEND_FLAG   = 0x20, // 1 = a command is pending in shared SMEM
+    PCOM_OFF_PEND_CMD    = 0x24, // the pending command id (shadow, not APP_COMMAND)
 };
 
 // Command / status sentinels.
@@ -59,16 +72,12 @@ struct ProcComm {
     uint8_t* smem = nullptr; // pointer to shared SMEM base backing
     size_t   smem_size = 0;
 
-    // Shadow of the currently-pending command id. -1 (all ones) = none pending.
-    // Kept out of the guest-visible APP_COMMAND word, which the modem overwrites
-    // with PCOM_CMD_DONE on completion.
-    pc_u32 pending_cmd = PCOM_STATUS_UNSET;
-    bool   has_pending = false;
-
     void bind(uint8_t* base, size_t size) {
         smem = base; smem_size = size;
         // Idle marker so a fresh block is not mistaken for a pending command.
         if (in_range(PCOM_OFF_APP_STATUS)) wr(PCOM_OFF_APP_STATUS, PCOM_STATUS_UNSET);
+        // No command pending in a fresh block. Shadow lives in shared SMEM.
+        if (in_range(PCOM_OFF_PEND_FLAG)) wr(PCOM_OFF_PEND_FLAG, 0);
     }
 
     bool in_range(pc_u32 off) const { return smem && (off + 4) <= smem_size; }
@@ -81,22 +90,25 @@ struct ProcComm {
     }
 
     // Core 0 issues a command. This makes the command VISIBLE in shared SMEM and
-    // marks it pending. It does NOT complete it and does NOT touch APP_STATUS's
-    // completion meaning — the modem owns completion.
+    // marks it pending via the shared shadow. It does NOT complete it and does
+    // NOT touch APP_STATUS's completion meaning — the modem owns completion.
     void core0_issue(pc_u32 cmd, pc_u32 data1 = 0, pc_u32 data2 = 0) {
         wr(PCOM_OFF_APP_DATA1, data1);
         wr(PCOM_OFF_APP_DATA2, data2);
         wr(PCOM_OFF_APP_STATUS, PCOM_STATUS_UNSET); // no verdict yet
         wr(PCOM_OFF_APP_COMMAND, cmd);              // command id visible in SMEM
+        // Shadow pending state in the SHARED backing so Core1's view agrees.
+        // This is the ONLY authority for "pending" — decoupled from APP_COMMAND
+        // so RESET_MODEM (0x1) is never confused with DONE (0x1).
+        wr(PCOM_OFF_PEND_CMD, cmd);
+        wr(PCOM_OFF_PEND_FLAG, 1);
     }
 
-    // Is a command visible in SMEM and awaiting the modem? Derived purely from
-    // the shared backing so BOTH core views agree: a non-idle, non-DONE command
-    // word with no verdict yet (STATUS still UNSET) is pending.
+    // Is a command visible in SMEM and awaiting the modem? Derived from the
+    // shared PEND_FLAG shadow, NOT from APP_COMMAND — so a pending RESET_MODEM
+    // (id 0x1) is not mistaken for a completed handshake (DONE == 0x1).
     bool command_pending() const {
-        pc_u32 cmd = rd(PCOM_OFF_APP_COMMAND);
-        if (cmd == PCOM_CMD_IDLE || cmd == PCOM_CMD_DONE) return false;
-        return rd(PCOM_OFF_APP_STATUS) == PCOM_STATUS_UNSET;
+        return rd(PCOM_OFF_PEND_FLAG) == 1;
     }
 
     static bool is_supported(pc_u32 cmd) {
@@ -114,18 +126,24 @@ struct ProcComm {
     // Honest status: supported -> SUCCESS, otherwise -> FAIL_UNSUPPORTED.
     bool core1_service() {
         if (!command_pending()) return false;
-        pc_u32 cmd = rd(PCOM_OFF_APP_COMMAND);
+        // Read the command id from the shadow, not APP_COMMAND, so the identity
+        // survives the DONE overwrite regardless of numeric collisions.
+        pc_u32 cmd = rd(PCOM_OFF_PEND_CMD);
         pc_u32 status = is_supported(cmd) ? PCOM_CMD_SUCCESS
                                           : PCOM_CMD_FAIL_UNSUPPORTED;
         // Modem is the sole writer of the completion words.
         wr(PCOM_OFF_APP_STATUS, status);
         wr(PCOM_OFF_APP_COMMAND, PCOM_CMD_DONE);
+        // Clear the shared pending shadow: the handshake is complete.
+        wr(PCOM_OFF_PEND_FLAG, 0);
         return true;
     }
 
     // Convenience for the Core 0 side of the wait: has the modem completed?
+    // A completion is DONE in APP_COMMAND with no command still pending.
     bool completed() const {
-        return rd(PCOM_OFF_APP_COMMAND) == PCOM_CMD_DONE;
+        return rd(PCOM_OFF_APP_COMMAND) == PCOM_CMD_DONE
+               && rd(PCOM_OFF_PEND_FLAG) == 0;
     }
     pc_u32 status() const { return rd(PCOM_OFF_APP_STATUS); }
 };
