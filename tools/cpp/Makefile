@@ -105,6 +105,44 @@ test_nand_relocator_bounds: test_nand_relocator_bounds.cpp
 	$(CXX) -std=c++23 -O1 -g -fsanitize=address,undefined -o $@ test_nand_relocator_bounds.cpp
 
 
+# Bug 5: VIC pending/enable/ack latch + real ARM IRQ exception delivery between
+# uc_emu_start slices. Positive run is the GREEN gate; `buggy` reproduces the
+# pre-fix RED (mask-ignoring delivery). Requires libunicorn.
+test_vic_irq: test_vic_irq.cpp zeebo_vic_irq.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_VIC_WITH_UNICORN -o $@ test_vic_irq.cpp -lunicorn
+
+test-vic-irq: test_vic_irq
+	./test_vic_irq
+	@# Negative mutation: mask-ignoring delivery MUST fail (RED reproduced).
+	@if ./test_vic_irq buggy >/dev/null 2>&1; then \
+	  echo "FAIL: buggy mask-ignoring delivery unexpectedly passed"; exit 1; \
+	else echo "OK: buggy mask-ignoring delivery fails as expected (RED reproduced)"; fi
+
+# Bug 5: GPT counter advances from emulated progress; MATCH crossing raises a
+# VIC line. Host-only, deterministic. `buggy` reproduces the stalled-counter RED.
+test_gpt_timer: test_gpt_timer.cpp zeebo_gpt_timer.h zeebo_vic_irq.h
+	$(CXX) $(CXXFLAGS) -o $@ test_gpt_timer.cpp
+
+test-gpt-timer: test_gpt_timer
+	./test_gpt_timer
+	@# Negative mutation: stalled counter / no fire MUST fail (RED reproduced).
+	@if ./test_gpt_timer buggy >/dev/null 2>&1; then \
+	  echo "FAIL: buggy stalled-counter timer unexpectedly passed"; exit 1; \
+	else echo "OK: buggy stalled-counter timer fails as expected (RED reproduced)"; fi
+
+# Bug 6: inter-core ProcComm over shared SMEM — Core0 issue becomes visible,
+# only a Core1 service step completes it with an honest status. Host-only.
+# `buggy` reproduces the pre-fix RED (Core0-immediate-fabricated-success).
+test_proccomm: test_proccomm.cpp zeebo_proccomm.h
+	$(CXX) $(CXXFLAGS) -o $@ test_proccomm.cpp
+
+test-proccomm: test_proccomm
+	./test_proccomm
+	@# Negative mutation: fabricated immediate success MUST fail (RED reproduced).
+	@if ./test_proccomm buggy >/dev/null 2>&1; then \
+	  echo "FAIL: buggy immediate-success ProcComm unexpectedly passed"; exit 1; \
+	else echo "OK: buggy immediate-success ProcComm fails as expected (RED reproduced)"; fi
+
 zeebo_harness: zeebo_harness.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_harness.cpp $(LIBS)
 
@@ -447,7 +485,7 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm
 	./test_applet_dispatch
 	./test_applet_exec_perm
 	./test_brew_timer
@@ -482,6 +520,10 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	./test_probe_registry
 	./test_save_state
 	./test_smd_bridge_bounds
+	@echo '--- bug 5/6: VIC IRQ delivery, GPT timer, ProcComm (positivo + controle negativo) ---'
+	$(MAKE) test-vic-irq
+	$(MAKE) test-gpt-timer
+	$(MAKE) test-proccomm
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
 	./test_l4_thread_table
@@ -504,11 +546,11 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_vic_irq test_gpt_timer test_proccomm *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

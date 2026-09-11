@@ -52,6 +52,10 @@
 #include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
+#define ZEEBO_VIC_WITH_UNICORN
+#include "zeebo_vic_irq.h"
+#include "zeebo_gpt_timer.h"
+#include "zeebo_proccomm.h"
 #include "zeebo_cli_paths.h"
 #include "zeebo_dynarmic_core.h"
 
@@ -1697,7 +1701,41 @@ public:
             }
             c++;
 
-            // Update display sink if GPU or MDDI marked dirty / drawn
+            // --- Bug 5: GPT advance from emulated progress + real IRQ delivery.
+            // Runs BETWEEN uc_emu_start slices (engine quiescent) so mutating the
+            // banked IRQ context is safe. The GPT counter advances by how many
+            // instructions the cores actually executed this cycle (emulated
+            // progress), NOT by any register read. A MATCH crossing raises the
+            // GPT VIC line; then, for the interpreter path, an unmasked pending
+            // line is delivered as a genuine ARM IRQ exception.
+            {
+                uint64_t d0 = core0_.insns - last_c0_insns_slice_;
+                uint64_t d1 = core1_.insns - last_c1_insns_slice_;
+                last_c0_insns_slice_ = core0_.insns;
+                last_c1_insns_slice_ = core1_.insns;
+                uint32_t ticks = (uint32_t)((d0 + d1) & 0xffffffffu);
+                if (gpt_.advance(ticks)) {
+                    vic_c0_.raise_line(GPT_VIC_LINE);
+                    vic_c1_.raise_line(GPT_VIC_LINE);
+                }
+                // Deliver only on the interpreter (Unicorn) path and only when the
+                // core is not halted. The JIT path is left untouched (its context
+                // is not safe to mutate from here).
+                if (!core0_.halted && core0_.backend == CoreBackend::Unicorn &&
+                    core0_.uc && vic_c0_.irq_asserted()) {
+                    // Sync the post-slice PC into the engine before delivery.
+                    uc_reg_write(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                    if (zeebo::vic_deliver_irq(core0_.uc, vic_c0_, c0_vector_base_)) {
+                        uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                    }
+                }
+                if (!core1_.halted && core1_.uc && vic_c1_.irq_asserted()) {
+                    uc_reg_write(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+                    if (zeebo::vic_deliver_irq(core1_.uc, vic_c1_, c1_vector_base_)) {
+                        uc_reg_read(core1_.uc, UC_ARM_REG_PC, &core1_.entry);
+                    }
+                }
+            }
             if (gpu_ && gpu_->is_fb_dirty()) {
                 gpu_->clear_fb_dirty();
                 const u16* cur_fb = nullptr;
@@ -2293,6 +2331,12 @@ private:
         u32 apps_state = 0x0000002b; // SMSM_INIT | SMSM_OSENTERED | SMSM_SMDINIT | SMSM_RPCINIT
         memcpy(smem_init.data() + 0x100, &apps_state, 4);
         uc_mem_write(core0_.uc, SMEM_BASE, smem_init.data(), smem_init.size());
+
+        // Bug 6: bind ProcComm to the SAME shared backing both cores see. The
+        // command block lives at SMEM_BASE+0x00..0x0f. Mark it idle so a fresh
+        // block is not mistaken for a pending command.
+        proccomm_.bind(smem_mem_.data(), smem_mem_.size());
+        proccomm_.wr(zeebo::PCOM_OFF_APP_STATUS, zeebo::PCOM_STATUS_UNSET);
 
         // Inter-core Doorbell MSM_CSR (0xC0100000)
         uc_mem_map(core0_.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
@@ -3690,19 +3734,38 @@ private:
                 }
             }
         }
-        // ProcComm command write by Core 0
+        // ProcComm command write by Core 0 (bug 6). The old path unconditionally
+        // wrote PCOM_CMD_SUCCESS from Core 0 itself — fabricated success. Now the
+        // command becomes VISIBLE in shared SMEM (Core0 issue), then a modeled
+        // Core 1 service step produces the completion with an HONEST,
+        // command-specific status (unsupported stays unsupported).
         else if (addr == SMEM_BASE + 0x00) { // APP_COMMAND
             u32 cmd = value;
-            printf("[ProcComm] Core 0 issued command 0x%x\n", cmd);
-            u32 status_success = 3; // PCOM_CMD_SUCCESS
-            if (core0_.uc) {
-                uc_mem_write(core0_.uc, SMEM_BASE + 0x04, &status_success, 4); // APP_STATUS
-                u32 cmd_done = 1; // PCOM_CMD_DONE
-                uc_mem_write(core0_.uc, SMEM_BASE + 0x00, &cmd_done, 4);
+            // Make the command visible through the shared backing (both cores).
+            proccomm_.core0_issue(cmd);
+            printf("[ProcComm] Core 0 issued command 0x%x (visible in SMEM, awaiting modem)\n", cmd);
+
+            // Core 1 (modem) services the pending command. This is the only path
+            // that produces completion; it writes an honest status.
+            bool serviced = proccomm_.core1_service();
+            if (serviced) {
+                u32 st = proccomm_.status();
+                printf("[ProcComm] Core 1 serviced command 0x%x -> status=%s (0x%x)\n",
+                       cmd,
+                       st == zeebo::PCOM_CMD_SUCCESS ? "SUCCESS" : "FAIL_UNSUPPORTED",
+                       st);
             }
-            vtlb_.write_u32(SMEM_BASE + 0x04, status_success);
-            u32 cmd_done = 1;
-            vtlb_.write_u32(SMEM_BASE + 0x00, cmd_done);
+
+            // Mirror the shared-backing completion words into the Unicorn view so
+            // a guest polling APP_COMMAND/APP_STATUS observes the same bytes.
+            if (core0_.uc) {
+                u32 done = proccomm_.rd(zeebo::PCOM_OFF_APP_COMMAND);
+                u32 st   = proccomm_.rd(zeebo::PCOM_OFF_APP_STATUS);
+                uc_mem_write(core0_.uc, SMEM_BASE + 0x04, &st, 4);
+                uc_mem_write(core0_.uc, SMEM_BASE + 0x00, &done, 4);
+            }
+            vtlb_.write_u32(SMEM_BASE + 0x04, proccomm_.rd(zeebo::PCOM_OFF_APP_STATUS));
+            vtlb_.write_u32(SMEM_BASE + 0x00, proccomm_.rd(zeebo::PCOM_OFF_APP_COMMAND));
         }
         // MDDI write
         else if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) {
@@ -4241,6 +4304,18 @@ private:
     // só registra traduções para consulta; space_manager_ efetiva a troca.
     zeebo_l4::SpaceManager space_manager_;
     std::vector<uint8_t> smem_mem_;      // único backing físico, visível aos dois cores
+    // Bug 5/6: real device models bound to the shared/interpreter path.
+    zeebo::VicState  vic_c0_;            // VIC pending/enable latch (Core0 / ARM11)
+    zeebo::VicState  vic_c1_;            // VIC pending/enable latch (Core1 / ARM9)
+    zeebo::GptTimer  gpt_;               // GPT counter advanced from emulated progress
+    zeebo::ProcComm  proccomm_;          // inter-core ProcComm over shared SMEM
+    static constexpr unsigned GPT_VIC_LINE = 8; // INT_GP_TIMER (model)
+    uint64_t last_c0_insns_slice_ = 0;   // per-cycle insn delta baselines (GPT)
+    uint64_t last_c1_insns_slice_ = 0;
+    // Vector bases for IRQ delivery: Core0/ARM11 low vectors, Core1/ARM9 high
+    // vectors (CP15 c1 V=1, table at 0xffff0000 per the AMSS mapping).
+    uint32_t c0_vector_base_ = 0x00000000u;
+    uint32_t c1_vector_base_ = 0xffff0000u;
     std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
     CoreState core0_;
