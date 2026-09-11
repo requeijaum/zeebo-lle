@@ -790,6 +790,91 @@ int main(int argc, char** argv) {
             // ── DD3 Game Loop: disparar o callback do timer (0x120239dc) ──
             // O timer callback registrado pelo applet é uma função C que recebe pUser (applet) em r0:
             // void (*PFNNOTIFY)(void *pUser)
+            // ── DD4 Bloco 2: framebuffer real alimentado por DrawRect ──
+            // O call-site 0x12023a74 (bx ip) chama IDisplay::DrawRect. Capturamos
+            // os argumentos exatamente como o guest os montou e EXECUTAMOS a
+            // operacao num framebuffer do host.
+            //   void DrawRect(IDisplay*, const AEERect* pRect, RGBVAL clrFrame,
+            //                 RGBVAL clrFill, uint32 dwFlags)
+            //   r0=this  r1=pRect  r2=clrFrame  r3=clrFill  [sp]=dwFlags
+            //
+            // Valores medidos na 1a chamada (nao supostos):
+            //   this=0x00300500 (DISPLAY_OBJ)  pRect=NULL (tela toda)
+            //   clrFrame=0xffffffff  clrFill=0xffffff00  dwFlags=0x2
+            // 0xffffffff e RGB_NONE (AEERGBVAL.h) e 0x2 e IDF_RECT_FILL
+            // (AEEIDisplay.h) — exatamente a expansao do inline IDisplay_FillRect
+            // do SDK. Isso CORROBORA a identificacao do slot 0x14 de forma
+            // independente da conferencia de aridade.
+            const int FB_W = 640, FB_H = 480;
+            struct FrameBuffer {
+                int w = 0, h = 0;
+                std::vector<u32> px;     // XRGB do host, 1 word por pixel
+                int fills = 0;           // quantos DrawRect efetivamente pintaram
+            };
+            struct DrawRectCapture {
+                int calls = 0;
+                u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, flags = 0, sp = 0;
+                FrameBuffer* fb = nullptr;
+            } cap;
+            FrameBuffer fb;
+            fb.w = FB_W; fb.h = FB_H;
+            fb.px.assign(static_cast<size_t>(FB_W) * FB_H, 0u);
+            cap.fb = &fb;
+
+            CallSiteWatch watch;
+            watch.va   = 0x12023a74;
+            watch.user = &cap;
+            watch.fn   = [](uc_engine* u, void* p) {
+                auto* c = static_cast<DrawRectCapture*>(p);
+                u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, sp = 0, flags = 0;
+                uc_reg_read(u, UC_ARM_REG_R0, &r0);
+                uc_reg_read(u, UC_ARM_REG_R1, &r1);
+                uc_reg_read(u, UC_ARM_REG_R2, &r2);
+                uc_reg_read(u, UC_ARM_REG_R3, &r3);
+                uc_reg_read(u, UC_ARM_REG_SP, &sp);
+                uc_mem_read(u, sp, &flags, 4);
+                if (c->calls == 0) {   // guarda a 1a para o relatorio
+                    c->r0 = r0; c->r1 = r1; c->r2 = r2; c->r3 = r3;
+                    c->sp = sp; c->flags = flags;
+                }
+                ++c->calls;
+
+                auto* fbp = c->fb;
+                if (!fbp) return;
+
+                // Retangulo: pRect NULL = tela toda; senao AEERect{int16 x,y,dx,dy}.
+                int x = 0, y = 0, dx = fbp->w, dy = fbp->h;
+                if (r1 != 0) {
+                    int16_t v[4] = {0, 0, 0, 0};
+                    if (uc_mem_read(u, r1, v, sizeof(v)) != UC_ERR_OK) return;
+                    x = v[0]; y = v[1]; dx = v[2]; dy = v[3];
+                }
+                // Recorte ao framebuffer (o guest pode pedir fora da tela).
+                int x0 = x < 0 ? 0 : x;
+                int y0 = y < 0 ? 0 : y;
+                int x1 = x + dx; if (x1 > fbp->w) x1 = fbp->w;
+                int y1 = y + dy; if (y1 > fbp->h) y1 = fbp->h;
+                if (x0 >= x1 || y0 >= y1) return;
+
+                const u32 IDF_RECT_FILL = 0x2;
+                const u32 RGB_NONE      = 0xffffffffu;
+                if ((flags & IDF_RECT_FILL) && r3 != RGB_NONE) {
+                    // RGBVAL do BREW NAO e 0x00RRGGBB. AEERGBVAL.h:24 define
+                    //   MAKE_RGB(r,g,b) = (r<<8) | (g<<16) | (b<<24)
+                    // ou seja: o byte MENOS significativo e alfa, e os canais
+                    // ficam deslocados 8 bits para cima. Decodificar como
+                    // 0xRRGGBB troca os canais (o branco vira amarelo).
+                    const u32 cr = (r3 >> 8)  & 0xff;
+                    const u32 cg = (r3 >> 16) & 0xff;
+                    const u32 cb = (r3 >> 24) & 0xff;
+                    const u32 xrgb = (cr << 16) | (cg << 8) | cb;
+                    for (int yy = y0; yy < y1; ++yy)
+                        for (int xx = x0; xx < x1; ++xx)
+                            fbp->px[static_cast<size_t>(yy) * fbp->w + xx] = xrgb;
+                    ++fbp->fills;
+                }
+            };
+
             const u32 timer_cb_fn = 0x120239dc;
             FirstPcResult r_tick = run_first_pc(uc2, timer_cb_fn,
                                                 0x12000000,
@@ -798,7 +883,11 @@ int main(int argc, char** argv) {
                                                 10000,
                                                 false,
                                                 created_applet_ptr, // r0: pUser (applet)
-                                                0, 0, 0);
+                                                0, 0, 0,
+                                                &watch);
+            std::fprintf(stderr,
+                "[DD4/drawrect] chamadas=%d this=0x%08x pRect=0x%08x clrFrame=0x%08x clrFill=0x%08x dwFlags=0x%08x fills=%d\n",
+                cap.calls, cap.r0, cap.r1, cap.r2, cap.r3, cap.flags, fb.fills);
             std::fprintf(stderr, "[DD1-runtime/probe] TimerCallback(0x%08x): ran=%s entered=%s last_pc=0x%08x instr=%lu fault=%s @0x%08x\n",
                          timer_cb_fn,
                          r_tick.ran ? "SIM" : "nao",
@@ -818,6 +907,55 @@ int main(int argc, char** argv) {
             // sem falha de memoria. Antes parava em dependencias ausentes (150/174/199/237/344/460/1571).
             assert(r_tick.fault == FAULT_NONE);
             assert(r_tick.instructions == 1587);
+
+            // ── MARCO DD4 (parcial): o jogo PINTOU pixels ──
+            // Nao e clear sintetico do harness: a cor sai de clrFill montado pelo
+            // guest e a geometria sai do pRect que ele passou.
+            assert(cap.calls >= 1);          // DrawRect foi mesmo chamado
+            assert(fb.fills >= 1);           // e resultou em preenchimento real
+
+            // O frame nao pode continuar todo zero (o buffer nasce zerado).
+            size_t nonzero = 0;
+            for (u32 v : fb.px) if (v != 0) ++nonzero;
+            assert(nonzero > 0);
+            // pRect=NULL => tela toda: todos os pixels devem ter a cor do guest.
+            assert(nonzero == fb.px.size());
+
+            // A cor tem de ser a que o GUEST pediu, nao uma constante nossa.
+            // Comparamos ja no espaco XRGB do host, aplicando a MESMA decodificacao
+            // de RGBVAL (AEERGBVAL.h: r<<8 | g<<16 | b<<24).
+            const u32 exp_r = (cap.r3 >> 8)  & 0xff;
+            const u32 exp_g = (cap.r3 >> 16) & 0xff;
+            const u32 exp_b = (cap.r3 >> 24) & 0xff;
+            const u32 exp_xrgb = (exp_r << 16) | (exp_g << 8) | exp_b;
+            assert(fb.px[0] == exp_xrgb);
+            // E precisa ser uma cor de verdade, nao RGB_NONE nem preto.
+            assert(cap.r3 != 0xffffffffu && cap.r3 != 0u);
+            // O guest pediu RGB_WHITE = MAKE_RGB(0xff,0xff,0xff) = 0xffffff00.
+            // Decodificado, tem de dar branco — se der amarelo (0xffff00), a
+            // decodificacao de canais esta trocada.
+            assert(exp_xrgb == 0x00ffffffu);
+
+            std::fprintf(stderr,
+                "[DD4/frame] %dx%d  pixels_pintados=%zu/%zu  cor=0x%08x (do guest)  fills=%d\n",
+                fb.w, fb.h, nonzero, fb.px.size(), cap.r3, fb.fills);
+
+            // Entregavel visual: PPM binario (P6). Sem dependencia externa, e
+            // conversivel a PNG com qualquer ferramenta.
+            if (const char* outp = std::getenv("ZEEBO_DD4_FRAME")) {
+                if (FILE* f = std::fopen(outp, "wb")) {
+                    std::fprintf(f, "P6\n%d %d\n255\n", fb.w, fb.h);
+                    for (u32 v : fb.px) {
+                        unsigned char rgb[3] = {
+                            static_cast<unsigned char>((v >> 16) & 0xff),
+                            static_cast<unsigned char>((v >> 8) & 0xff),
+                            static_cast<unsigned char>(v & 0xff)};
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "[DD4/frame] gravado em %s\n", outp);
+                }
+            }
 
             uc_close(uc2);
         }

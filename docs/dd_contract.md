@@ -80,9 +80,17 @@ não faz.
 
 `scan_deps.py` dá offsets; não dá nomes. Os nomes usados até `09eaf3f` eram
 **suposição**, e estavam errados. `tools/py/vtbl_layout.py` expande as macros
-`INHERIT_*` do SDK e devolve a ordem real (26 slots; raiz `IQueryInterface` =
-`AddRef`, `Release`, `QueryInterface`, portanto o primeiro método próprio de
-`IDisplay` cai em `0x0c`, não em `0x08`).
+`INHERIT_*` do SDK e devolve a ordem real: 26 slots, com `INHERIT_IDisplay`
+herdando de **`IBase`** (`AddRef`, `Release` — dois métodos, sem
+`QueryInterface`), de modo que o primeiro método próprio de `IDisplay`
+(`GetFontMetrics`) cai em `0x08`.
+
+> **Correção.** O commit `6067a03` afirmou que a raiz era `IQueryInterface` com
+> três métodos e que o deslocamento de um slot explicava a rotulagem errada
+> anterior. Isso está **errado**: `AEEIDisplay.h:223` mostra `INHERIT_IBase`. A
+> ferramenta sempre produziu o layout certo — a narrativa é que estava errada.
+> O erro foi pego ao comparar com a tabela `DISPLAY` do zeebx, que lista os
+> mesmos nomes nos mesmos offsets partindo explicitamente de `IBase`.
 
 ### Correção de rotulagem
 
@@ -135,17 +143,83 @@ Três evidências independentes, todas verificáveis:
 Gate: `make test-vtbl-layout`. Controle negativo incluído — deslocar a numeração
 em um único slot faz a conferência de aridade reprovar.
 
-### Consequência para DD4
+### Consequência para DD4 — CONFIRMADA
 
 Os slots que DD3 stubou como no-op retornando 0 incluem `DrawRect` e `Update`
 (ambos confirmados por aridade) e, provavelmente, `SetColor` e `SetClipRect` —
 o caminho de desenho. O tick de DD3 **já estava pedindo para desenhar**; os
 pedidos caíam em stubs mudos.
 
-DD4 não precisa descobrir por onde a imagem sai. Precisa dar semântica real a
-`DrawRect`/`Update` e capturar o resultado num framebuffer, com o controle
-negativo óbvio: se o frame não mudar quando o jogo pede `DrawRect`, o stub não
-está desenhando nada.
+## DD4 (parcial): o primeiro frame
+
+`DrawRect` deixou de ser mudo. O harness observa o call-site `0x12023a74` um
+instante antes do `bx`, lê os argumentos como o guest os montou e executa a
+operação num framebuffer 640×480 do host.
+
+### Argumentos medidos na primeira chamada
+
+| arg | reg | valor | significado |
+|---|---|---|---|
+| `this` | r0 | `0x00300500` | `DISPLAY_OBJ` |
+| `pRect` | r1 | `0x00000000` | `NULL` = tela inteira |
+| `clrFrame` | r2 | `0xffffffff` | `RGB_NONE` |
+| `clrFill` | r3 | `0xffffff00` | **`RGB_WHITE`** |
+| `dwFlags` | `[sp]` | `0x00000002` | `IDF_RECT_FILL` |
+
+**Quarta evidência da identificação.** `RGB_NONE` + `IDF_RECT_FILL` + `pRect`
+é exatamente a expansão do inline `IDisplay_FillRect` do SDK
+(`AEEIDisplay.h:377`). Não foi procurado: o binário produziu esses valores
+sozinho, e eles casam com um macro do SDK que não participou da dedução por
+aridade. Confirmação independente de que `0x14` é `DrawRect`.
+
+### `RGBVAL` não é `0xRRGGBB`
+
+`AEERGBVAL.h:24` define `MAKE_RGB(r,g,b) = (r<<8) | (g<<16) | (b<<24)`: o byte
+**menos** significativo é alfa e os canais ficam deslocados 8 bits para cima.
+Portanto `0xffffff00` é `MAKE_RGB(0xff,0xff,0xff)` = `RGB_WHITE`.
+
+A primeira versão deste harness decodificou como `0x00RRGGBB` e gerou um frame
+**amarelo**. Erro encontrado ao comparar com `Rgb::from_rgbval` do zeebx, que
+faz o deslocamento correto. O jogo limpa a tela de **branco**, não de amarelo.
+
+Assertiva de regressão: `exp_xrgb == 0x00ffffff`. Mutante que volta à
+decodificação ingênua reprova com `Assertion fb.px[0] == exp_xrgb failed`.
+
+### Resultado
+
+307200/307200 pixels pintados, cor única `0xffffff` (branco), uma chamada por
+tick. Frame gravado em PPM binário via `ZEEBO_DD4_FRAME=<arquivo>`.
+
+### Lições do zeebx (leitura de contrato, sem cópia)
+
+O zeebx é GPL-2.0-only e o zeebo-lle não pode receber código dele. O que foi
+usado são decisões de arquitetura observáveis, reimplementadas:
+
+- **Framebuffer em RGB565 nativo**, não XRGB32. A tela do Zeebo é VGA 640×480
+  RGB565; guardar nesse formato torna `BitBlt` de bitmap nativo uma cópia
+  direta, sem conversão por pixel. Nosso harness ainda usa XRGB32 — aceitável
+  para um fill, mas a converter antes de haver blit de sprite.
+- **Contador de pixels tocados** (`touched`/`is_dirty`) em vez de comparar o
+  buffer inteiro para saber se houve desenho.
+- **`from_rgb565` replica os bits altos nos baixos** (`(r<<3)|(r>>2)`), senão
+  branco puro volta como 248 em vez de 255.
+- A tabela `DISPLAY` de 26 slots do zeebx bate com o layout extraído do SDK, o
+  que serviu de verificação cruzada independente.
+
+### Dois controles negativos (executados, não descritos)
+
+1. **Pintar constante do harness** em vez de `clrFill` → `Assertion fb.px[0] == cap.r3 failed`.
+   Garante que a cor vem do jogo, não de nós.
+2. **Desligar o observador** (`watch.va = 0`) → `Assertion cap.calls >= 1 failed`,
+   com `fills=0`. O guest roda idêntico, mas nada é pintado. Garante que os
+   pixels são consequência da execução do jogo, não de código nosso rodando ao lado.
+
+### O que este frame NÃO é
+
+Uma tela amarela sólida não é gameplay. É o `FillRect` de fundo do primeiro
+tick — legítimo e vindo do jogo, mas apenas o começo do frame. Sprites, tiles e
+texto dependem de `data.ggz` (ainda sem `IFileMgr`) e dos slots de blit, que
+não chegaram a ser chamados. Não tratar como "Double Dragon rodando".
 
 ## Uso
 

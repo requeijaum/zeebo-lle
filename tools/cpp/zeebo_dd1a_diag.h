@@ -204,6 +204,13 @@ struct HookState {
     u64  budget   = 0;
     int  fault    = FAULT_NONE;
     u32  fault_va = 0;
+    // Observador opcional de call-sites (Bloco 2 / DD4).
+    // Chamado ANTES de executar a instrução em `watch_va`, com o uc vivo, de
+    // modo que o observador leia os registradores de argumento exatamente como
+    // o guest os montou. NÃO altera estado do guest — só observa.
+    u32   watch_va = 0;                 // 0 = desativado
+    void (*on_watch)(uc_engine*, void*) = nullptr;
+    void* watch_user = nullptr;
 };
 
 inline void code_hook(uc_engine* uc, uint64_t address, uint32_t /*size*/, void* user) {
@@ -211,6 +218,10 @@ inline void code_hook(uc_engine* uc, uint64_t address, uint32_t /*size*/, void* 
     if (st->count == 0) st->first_pc = static_cast<u32>(address);
     st->last_pc = static_cast<u32>(address);
     if (address >= st->mod_begin && address < st->mod_end) st->entered = true;
+    if (st->on_watch && st->watch_va &&
+        static_cast<u32>(address) == st->watch_va) {
+        st->on_watch(uc, st->watch_user);
+    }
     ++st->count;
     if (st->count >= st->budget) {
         st->fault = FAULT_BUDGET;
@@ -241,11 +252,21 @@ inline bool mem_hook(uc_engine* uc, uc_mem_type type, uint64_t address,
 // `stack_top` deve estar mapeado. `budget` limita instruções. Se `force_success`
 // for true (SÓ para o controle de mutação), o resultado mente que entrou e não
 // falhou — os testes exigem que essa mutação torne o controle negativo VERMELHO.
+// Observador de call-site para DD4 (Bloco 2). Opcional e sem efeito colateral:
+// quando `va` != 0, `fn(uc, user)` é chamado imediatamente ANTES de a instrução
+// em `va` executar, com os registradores como o guest os montou.
+struct CallSiteWatch {
+    u32   va   = 0;
+    void (*fn)(uc_engine*, void*) = nullptr;
+    void* user = nullptr;
+};
+
 inline FirstPcResult run_first_pc(uc_engine* uc, u32 entry_va, u32 mod_begin,
                                   u32 mod_size, u32 stack_top, u64 budget,
                                   bool force_success = false,
                                   u32 init_r0 = 0, u32 init_r1 = 0,
-                                  u32 init_r2 = 0, u32 init_r3 = 0) {
+                                  u32 init_r2 = 0, u32 init_r3 = 0,
+                                  const CallSiteWatch* watch = nullptr) {
     FirstPcResult r;
     r.load_va  = mod_begin;
     r.entry_va = entry_va;
@@ -257,6 +278,11 @@ inline FirstPcResult run_first_pc(uc_engine* uc, u32 entry_va, u32 mod_begin,
     st.mod_end   = mod_begin + mod_size;
     st.sentinel  = sentinel;
     st.budget    = budget ? budget : 1;
+    if (watch) {
+        st.watch_va   = watch->va;
+        st.on_watch   = watch->fn;
+        st.watch_user = watch->user;
+    }
 
     uc_hook hc = 0, hm = 0;
     uc_hook_add(uc, &hc, UC_HOOK_CODE, (void*)detail::code_hook, &st, 1, 0);

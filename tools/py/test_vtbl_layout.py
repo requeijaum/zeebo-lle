@@ -16,7 +16,7 @@ CRITERIO (fixado antes de rodar)
 Se o SDK e o binario discordarem, o errado e a identificacao — nao o binario.
 
 CONTROLE NEGATIVO: test_vtbl_layout_mutant() desloca a numeracao em um slot
-(como se INHERIT_IQueryInterface tivesse 2 metodos em vez de 3) e exige que a
+(a raiz real e INHERIT_IBase, com 2 metodos: AddRef/Release) e exige que a
 conferencia REPROVE. Sem isso, o teste passaria com qualquer layout.
 
 SKIP 77 se o SDK ou o .mod proprietario nao estiverem presentes.
