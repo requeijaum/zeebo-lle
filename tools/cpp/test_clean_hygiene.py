@@ -16,6 +16,7 @@ No NAND required. Does not touch qdsp5/.
 """
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -109,12 +110,54 @@ def check_makefile(path, label):
     return missing
 
 
+def check_no_tracked_ignored():
+    """Gate: no file that git considers ignored may still be tracked in the index.
+
+    A tracked-yet-ignored file (e.g. a committed build binary or *.pyc) means the
+    index is polluted: a clean clone ships artifacts the .gitignore claims to
+    exclude, and `git status` stays silent about drift in them. We ask git itself
+    for the authoritative intersection so this never hard-codes a path list.
+
+    Negative-mutation property: `git add -f` any ignored file and re-run — this
+    gate turns RED (exit 1). Removing it from the index (`git rm --cached`) turns
+    it GREEN again.
+    """
+    repo_root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    if repo_root.returncode != 0:
+        print("[tracked-ignored] SKIP: not a git work tree")
+        return []
+    root = repo_root.stdout.strip()
+    # -c: ignored files that ARE tracked (in the index). Authoritative.
+    res = subprocess.run(
+        ["git", "ls-files", "-z", "-i", "-c", "--exclude-standard"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        print(f"[tracked-ignored] SKIP: git ls-files failed: {res.stderr.strip()}")
+        return []
+    tracked_ignored = [p for p in res.stdout.split("\0") if p]
+    if tracked_ignored:
+        for p in tracked_ignored:
+            print(f"[tracked-ignored] FAIL: ignored file is tracked in index: {p}")
+    else:
+        print("[tracked-ignored] OK: no ignored file is tracked in the index")
+    return tracked_ignored
+
+
 def main():
     fails = []
     fails += check_makefile(ROOT_MK, "root")
     fails += check_makefile(GPU_MK, "gpu")
+    tracked_ignored = check_no_tracked_ignored()
+    fails += tracked_ignored
     if fails:
-        print(f"\nclean-hygiene GATE RED: {len(fails)} uncovered binary(ies).")
+        print(
+            f"\nclean-hygiene GATE RED: {len(fails)} problem(s) "
+            f"({len(tracked_ignored)} tracked-ignored file(s))."
+        )
         return 1
     print("\nclean-hygiene GATE GREEN: workspace stays 100% pure post-clean.")
     return 0

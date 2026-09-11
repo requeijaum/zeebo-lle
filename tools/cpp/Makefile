@@ -488,8 +488,31 @@ test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
 test-clean-hygiene:
 	python3 test_clean_hygiene.py
 
-check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
-       test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
+# ---------------------------------------------------------------------------
+# QW99 Part 1 — truthful test tiers. The aggregate `check` mixes two classes of
+# gate: (A) clean-clone-safe gates that need NO proprietary NAND, and (B) gates
+# that require the user's working NAND (nand/*.bin, gitignored, absent in a
+# clean clone). Conflating them lets a clean clone either go falsely green (NAND
+# gates skipped-as-pass) or falsely red. The tiers make the contract explicit:
+#
+#   check-fast     — Tier A ONLY. No proprietary NAND touched. Safe on a clean
+#                    clone; this is the honest "does the build/logic hold" gate.
+#   check-firmware — Tier B ONLY. REQUIRES the working NAND. Fails LOUD (exit 1)
+#                    with an explicit message if any required nand/*.bin is
+#                    absent — never SKIP-as-PASS.
+#   check-full     — check-fast + check-firmware (everything, needs NAND).
+#   check          — kept as the historical full aggregate (== check-full) so
+#                    existing callers/CI stay compatible and truthful.
+#
+# NAND gates pulled out of the fast tier into FIRMWARE_TARGETS: test (device
+# model runtime reads nand/1.1.2.bin), test-zwheel-preview (zeebo_lle_main boot
+# loads NAND) plus test-rex test-zwheel test-efs2-fs test-efs2-zwheel
+# test-efs2-zwheel-loop test-debug-agent.
+NAND_REQUIRED_BINS := ../../nand/1.1.2_AMSS.bin ../../nand/1.1.2_APPS.bin ../../nand/1.1.2.bin
+FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent
+
+check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
+       test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm
 	./test_applet_dispatch
@@ -548,6 +571,31 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	./test_l4_mmu_txn
 	@echo "[check] zeebo_bootinfo_harness compilou (compile-only; NAO valida bytes reais)."
 	@echo "[check] Para validacao real-byte da NAND rode: make test-bootinfo-real"
+	@echo ""
+	@echo "[check-fast] PASS — Tier A (clean-clone-safe) gates green; NO proprietary NAND touched."
+
+# check-firmware — Tier B. REQUIRES the working NAND. Verifies every required
+# nand/*.bin is present FIRST and fails LOUD if any is absent (never SKIP-as-
+# PASS), then runs the firmware-dependent gates.
+check-firmware:
+	@missing=""; for f in $(NAND_REQUIRED_BINS); do \
+	    if [ ! -f "$$f" ]; then missing="$$missing $$f"; fi; \
+	 done; \
+	 if [ -n "$$missing" ]; then \
+	    echo "[check-firmware] FAIL: required proprietary NAND image(s) absent:$$missing"; \
+	    echo "[check-firmware] These gates validate real firmware bytes and cannot SKIP-as-PASS."; \
+	    exit 1; \
+	 fi; \
+	 echo "[check-firmware] NAND present — running $(words $(FIRMWARE_TARGETS)) firmware gate(s)."
+	$(MAKE) $(FIRMWARE_TARGETS)
+	@echo "[check-firmware] PASS — Tier B firmware-byte gates green (real NAND validated)."
+
+# check-full — everything: Tier A then Tier B. Needs the working NAND.
+check-full: check-fast check-firmware
+	@echo "[check-full] PASS — Tier A + Tier B all green."
+
+# check — historical full aggregate, kept == check-full for CI/caller compat.
+check: check-full
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
@@ -558,7 +606,7 @@ clean:
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm
+.PHONY: all check check-fast check-firmware check-full test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
