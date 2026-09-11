@@ -28,6 +28,14 @@ using u8  = uint8_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
+// Como o entry de AEEMod_Load foi resolvido (proveniência honesta).
+enum EntryKind : u32 {
+    ENTRY_NONE       = 0, // desconhecido / rejeitado
+    ENTRY_ELF        = 1, // ELF ARM: e_entry
+    ENTRY_RAW_BRANCH = 2, // MOD cru: 1ª palavra é `b/bl AEEMod_Load`
+    ENTRY_RAW_START  = 3, // MOD cru: AEEMod_Load começa direto no load_va
+};
+
 // ClassID BREW de um applet. 0 = "qualquer" (casa com o primeiro CreateInstance).
 struct AppletModule {
     std::string host_path;      // caminho do .mod no host
@@ -35,8 +43,16 @@ struct AppletModule {
     u32         size = 0;       // bytes injetados
     u32         clsid = 0;      // ClassID alvo (0 = wildcard)
     u32         entry_va = 0;   // VA de AEEMod_Load do módulo (relativo ao load_va, se ELF)
+    u32         entry_kind = ENTRY_NONE; // proveniência do entry_va
     bool        injected = false;
     bool        loaded = false; // AEEMod_Load já despachado com contexto
+    // Ambiente de prefixo elf2mod: duas palavras reservadas ABAIXO da base de
+    // carga (load_va-8, load_va-4). O runtime BREW/elf2mod as usa como scratch
+    // de relocação/ponteiros de módulo. Só ficam prontas se houver espaço (base
+    // >= 8) e o mapeamento guest cobrir a página anterior.
+    bool        prefix_ready = false;
+    u32         reserved_lo_va = 0; // load_va - 8
+    u32         reserved_hi_va = 0; // load_va - 4
 };
 
 // VAs dos símbolos BREW resolvidos no APPS.bin (AEECShell). Todos [infer] até
@@ -112,6 +128,115 @@ inline u32 avk_for_digit(int d) { return (d >= 0 && d <= 9) ? (u32)(0x30 + d) : 
 class BrewLoader {
 public:
     explicit BrewLoader(uc_engine* uc = nullptr) : uc_(uc) {}
+
+    // ── Decode seguro de branch ARM (Bug 3) ──────────────────────────────────
+    // Decodifica um branch ARM incondicional (B=0xEA, BL=0xEB, cond=AL) situado
+    // em `insn_va` e escreve o alvo em *out. Retorna false para não-branch,
+    // branch condicional (cond != 0xE) ou se o alvo estourar 32 bits. O offset
+    // de 24 bits é COM SINAL, deslocado <<2, somado a insn_va+8 (pipeline ARM).
+    static bool decode_arm_branch(u32 insn, u32 insn_va, u32* out) {
+        const u32 cond = insn >> 28;
+        const u32 op   = (insn >> 24) & 0xF;
+        if (cond != 0xE) return false;      // só AL (incondicional)
+        if (op != 0xA && op != 0xB) return false; // B ou BL
+        int32_t imm24 = (int32_t)(insn & 0x00FFFFFF);
+        if (imm24 & 0x00800000) imm24 |= (int32_t)0xFF000000; // sign-extend
+        // Alvo = insn_va + 8 + (imm24 << 2). Feito em 64 bits com sinal para não
+        // estourar; rejeita se cair fora do espaço de 32 bits.
+        const int64_t tgt = (int64_t)insn_va + 8 + ((int64_t)imm24 << 2);
+        if (tgt < 0 || tgt > (int64_t)std::numeric_limits<u32>::max()) return false;
+        if (out) *out = (u32)tgt;
+        return true;
+    }
+
+    // Resolve o VA de AEEMod_Load de um `.mod`. Suporta: ELF ARM (e_entry),
+    // MOD ARM cru com `b/bl AEEMod_Load` inicial, e MOD cru cujo AEEMod_Load é a
+    // própria 1ª palavra (prólogo). `*kind` (opcional) recebe a proveniência.
+    // Rejeita alvos fora do módulo ou dentro da região reservada de prefixo
+    // [load_va-8, load_va). Honesto: 0/ENTRY_NONE quando não há certeza.
+    static u32 resolve_mod_entry(const std::vector<u8>& d, u32 load_va,
+                                 u32* kind = nullptr) {
+        if (kind) *kind = ENTRY_NONE;
+        if (d.size() < 4) return 0;
+        const u64 module_end = static_cast<u64>(load_va) + d.size();
+
+        // ELF ARM (padrão super-ELF / SDK): usa e_entry.
+        if (d.size() >= 0x20 && d[0]==0x7f && d[1]=='E' && d[2]=='L' && d[3]=='F') {
+            const u32 e_entry = rd32(d, 24);
+            if (e_entry >= load_va && static_cast<u64>(e_entry) < module_end) {
+                if (kind) *kind = ENTRY_ELF;
+                return e_entry;
+            }
+            if (static_cast<u64>(e_entry) < d.size()) {
+                const u64 rel = static_cast<u64>(load_va) + e_entry;
+                if (rel < module_end && rel <= std::numeric_limits<u32>::max()) {
+                    if (kind) *kind = ENTRY_ELF;
+                    return static_cast<u32>(rel);
+                }
+            }
+            return 0;
+        }
+
+        // MOD ARM cru: 1ª palavra pode ser `b/bl AEEMod_Load`.
+        u32 tgt = 0;
+        const u32 w0 = rd32(d, 0);
+        if (decode_arm_branch(w0, load_va, &tgt)) {
+            // Alvo tem de cair DENTRO do módulo [load_va, module_end) e nunca na
+            // região reservada de prefixo abaixo da base.
+            if (tgt >= load_va && static_cast<u64>(tgt) < module_end) {
+                if (kind) *kind = ENTRY_RAW_BRANCH;
+                return tgt;
+            }
+            return 0; // branch fora de bounds / reservado -> honesto
+        }
+
+        // MOD cru sem branch inicial: AEEMod_Load é o próprio load_va (a 1ª
+        // função ligada com --entry=AEEMod_Load). Exige base plausível (>0x1000,
+        // convenção BREW PIC) para não confundir dado solto com código.
+        if (load_va > 0x1000) {
+            if (kind) *kind = ENTRY_RAW_START;
+            return load_va;
+        }
+        return 0;
+    }
+
+    // ── Ambiente de prefixo elf2mod (Bug 3) ──────────────────────────────────
+    // Reserva/zera as duas palavras abaixo da base de carga (load_va-8, -4) que
+    // o runtime BREW/elf2mod usa como scratch. Mapeia a página anterior se
+    // preciso. `lo`/`hi` são os valores iniciais (default 0). Retorna false —
+    // honesto, sem crash — se não há espaço (base < 8), uc não vinculado, ou o
+    // map/write falha. Idempotente.
+    bool prepare_elf2mod_prefix(u32 load_va, u32 lo = 0, u32 hi = 0) {
+        if (!uc_) { printf("[BREW] prefix: uc não vinculado\n"); return false; }
+        if (load_va < 8) { // sem espaço p/ 2 palavras abaixo da base
+            printf("[BREW] prefix: base 0x%08x baixa demais p/ prefixo\n", load_va);
+            return false;
+        }
+        const u32 lo_va = load_va - 8;
+        const u32 hi_va = load_va - 4;
+        // Mapeia toda página que cubra [lo_va, load_va) (pode ser a mesma da base).
+        const u64 pbegin = static_cast<u64>(lo_va) & ~0xfffULL;
+        const u64 pend   = (static_cast<u64>(load_va) + 0xfffULL) & ~0xfffULL;
+        for (u64 page = pbegin; page < pend; page += 0x1000) {
+            const uc_err me = uc_mem_map(uc_, page, 0x1000, UC_PROT_ALL);
+            if (me != UC_ERR_OK && me != UC_ERR_MAP) {
+                printf("[BREW] prefix: uc_mem_map @0x%08llx falhou: %s\n",
+                       (unsigned long long)page, uc_strerror(me));
+                return false;
+            }
+        }
+        if (uc_mem_write(uc_, lo_va, &lo, 4) != UC_ERR_OK ||
+            uc_mem_write(uc_, hi_va, &hi, 4) != UC_ERR_OK) {
+            printf("[BREW] prefix: uc_mem_write falhou\n");
+            return false;
+        }
+        if (mod_.injected && mod_.load_va == load_va) {
+            mod_.prefix_ready = true;
+            mod_.reserved_lo_va = lo_va;
+            mod_.reserved_hi_va = hi_va;
+        }
+        return true;
+    }
 
     void bind_uc(uc_engine* uc) { uc_ = uc; }
     // VTLB LUT opcional (aliasing físico host-backed). Quando o alvo da injeção
@@ -203,7 +328,10 @@ public:
         mod_.size = sz;
         mod_.clsid = clsid;
         mod_.injected = true;
-        mod_.entry_va = resolve_mod_entry(d, load_va);
+        mod_.entry_va = resolve_mod_entry(d, load_va, &mod_.entry_kind);
+        // Ambiente de prefixo elf2mod: reserva as palavras em load_va-8/-4 (best
+        // effort — honesto: só marca prefix_ready se o mapeamento couber).
+        prepare_elf2mod_prefix(load_va);
         printf("[BREW] payload '%s' injetado em 0x%08x (%u bytes)%s\n", origin.c_str(), load_va, sz,
                mod_.entry_va ? "" : " [entry AEEMod_Load não resolvido do header]");
         if (mod_.entry_va) printf("[BREW] AEEMod_Load do módulo @ 0x%08x [infer ELF e_entry]\n", mod_.entry_va);
@@ -275,20 +403,8 @@ private:
     }
 
     // Se o `.mod` for um ELF ARM (padrão BREW SDK), o e_entry aponta ao stub que
-    // exporta AEEMod_Load. Caso contrário devolve 0 (honesto: desconhecido).
-    static u32 resolve_mod_entry(const std::vector<u8>& d, u32 load_va) {
-        if (d.size() < 0x20) return 0;
-        if (!(d[0]==0x7f && d[1]=='E' && d[2]=='L' && d[3]=='F')) return 0; // não-ELF: MOD cru
-        const u32 e_entry = rd32(d, 24);
-        const u64 module_end = static_cast<u64>(load_va) + d.size();
-        if (e_entry >= load_va && static_cast<u64>(e_entry) < module_end) return e_entry;
-        if (static_cast<u64>(e_entry) < d.size()) {
-            const u64 relative = static_cast<u64>(load_va) + e_entry;
-            if (relative < module_end && relative <= std::numeric_limits<u32>::max())
-                return static_cast<u32>(relative);
-        }
-        return 0;
-    }
+    // exporta AEEMod_Load. A resolução completa (ELF + MOD ARM cru + prefixo) é
+    // pública em resolve_mod_entry (acima), reutilizada aqui e nos testes.
 
     u32 reg(int r) const { u32 v = 0; if (uc_) uc_reg_read(uc_, r, &v); return v; }
     void set_reg(int r, u32 v) { if (uc_) uc_reg_write(uc_, r, &v); }
