@@ -290,9 +290,28 @@ int main(int argc, char** argv) {
             const u32 STATIC_BASE = SCRATCH + 0x1000;
             uc_mem_write(uc2, LB - 4, &STATIC_BASE, 4);
 
+            // Mock do helper MALLOC (offset 0x68 em AEEHelperFuncs):
+            // 0x12002190: add r0, r5, #0x10 -> r0 é o tamanho a alocar
+            // 0x12002194: bx r1 -> salta para malloc(r0)
+            // Função stub ARM em SCRATCH + 0x2000:
+            //   ldr r0, [pc, #4]  (retorna buffer pré-alocado)
+            //   bx lr
+            //   .word ALLOC_BUF
+            const u32 MALLOC_STUB = SCRATCH + 0x2000;
+            const u32 ALLOC_BUF = SCRATCH + 0x3000;
+            u32 stub_code[3] = {
+                0xe59f0004, // ldr r0, [pc, #4]
+                0xe12fff1e, // bx lr
+                ALLOC_BUF
+            };
+            uc_mem_write(uc2, MALLOC_STUB, stub_code, sizeof(stub_code));
+            uc_mem_write(uc2, STATIC_BASE + 0x68, &MALLOC_STUB, 4);
+
             // Invocação com r0=pIShell, r1=pIModule(0), r2=ppObj
+            // (ABI do entry de ddragonz.mod @0x12000014: mov r3, r2; mov r2, r1; mov r1, r0; mov r0, #0x14; bl 0x1200212c)
+            // Para que 0x1200212c receba r3 != 0, o chamador precisa passar ppObj em r2 (que vira r3) E r1 != 0 (que vira r2)!
             FirstPcResult r2 = run_first_pc(uc2, m.entry_va, LB, m.size, STK, 200000, false,
-                                            SCRATCH, 0, ppObj, 0);
+                                            SCRATCH, 1, ppObj, 0);
             std::fflush(stdout);
             std::fprintf(stderr, "[DD1-runtime/probe] com args pIShell/ppObj: ran=%s entered=%s "
                          "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x\n",
@@ -300,14 +319,14 @@ int main(int argc, char** argv) {
                          r2.first_pc, r2.last_pc, (unsigned long long)r2.instructions,
                          fault_label(r2.fault), r2.fault_va);
 
-            // Prova observável: avança além das 23 instruções iniciais e além das 35 instruções
-            // (com static_base em LB-4, alcança 37 instruções e executa bx r1 em 0x12002194,
-            // onde r1 é carregado de [STATIC_BASE + 0x68], que representa MALLOC em AEEHelperFuncs).
+            // Prova observável: com static_base em LB-4 e MALLOC mockado, o AEEMod_Load
+            // inicializa com sucesso a estrutura do módulo (IModule + vtable), grava o ponteiro
+            // de saída em *ppObj, e retorna limpo (0x12000030: bx lr com r0 = 0)!
+            // Total de instruções executadas no módulo: 46 (completa AEEMod_Load com sucesso).
             assert(r2.ran && r2.entered_module);
-            assert(r2.instructions == 37);
-            assert(r2.last_pc == 0x12002194);
-            assert(r2.fault == FAULT_FETCH_UNMAPPED);
-            assert(r2.fault_va == 0x00000000);
+            assert(r2.instructions == 46);
+            assert(r2.last_pc == 0x12000030);
+            assert(r2.fault == FAULT_NONE);
 
             uc_close(uc2);
         }
