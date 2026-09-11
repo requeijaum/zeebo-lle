@@ -610,6 +610,173 @@ int main(int argc, char** argv) {
             // Atualiza o stub MALLOC para devolver ALLOC_BUF3 para alocações do loop
             uc_mem_write(uc2, MALLOC_STUB + 8, &ALLOC_BUF3, 4);
 
+            // Em 0x12004944:
+            //   0x12004940: mov r6, r0 (r6 = applet)
+            //   0x12004944: add r0, r0, #64, #30  (#64 ror 30 = 64 * 4 = 256 = 0x100? Não: 64 >> 30 ou rotacionado:
+            // No ARM, #64, #30 significa (64 >> 30) | (64 << 2) = 256 = 0x100!
+            // Então r0 = r6 + 0x100.
+            // Em 0x12004948: ldrh r1, [r0, #0x14] -> lê [applet + 0x100 + 0x14] = [applet + 0x114]!
+            // Em 0x12004954: ldrh r0, [r0, #0x16] -> lê [applet + 0x100 + 0x16] = [applet + 0x116]!
+            // E em 0x12004970: add r0, r6, #80, #30 (#80 ror 30 = 80 * 4 = 320 = 0x140).
+            //   mov r4, r0 -> r4 = applet + 0x140!
+            // E chama bl #0x12023a18 com r0 = r4 = applet + 0x140!
+            // Então em 0x12023a24:
+            //   ldr r1, [r0, #0xc] lê [applet + 0x140 + 0xc] = [applet + 0x14c]!
+            //   ldrh r2, [r1, #0x14] lê [r1 + 0x14]!
+            // Como [applet + 0x14c] estava 0, r1 virava 0 e [r1 + 0x14] dava fault @0x00000014!
+            // Configurando [applet + 0x14c] para apontar para ENGINE_VIEWPORT_INFO:
+            const u32 ENGINE_VIEWPORT_INFO = SCRATCH + 0x800;
+            uint16_t vp_dims[2] = {640, 480}; // width=640, height=480
+            uc_mem_write(uc2, ENGINE_VIEWPORT_INFO + 0x14, &vp_dims[0], 2);
+            uc_mem_write(uc2, ENGINE_VIEWPORT_INFO + 0x16, &vp_dims[1], 2);
+
+            // Escrever ponteiro no offset exato [applet + 0x14c]:
+            uc_mem_write(uc2, created_applet_ptr + 0x14c, &ENGINE_VIEWPORT_INFO, 4);
+            // Também configurar [applet + 0x140] (w[0] do sub-objeto) para apontar para DISPLAY_OBJ:
+            uc_mem_write(uc2, created_applet_ptr + 0x140, &DISPLAY_OBJ, 4);
+
+            // Em 0x12023a18 (chamado a partir de 0x12004978):
+            // r0 na entrada de 0x12023a18 é r4 = applet + 0x140.
+            // 0x12023a38: ldr r0, [r0]          (lê [applet + 0x140] = DISPLAY_OBJ)
+            // 0x12023a3c: ldr r1, [r0]          (lê [DISPLAY_OBJ] = DISP_VTBL)
+            // 0x12023a40: ldr r2, [r1, #0x48]   (lê DISP_VTBL[18] = GETDEST_STUB)
+            // 0x12023a44: mov r1, #0
+            // 0x12023a48: bx r2
+            // MAS 0x12023a4c NÃO É O RETORNO de 0x12023a48!
+            // Em ARM, 'bx r2' sem 'mov lr, pc' é um tail-call / salto terminal!
+            // Então 0x12023a48: bx r2 retorna diretamente para o chamador de 0x12023a18 (que é 0x1200497c)!
+            // E 0x12023a4c é o INÍCIO DE OUTRA FUNÇÃO!
+            // Vamos inspecionar 0x12004978 e ver para onde o fluxo vai.
+            const u32 GETDEST_STUB = SCRATCH + 0x2700;
+            u32 getdest_code[2] = {
+                0xe3a00000, // mov r0, #0 (ou ponteiro)
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, GETDEST_STUB, getdest_code, sizeof(getdest_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x48, &GETDEST_STUB, 4);
+
+            // Observado (instr=174, last_pc=0x12023a74, ip=0x00000000, r0=0x00300500):
+            //   0x12023a5c: ldr r2, [r0]        (r0 = DISPLAY_OBJ  =>  r2 = DISP_VTBL)
+            //   0x12023a64: ldr ip, [r2, #0x14] (DISP_VTBL[5], ainda nao instalado => ip = 0)
+            //   0x12023a68: mvn r2, #0          (arg = -1, cor/clip "tudo")
+            //   0x12023a70: mov lr, pc ; 0x12023a74: bx ip
+            // Portanto a proxima dependencia do tick e o slot 5 da vtable de IDisplay.
+            // Stub minimo: retorna 0 (AEE_SUCCESS) e volta por lr.
+            const u32 DISP_SLOT5_STUB = SCRATCH + 0x2900;
+            u32 disp_slot5_code[2] = {
+                0xe3a00000, // mov r0, #0
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, DISP_SLOT5_STUB, disp_slot5_code, sizeof(disp_slot5_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x14, &DISP_SLOT5_STUB, 4);
+
+            // Observado (instr=199, last_pc=0x120244c8):
+            //   0x120244b4: ldr r0, [r0]      (r0 = DISPLAY_OBJ)
+            //   0x120244b8: ldr r2, [r0]      (r2 = DISP_VTBL)
+            //   0x120244bc: ldr r3, [r2, #0x28] (DISP_VTBL[10], nao instalado => r3 = 0)
+            //   0x120244c4: mov r1, #1 ; 0x120244c8: bx r3
+            // Proxima dependencia: slot 10 da vtable de IDisplay (tail-call, volta por lr do caller).
+            const u32 DISP_SLOT10_STUB = SCRATCH + 0x2980;
+            u32 disp_slot10_code[2] = {
+                0xe3a00000, // mov r0, #0
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, DISP_SLOT10_STUB, disp_slot10_code, sizeof(disp_slot10_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x28, &DISP_SLOT10_STUB, 4);
+
+            // Observado (instr=237, last_pc=0x12023b08, r0=0x1204df18 = ponteiro para .rodata do mod):
+            //   0x12023af8: ldr r0, [r6, #-4]   (static base)
+            //   0x12023b00: ldr r1, [r0, #0x14] (slot 0x14 de AEEHelperFuncs, nao instalado => 0)
+            //   0x12023b04: mov r0, r4          (r4 = string do modulo)
+            //   0x12023b08: bx r1
+            //   0x12023b0c: add r1, r0, #1      (len + 1)  => slot 0x14 == STRLEN
+            // Stub real (nao constante): percorre a string ate NUL e devolve o comprimento.
+            const u32 STRLEN_STUB = SCRATCH + 0x2a00;
+            u32 strlen_code[7] = {
+                0xe1a01000, // mov  r1, r0
+                0xe5d12000, // ldrb r2, [r1]
+                0xe3520000, // cmp  r2, #0
+                0x12811001, // addne r1, r1, #1
+                0x1afffffb, // bne  volta para o ldrb (pc+8-12)
+                0xe0410000, // sub  r0, r1, r0
+                0xe12fff1e  // bx   lr
+            };
+            uc_mem_write(uc2, STRLEN_STUB, strlen_code, sizeof(strlen_code));
+            uc_mem_write(uc2, STATIC_BASE + 0x14, &STRLEN_STUB, 4);
+
+            // Observado (instr=344, last_pc=0x12023b28):
+            //   0x12023b0c: add r1, r0, #1     (len + 1, resultado do STRLEN)
+            //   0x12023b18: ldr ip, [r0, #0xe4] (slot 0xe4 de AEEHelperFuncs, nao instalado => 0)
+            //   0x12023b1c: mov r0, r4          (src = string ASCII)
+            //   0x12023b20: add r2, sp, #0x10   (dst = buffer na pilha)
+            //   0x12023b24: mov lr, pc ; bx ip  => assinatura (src, nChars, dst, nSize=0x200)
+            // Perfil compativel com STRTOWSTR (ASCII -> UTF-16) do BREW.
+            // Stub real: copia byte a byte para halfwords ate o NUL, devolve dst.
+            const u32 STRTOWSTR_STUB = SCRATCH + 0x2a80;
+            u32 strtowstr_code[9] = {
+                0xe1a0c002, // mov   ip, r2        (dst corrente)
+                0xe4d03001, // ldrb  r3, [r0], #1  (le byte e avanca src)
+                0xe0cc30b2, // strh  r3, [ip], #2  (grava halfword e avanca dst)
+                0xe3530000, // cmp   r3, #0
+                0x1afffffb, // bne   volta ao ldrb
+                0xe1a00002, // mov   r0, r2        (retorna dst)
+                0xe12fff1e  // bx    lr
+            };
+            uc_mem_write(uc2, STRTOWSTR_STUB, strtowstr_code, 7 * 4);
+            uc_mem_write(uc2, STATIC_BASE + 0xe4, &STRTOWSTR_STUB, 4);
+
+            // Observado (instr=460, last_pc=0x00302204 = DISP_GETINFO_STUB+4, fault write @0x00008004):
+            // No tick o slot 4 de IDisplay e reinvocado com r1 = 0x00008000, que NAO e um
+            // ponteiro de saida valido no nosso harness (o construtor passava um buffer de pilha).
+            // Ou seja: o slot 4 aqui tem outra semantica (parametro escalar, nao out-param).
+            // Para nao falsificar dados, o stub passa a escrever apenas quando r1 aponta para
+            // a regiao SCRATCH mapeada; caso contrario apenas retorna 0.
+            u32 disp_getinfo_code2[10] = {
+                0xe59f3018, // ldr  r3, [pc, #24]  -> 0x00300000 (SCRATCH)
+                0xe1510003, // cmp  r1, r3
+                0x3a000003, // bcc  pula escrita
+                0xe59f3014, // ldr  r3, [pc, #20]  -> 0x00400000 (fim da janela)
+                0xe1510003, // cmp  r1, r3
+                0x25812004, // strcs? (nao) -> usa cc: escreve se r1 < 0x400000
+                0xe3a00000, // mov  r0, #0
+                0xe12fff1e, // bx   lr
+                0x00300000,
+                0x00400000
+            };
+            // corrige a instrucao condicional de escrita: strcc r2, [r1, #4]
+            disp_getinfo_code2[5] = 0x35812004; // strcc r2, [r1, #4]
+            // r2 precisa conter o valor de dimensoes antes da escrita
+            u32 disp_getinfo_code3[12] = {
+                0xe59f2024, // ldr  r2, [pc, #36] -> 0x01e00280
+                0xe59f3024, // ldr  r3, [pc, #36] -> 0x00300000
+                0xe1510003, // cmp  r1, r3
+                0x3a000004, // bcc  fim
+                0xe59f301c, // ldr  r3, [pc, #28] -> 0x00400000
+                0xe1510003, // cmp  r1, r3
+                0x35812004, // strcc r2, [r1, #4]
+                0xe3a00000, // mov  r0, #0
+                0xe12fff1e, // bx   lr
+                0x01e00280,
+                0x00300000,
+                0x00400000
+            };
+            (void)disp_getinfo_code2;
+            uc_mem_write(uc2, DISP_GETINFO_STUB, disp_getinfo_code3, sizeof(disp_getinfo_code3));
+
+            // Observado (instr=1571, last_pc=0x12024538, r0=DISPLAY_OBJ, ip=DISPLAY_OBJ):
+            //   0x12024528: ldr r0, [r0]        (r0 = DISPLAY_OBJ)
+            //   0x1202452c: ldr r1, [r0]        (r1 = DISP_VTBL)
+            //   0x12024530: ldr r2, [r1, #0x1c] (DISP_VTBL[7], nao instalado => r2 = 0)
+            //   0x12024534: mov r1, #1 ; 0x12024538: bx r2   (tail-call)
+            // Proxima dependencia: slot 7 da vtable de IDisplay.
+            const u32 DISP_SLOT7_STUB = SCRATCH + 0x2b00;
+            u32 disp_slot7_code[2] = {
+                0xe3a00000, // mov r0, #0
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, DISP_SLOT7_STUB, disp_slot7_code, sizeof(disp_slot7_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x1c, &DISP_SLOT7_STUB, 4);
+
             // ── DD3 Game Loop: disparar o callback do timer (0x120239dc) ──
             // O timer callback registrado pelo applet é uma função C que recebe pUser (applet) em r0:
             // void (*PFNNOTIFY)(void *pUser)
@@ -630,11 +797,17 @@ int main(int argc, char** argv) {
                          (unsigned long)r_tick.instructions,
                          fault_label(r_tick.fault),
                          r_tick.fault_va);
+            u32 r_tick_r0 = 0, r_tick_r2 = 0, r_tick_ip = 0;
+            uc_reg_read(uc2, UC_ARM_REG_R0, &r_tick_r0);
+            uc_reg_read(uc2, UC_ARM_REG_R2, &r_tick_r2);
+            uc_reg_read(uc2, UC_ARM_REG_IP, &r_tick_ip);
+            std::fprintf(stderr, "[DD1-runtime/probe] regs at fault: r0=0x%08x r2=0x%08x ip=0x%08x\n",
+                         r_tick_r0, r_tick_r2, r_tick_ip);
             assert(r_tick.ran && r_tick.entered_module);
-            assert(r_tick.instructions == 150);
-            assert(r_tick.last_pc == 0x12023a28);
-            assert(r_tick.fault == FAULT_READ_UNMAPPED);
-            assert(r_tick.fault_va == 0x00000014);
+            // MARCO DD3: o tick do game loop executa do inicio ao fim e RETORNA ao sentinela,
+            // sem falha de memoria. Antes parava em dependencias ausentes (150/174/199/237/344/460/1571).
+            assert(r_tick.fault == FAULT_NONE);
+            assert(r_tick.instructions == 1587);
 
             uc_close(uc2);
         }

@@ -2466,11 +2466,24 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
 - [ ] **DD2 — VFS:** primeiro identificar o limite guest `IFileMgr/OEMFS`; então oferecer
   `open/read/seek/stat/close`, caminhos e overlay de saves. Provar leitura byte-exata de
   `data.ggz`/`sound.ggz`; retirar asset deve causar falha identificável.
-- [ ] **DD3 — loop:** implementar entrega BREW `ISHELL_SetTimer`/callbacks/eventos,
+- [x] **DD3 — loop:** implementar entrega BREW `ISHELL_SetTimer`/callbacks/eventos,
   distinta do GPT/L4; o game loop avança sem retorno forçado. Em `test_dd1a_diag`, comprovado
-  o registro de `ISHELL_SetTimer` em `EVT_APP_START` (33ms, callback em `0x120239dc`), e a execução
-  do primeiro frame/tick do game-loop até 150 instruções reais, executando `aee_GetUpTimeMS`,
-  `memset` e alcançando a primeira dependência de viewport em `0x12023a28`.
+  o registro de `ISHELL_SetTimer` em `EVT_APP_START` (33ms, callback em `0x120239dc`) e a
+  **execução completa do primeiro tick do game-loop: 1587 instruções reais, `FAULT_NONE`,
+  retorno limpo ao sentinela** (assert estrito `r_tick.fault == FAULT_NONE` +
+  `r_tick.instructions == 1587`; controle negativo verificado — remover qualquer stub da
+  cadeia reproduz RED).
+  Fronteiras vencidas em sequência: 150 (`0x12023a28`, viewport) → 174 (`IDisplay` slot 5,
+  `0x12023a74`) → 199 (`IDisplay` slot 10, `0x120244c8`) → 237 (`strlen`, static-base `0x14`)
+  → 344 (`strtowstr`, static-base `0xe4`) → 460 (`GetInfo` reinvocado com `r1` escalar —
+  stub passou a escrever **apenas** quando `r1` cai na janela SCRATCH mapeada, em vez de
+  falsificar um out-param) → 1571 (`IDisplay` slot 7, `0x12024538`) → **1587, sem falha**.
+  Dependências modeladas do tick: `IDisplay` slots 4/5/7/10/18, helpers de static-base
+  `0x04` (memset), `0x14` (strlen), `0x68` (malloc), `0xb0` (GetUpTimeMS), `0xe4` (strtowstr),
+  e a geometria interna do applet (`+0x100` tela, `+0x140` viewport da engine, `+0x14c`
+  ponteiro de `ViewportInfo`).
+  NOTA DE HONESTIDADE: isto prova **fluxo de controle completo do tick**, não imagem.
+  Os stubs de display não escrevem pixels; DD4 continua aberto e é o próximo gargalo real.
 - [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear azul,
   padrão sintético, soma de pixels ou harness Z-Wheel não contam.
 - [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
