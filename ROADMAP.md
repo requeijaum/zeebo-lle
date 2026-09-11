@@ -2313,3 +2313,108 @@ contra mediana anterior de **157.410.000** (**+19,0%**), interpretador puro, exi
 O próximo hotspot medido é a releitura de opcode por instrução no slide-detector do
 Core1; deve ser tornado opt-in ou migrado para hook de bloco sem perder o controle
 positivo do detector.
+
+### QW99 — Plano crítico em quatro partes **[AUTORITATIVO; substitui o estado de QW97-QW98]**
+
+Revisão do HEAD `3e3e563`, com `make check` verde. O objetivo permanece **Double
+Dragon com imagem, input e som produzidos pelo guest**. Este plano separa modelo
+unitário, integração guest-visible, efeito observado no boot e marco comercial; um
+nível não pode ser promovido ao seguinte por contador, log, payload injetado, frame
+host ou áudio sintético.
+
+#### Parte 1 — Base confiável e arquitetura testável (P0)
+
+Objetivo: impedir gates verdes sobre artefatos antigos e reduzir conflitos no
+orquestrador antes de ampliar a emulação.
+
+- [ ] Remover do índice os binários ignorados `tools/cpp/{zeebo_boot,zeebo_elf,
+  zeebo_harness,zeebo_kernel_boot,zeebo_partition}` e os três
+  `tools/__pycache__/*.pyc`; estender `test_clean_hygiene.py` para reprovar qualquer
+  saída de `git ls-files -ci --exclude-standard`.
+- [ ] Separar `check-fast`, `check-firmware` e `check-full`; o gate de firmware deve
+  **falhar**, não virar verde, quando a NAND necessária estiver ausente. Exibir totais
+  PASS/FAIL/SKIP.
+- [ ] Derivar build/check/clean de listas únicas de testes para eliminar os conflitos
+  recorrentes no `Makefile`.
+- [ ] Inventariar e encerrar worktrees/branches `agent/qw*` já integrados; nenhum
+  resultado durável deve existir apenas em `/tmp`.
+- [ ] Extrair gradualmente de `ZeeboLLESystem`: `L4KernelShim/CoreScheduler`,
+  `PeripheralBus` e `IntercoreFabric`. `zeebo_lle_main.cpp` fica como composição e
+  CLI; lógica nova não deve nascer dentro dos hooks se puder ser testada fora deles.
+- [ ] Tornar fila de invalidação e demais estados estáticos propriedade do core/engine,
+  evitando estado cruzado entre instâncias.
+
+Gate P0: clone limpo recompila tudo; nenhum arquivo ignorado está rastreado; testes
+não reimplementam uma lambda privada para fingir cobertura da produção; worktree
+principal contém somente mudanças deliberadas.
+
+#### Parte 2 — Periféricos e comunicação realmente alcançáveis pelo guest (P1)
+
+Estado dos dez bugs: 1, 2, 3, 4, 7, 8, 9 e 10 estão integrados com controles
+negativos. **5 e 6 foram reabertos pela auditoria**, pois seus modelos passam em
+isolamento, mas ainda não satisfazem o caminho real do firmware.
+
+- [ ] Bug 5: ligar leituras/escritas MMIO do guest aos modelos VIC/GPT. Escritas em
+  ENABLE/MATCH/INTENABLE/ACK/EOI devem alterar o modelo; RAM plana não conta.
+- [ ] Modelar `pending`, `enabled` e `in_service`; não redeliver a mesma IRQ antes do
+  EOI nem sobrescrever `LR_irq/SPSR_irq`.
+- [ ] Substituir `ticks = instruções Core0 + instruções Core1` por tempo virtual
+  determinístico independente dos dois cores, calibrado contra polling observado.
+- [ ] Bug 6: resolver a colisão `PCOM_CMD_RESET_MODEM == PCOM_CMD_DONE == 1` usando
+  estado shadow real (`pending_cmd/has_pending`) ou estado equivalente. O Core1 deve
+  ser o único produtor da conclusão.
+- [ ] Criar testes de integração pelo caminho de produção: escrita guest MMIO → GPT →
+  VIC → exceção → ACK/EOI; e Core0 escreve RESET_MODEM → SMEM → Core1 atende → Core0
+  observa DONE/status.
+
+Gate P1: além do teste unitário e do mutante vermelho, o firmware executa os acessos
+MMIO/SMEM reais e a variável defeituosa muda. Modelo não conectado = item aberto.
+
+#### Parte 3 — Fechar o boot orgânico e o scatterload (P2)
+
+Os fixes reais de SID/contexto (`cd7da2f`) não destravaram o boot longo: o Core0
+continua em `0xb0400064..0xb040006c`. Portanto, “um único address space” era defeito
+real, mas não explicação suficiente para o estado atual.
+
+- [ ] Instrumentar em cada entrada de `0xb0400000`: TID, SID ativo, SP/LR, backing
+  físico e hash dos 252 bytes em `0xb04151a4`, antes e depois da ativação do SID.
+- [ ] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
+  registradas antes de a task receber SID; não aceitar somente LUT paralela ou teste
+  sintético.
+- [ ] Aplicar janelas e histogramas não filtrados de `STATS_TECHNIQUES.md`; progresso
+  exige efeito externo novo, não instruções/slices maiores.
+- [ ] Levar o fluxo sem restauração host, salto forçado ou dispatch fixo até
+  AEECShell/AppMgr e registrar a cadeia IPC/naming/quartz/AMSS que realizou a
+  transição.
+- [ ] Manter Dynarmic fora deste gate; primeiro fechar o comportamento no intérprete.
+
+Gate P2: AppMgr/AEECShell alcançado organicamente em execuções repetíveis, com
+controle negativo e sem patches barrados. O marco é mudança de fronteira observável,
+não ausência de crash.
+
+#### Parte 4 — Vertical slice do Double Dragon (P3)
+
+Executar em ordem; GPU e áudio isolados não recebem prioridade antes de um produtor
+guest real.
+
+- [ ] **DD1 — primeiro PC:** localizar/validar pacote, carregar `ddragonz.mod`, executar
+  seu `AEEMod_Load`/entry real e registrar PC pertencente ao módulo.
+- [ ] **DD2 — VFS:** oferecer ao guest `open/read/seek/stat`, caminhos e overlay de
+  saves; provar leitura byte-exata de `data.ggz` e `sound.ggz`. Injeção host não conta.
+- [ ] **DD3 — loop:** timers, callbacks e eventos fazem o game loop avançar sem
+  retorno forçado.
+- [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear
+  azul, padrão sintético, soma de pixels ou harness Z-Wheel não contam.
+- [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
+- [ ] **DD6 — áudio e jogabilidade:** primeiro PCM originado pelo guest e sessão de
+  cinco minutos com imagem, input e som. ACK QDSP5, dispositivo SDL aberto ou tom
+  sintético não contam.
+
+Gate final: evidência encadeada `guest → modelo → efeito no boot/jogo`, com origem do
+frame e do PCM identificada. Não priorizar outros jogos, expansão do rasterizador,
+Dynarmic ou QDSP5 especulativo antes de DD1-DD3.
+
+**Ordem obrigatória:** Parte 1 pode avançar em paralelo apenas com a correção curta da
+Parte 2; depois Parte 3; finalmente Parte 4. Refatoração estrutural é suporte ao
+caminho crítico, não uma frente infinita nem justificativa para adiar o primeiro PC do
+Double Dragon.
