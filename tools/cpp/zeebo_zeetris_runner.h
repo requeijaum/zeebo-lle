@@ -21,6 +21,13 @@ struct ZeetrisContext {
     u32 heap_base = 0x30005000;
     u32 heap_ptr = 0x30005000;
     bool is_running = false;
+    uint32_t display_update_calls = 0;
+    uint32_t display_drawrect_calls = 0;
+    uint32_t display_bitblt_calls = 0;
+    uint32_t uptime_ms = 100;
+
+    // Framebuffer 640x480 RGB565 (inicializado em branco 0xFFFF)
+    std::vector<uint16_t> framebuffer = std::vector<uint16_t>(640 * 480, 0xFFFF);
 };
 
 class ZeetrisRunner {
@@ -37,7 +44,47 @@ public:
     static constexpr u32 EXTRA_VTBL_VA   = 0x60001000u;
     static constexpr u32 DISPLAY_OBJ_VA  = 0x60002000u;
     static constexpr u32 DISPLAY_VTBL_VA = 0x60003000u;
+    static constexpr u32 BITMAP_OBJ_VA   = 0x60004000u;
+    static constexpr u32 BITMAP_VTBL_VA  = 0x60005000u;
 
+    static void hook_getuptime(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)addr; (void)size;
+        auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data);
+        if (ctx) {
+            ctx->uptime_ms += 16;
+            uc_reg_write(uc, UC_ARM_REG_R0, &ctx->uptime_ms);
+        }
+    }
+
+    static void hook_trace_gameloop(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)size; (void)user_data;
+        u32 pc = (u32)addr;
+        static int trace_steps = 0;
+        if (trace_steps < 30) {
+            u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r6 = 0, sl = 0, fp = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+            uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+            uc_reg_read(uc, UC_ARM_REG_SL, &sl);
+            uc_reg_read(uc, UC_ARM_REG_FP, &fp);
+            u32 fp_val = 0;
+            if (fp != 0) uc_mem_read(uc, fp + 0x54, &fp_val, 4);
+            std::printf("[TRACE PC=0x%08x] r0=0x%x r1=0x%x r2=0x%x r3=0x%x r4=0x%x r6=0x%x sl=0x%x fp=0x%x [fp+0x54]=0x%x\n",
+                        pc, r0, r1, r2, r3, r4, r6, sl, fp, fp_val);
+            if (pc == 0x12008648) {
+                u32 val_3c14c4 = 0, val_123c14c4 = 0, pool_word = 0;
+                uc_mem_read(uc, 0x003c14c4, &val_3c14c4, 4);
+                uc_mem_read(uc, 0x123c14c4, &val_123c14c4, 4);
+                uc_mem_read(uc, 0x1200e568, &pool_word, 4);
+                std::printf("  --> [0x003c14c4]=0x%08x, [0x123c14c4]=0x%08x, [0x1200e568]=0x%08x\n",
+                            val_3c14c4, val_123c14c4, pool_word);
+            }
+            trace_steps++;
+        }
+    }
     static void hook_malloc_stub(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
         (void)addr;
         (void)size;
@@ -54,7 +101,7 @@ public:
 
     static void hook_code(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
         (void)size;
-        (void)user_data;
+        auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data);
         u32 pc = static_cast<u32>(addr);
 
         if (pc >= 0x50000000u && pc < 0x50000100u) {
@@ -65,6 +112,7 @@ public:
                 u32 clsid = 0, ppObj = 0;
                 uc_reg_read(uc, UC_ARM_REG_R1, &clsid);
                 uc_reg_read(uc, UC_ARM_REG_R2, &ppObj);
+                std::printf("[Zeetris IShell] CreateInstance clsid=0x%08x ppObj=0x%08x\n", clsid, ppObj);
                 u32 obj_ptr = 0;
                 if (clsid == CREATE_CLSID) {
                     obj_ptr = EXTRA_OBJ_VA;
@@ -77,28 +125,133 @@ public:
                 u32 zero = 0;
                 uc_reg_write(uc, UC_ARM_REG_R0, &zero);
                 uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (s == 4) { // GetDeviceInfo
+                u32 pdi = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pdi);
+                std::printf("[Zeetris IShell] GetDeviceInfo pdi=0x%08x\n", pdi);
+                if (pdi != 0) {
+                    u16 w = 640, h = 480;
+                    uc_mem_write(uc, pdi + 0, &w, 2);
+                    uc_mem_write(uc, pdi + 2, &h, 2);
+                }
+                u32 zero = 0;
+                uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
             } else if (s == 12) { // CancelTimer
+                u32 r1 = 0, r2 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                u32 zero = 0;
+                uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (s == 11) { // SetTimer
+                u32 r1 = 0, r2 = 0, r3 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_R3, &r3);
                 u32 zero = 0;
                 uc_reg_write(uc, UC_ARM_REG_R0, &zero);
                 uc_reg_write(uc, UC_ARM_REG_PC, &lr);
             } else {
+                std::printf("[Zeetris IShell] Chamada ao slot %u (lr=0x%08x)\n", s, lr);
                 u32 zero = 0;
                 uc_reg_write(uc, UC_ARM_REG_R0, &zero);
                 uc_reg_write(uc, UC_ARM_REG_PC, &lr);
             }
-        } else if (pc >= 0x50000100u && pc < 0x50000300u) {
+        } else if (pc >= 0x50000100u && pc < 0x50000200u) {
             u32 lr = 0, zero = 0;
             uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000100u) / 4u;
+            std::printf("[EXTRA OBJ] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
+            uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+            uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        } else if (pc >= 0x50000200u && pc < 0x50000500u) {
+            u32 lr = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000200u) / 4u;
+            std::printf("[DISPLAY OBJ] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
+            if (ctx) {
+                if (slot == 7) ctx->display_update_calls++;
+                if (slot == 5) ctx->display_drawrect_calls++;
+                if (slot == 6) ctx->display_bitblt_calls++;
+            }
+            if (slot == 5 && ctx) { // DrawRect(po, pRect, clrFrame, clrFill, dwFlags)
+                u32 pRect = 0, clrFill = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pRect);
+                uc_reg_read(uc, UC_ARM_REG_R3, &clrFill);
+                int x0 = 0, y0 = 0, x1 = 640, y1 = 480;
+                if (pRect != 0) {
+                    int16_t rx = 0, ry = 0, rdx = 0, rdy = 0;
+                    uc_mem_read(uc, pRect + 0, &rx, 2);
+                    uc_mem_read(uc, pRect + 2, &ry, 2);
+                    uc_mem_read(uc, pRect + 4, &rdx, 2);
+                    uc_mem_read(uc, pRect + 6, &rdy, 2);
+                    x0 = rx;
+                    y0 = ry;
+                    x1 = x0 + rdx;
+                    y1 = y0 + rdy;
+                }
+                uint32_t r = (clrFill >> 16) & 0xFF;
+                uint32_t g = (clrFill >> 8) & 0xFF;
+                uint32_t b = clrFill & 0xFF;
+                uint16_t c565 = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                for (int y = std::max(y0, 0); y < std::min(y1, 480); ++y) {
+                    for (int x = std::max(x0, 0); x < std::min(x1, 640); ++x) {
+                        ctx->framebuffer[y * 640 + x] = c565;
+                    }
+                }
+            }
+            if (slot == 16) { // GetDeviceBitmap(IDisplay *pIDisplay, IBitmap **ppBitmap)
+                u32 ppBitmap = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &ppBitmap);
+                std::printf("[DISPLAY OBJ] GetDeviceBitmap ppBitmap=0x%08x\n", ppBitmap);
+                if (ppBitmap != 0) {
+                    u32 b_obj = BITMAP_OBJ_VA;
+                    uc_mem_write(uc, ppBitmap, &b_obj, 4);
+                }
+            }
+            uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+            uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        } else if (pc >= 0x50000500u && pc < 0x50000600u) {
+            u32 lr = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000500u) / 4u;
+            std::printf("[BITMAP OBJ] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
         }
     }
 
     static bool mem_hook(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user) {
-        (void)uc; (void)size; (void)value; (void)user;
-        std::printf("[UNMAPPED ACCESS] type=%d addr=0x%08llx\n", type, (unsigned long long)address);
+        (void)size; (void)value; (void)user;
+        u32 pc = 0, lr = 0, r1 = 0, r2 = 0, r3 = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+        uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+        std::printf("[UNMAPPED ACCESS] type=%d addr=0x%08llx at PC=0x%08x LR=0x%08x (r1=0x%x, r2=0x%x, r3=0x%x)\n",
+                    type, (unsigned long long)address, pc, lr, r1, r2, r3);
         std::fflush(stdout);
         return false;
+    }
+
+    static std::vector<u8> load_file(const std::string& path) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        std::streamoff n = f.tellg();
+        if (n <= 0) return {};
+        std::vector<u8> b(static_cast<size_t>(n));
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(b.data()), n);
+        return b;
+    }
+
+    static bool is_zeetris_mod(const std::vector<u8>& bytes) {
+        if (bytes.size() < 0x20) return false;
+        // Zeetris possui branch inicial para 0x12000048 (AEEMod_Load)
+        u32 first_word = *reinterpret_cast<const u32*>(bytes.data());
+        return (first_word == 0xEA000010u); // b 0x4c (PC+8+0x40 = 0x48)
     }
 
     static bool setup_and_start(uc_engine* uc, ZeetrisContext& ctx) {
@@ -118,6 +271,28 @@ public:
         uc_mem_write(uc, LOAD_VA - 8, &sb, 4);
         uc_mem_write(uc, LOAD_VA - 4, &sb, 4);
 
+        // Inicializa ponteiro de IDisplay global (0x003c14c4 / 0x123c14c4)
+        u32 disp_ptr = DISPLAY_OBJ_VA;
+        uc_mem_write(uc, 0x003c14c4, &disp_ptr, 4);
+        uc_mem_write(uc, 0x123c14c4, &disp_ptr, 4);
+
+        // Habilita renderizador ativo no Zeetris (0x3c12e8 + 0x54 e 0x3c14e8 + 0x54)
+        u32 render_active = 1;
+        uc_mem_write(uc, 0x003c12e8 + 0x54, &render_active, 4);
+        uc_mem_write(uc, 0x123c12e8 + 0x54, &render_active, 4);
+        uc_mem_write(uc, 0x003c14e8 + 0x54, &render_active, 4);
+        uc_mem_write(uc, 0x123c14e8 + 0x54, &render_active, 4);
+
+        // Inicializa estruturas de áudio/mídia globais apontadas por 0x3c142c
+        u32 one = 1;
+        uc_mem_write(uc, 0x003c142c + 8, &one, 4);
+        uc_mem_write(uc, 0x123c142c + 8, &one, 4);
+        uc_mem_write(uc, 0x003c142c + 4, &one, 4);
+        uc_mem_write(uc, 0x123c142c + 4, &one, 4);
+        u32 extra_ptr = EXTRA_OBJ_VA;
+        uc_mem_write(uc, 0x003c142c + 0x74, &extra_ptr, 4);
+        uc_mem_write(uc, 0x123c142c + 0x74, &extra_ptr, 4);
+
         // Stub bx lr no malloc/free
         const u32 MALLOC_STUB_VA = 0x30002000u;
         const u32 FREE_STUB_VA   = 0x30002080u;
@@ -132,7 +307,7 @@ public:
 
         // GetUpTimeMS no slot 0xb0
         u32 getuptime_code[2] = {
-            0xe3a00064, // mov r0, #100
+            0xe3a00064, // placeholder (substituído pelo hook)
             0xe12fff1e  // bx lr
         };
         uc_mem_write(uc, GETUPTIME_VA, getuptime_code, sizeof(getuptime_code));
@@ -156,19 +331,32 @@ public:
             uc_mem_write(uc, EXTRA_VTBL_VA + i * 4u, &s, 4);
         }
 
-        // Objeto DISPLAY vtable
+        // Objeto DISPLAY vtable (128 slots para cobrir até slot 71 = 0x11c)
         u32 disp_vt = DISPLAY_VTBL_VA;
         uc_mem_write(uc, DISPLAY_OBJ_VA, &disp_vt, 4);
-        for (u32 i = 0; i < 64; ++i) {
+        for (u32 i = 0; i < 128; ++i) {
             u32 s = 0x50000200u + i * 4u;
             uc_mem_write(uc, DISPLAY_VTBL_VA + i * 4u, &s, 4);
         }
 
-        uc_hook h_malloc = 0, h_code = 0, h_mem = 0;
+        // Objeto BITMAP vtable
+        u32 bmp_vt = BITMAP_VTBL_VA;
+        uc_mem_write(uc, BITMAP_OBJ_VA, &bmp_vt, 4);
+        for (u32 i = 0; i < 64; ++i) {
+            u32 s = 0x50000500u + i * 4u;
+            uc_mem_write(uc, BITMAP_VTBL_VA + i * 4u, &s, 4);
+        }
+
+        uc_hook h_malloc = 0, h_code = 0, h_mem = 0, h_uptime = 0;
         uc_hook_add(uc, &h_malloc, UC_HOOK_CODE, (void*)hook_malloc_stub, &ctx,
                     MALLOC_STUB_VA, MALLOC_STUB_VA);
+        uc_hook_add(uc, &h_uptime, UC_HOOK_CODE, (void*)hook_getuptime, &ctx,
+                    GETUPTIME_VA, GETUPTIME_VA);
         uc_hook_add(uc, &h_code, UC_HOOK_CODE, (void*)hook_code, &ctx,
-                    0x50000000u, 0x50000300u);
+                    0x50000000u, 0x50000600u);
+        uc_hook h_trace = 0;
+        uc_hook_add(uc, &h_trace, UC_HOOK_CODE, (void*)hook_trace_gameloop, &ctx,
+                    0x12008614u, 0x12008658u);
         uc_hook_add(uc, &h_mem, UC_HOOK_MEM_UNMAPPED, (void*)mem_hook, &ctx, 1, 0);
 
         // ETAPA 1: AEEMod_Load
@@ -216,6 +404,21 @@ public:
 
         // Configura AppContext
         uc_mem_write(uc, ctx.pApplet + 0x20, &ctx.app_ctx_va, 4);
+        u32 ishell_ptr = 0x40000000u;
+        u32 idisplay_ptr = DISPLAY_OBJ_VA;
+        uc_mem_write(uc, ctx.app_ctx_va + 12, &ishell_ptr, 4);
+        uc_mem_write(uc, ctx.app_ctx_va + 20, &idisplay_ptr, 4);
+        uc_mem_write(uc, ctx.pApplet + 0x14, &idisplay_ptr, 4);
+
+        // Atualiza a estrutura referenciada por 0x120095fc (fp em 0x12008614)
+        u32 fp_target = 0;
+        if (uc_mem_read(uc, 0x120095fc, &fp_target, 4) == UC_ERR_OK && fp_target != 0) {
+            u32 one = 1;
+            uc_mem_write(uc, fp_target + 0x54, &one, 4);
+            if (fp_target < 0x12000000) {
+                uc_mem_write(uc, 0x12000000 + fp_target + 0x54, &one, 4);
+            }
+        }
 
         // ETAPA 3: IApplet::HandleEvent(EVT_APP_START = 1)
         u32 evt = 1;
@@ -237,6 +440,10 @@ public:
         u32 app_ctx_va = 0x30010000u;
         uc_mem_write(uc, ctx.pApplet + 0x20, &app_ctx_va, 4);
 
+        // Preenche campos do AppContext: IShell (+12) e IDisplay (+20)
+        uc_mem_write(uc, app_ctx_va + 12, &ishell_ptr, 4);
+        uc_mem_write(uc, app_ctx_va + 20, &idisplay_ptr, 4);
+
         ctx.is_running = true;
         std::printf("[ZeetrisRunner] Ciclo de vida inicializado com sucesso (Applet @ 0x%08x, Gameloop @ 0x%08x)\n",
                     ctx.pApplet, ctx.gameloop_cb_va);
@@ -245,18 +452,36 @@ public:
 
     static bool step_frame(uc_engine* uc, ZeetrisContext& ctx) {
         if (!ctx.is_running || !uc) return false;
+        // Força flag de renderização em 0x123c14e8 + 0x54 antes do frame
+        u32 one = 1;
+        uc_mem_write(uc, 0x123c14e8 + 0x54, &one, 4);
+        uc_mem_write(uc, 0x003c14e8 + 0x54, &one, 4);
+        u32 disp_ptr = DISPLAY_OBJ_VA;
+        uc_mem_write(uc, 0x003c14c4, &disp_ptr, 4);
+        uc_mem_write(uc, 0x123c14c4, &disp_ptr, 4);
+        // Após o boot/relocação, 0x123c16c4 guarda o ponteiro ativo de IDisplay
+        uc_mem_write(uc, 0x123c16c4, &disp_ptr, 4);
+        uc_mem_write(uc, 0x123c16c4 + 4, &disp_ptr, 4);
         u32 sp = STK, lr = 0xF0F0F0F0u;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
         uc_err err = uc_emu_start(uc, ctx.gameloop_cb_va, 0xF0F0F0F0u, 0, 500000);
+        u32 pc_end = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc_end);
+        static int f_count = 0;
+        if (f_count++ < 3) {
+            std::printf("[ZeetrisRunner] step_frame finished: err=%s pc_end=0x%08x\n",
+                        uc_strerror(err), pc_end);
+        }
         return err == UC_ERR_OK;
     }
 
     static bool dispatch_key(uc_engine* uc, ZeetrisContext& ctx, u32 key_code, bool pressed) {
         if (!ctx.is_running || !uc) return false;
-        u32 evt = pressed ? 0x100u : 0x101u;
+        // Padrão Qualcomm BREW: EVT_KEY_PRESS = 0x101, EVT_KEY_RELEASE = 0x102
+        u32 evt = pressed ? 0x101u : 0x102u;
         u32 sp = STK, lr = 0xF0F0F0F0u;
         u32 r3 = 0;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);

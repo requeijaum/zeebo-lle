@@ -51,18 +51,29 @@ int main(int argc, char** argv) {
     assert(ctx.is_running);
     assert(ctx.pApplet != 0);
 
-    // Testa envio de teclas (AVK_SELECT 0x102)
-    bool press_ok = ZeetrisRunner::dispatch_key(uc, ctx, 0x102, true);
+    // Testa envio de teclas (AVK_SELECT 0xE035)
+    bool press_ok = ZeetrisRunner::dispatch_key(uc, ctx, 0xE035, true);
     assert(press_ok);
-    bool release_ok = ZeetrisRunner::dispatch_key(uc, ctx, 0x102, false);
+    bool release_ok = ZeetrisRunner::dispatch_key(uc, ctx, 0xE035, false);
     assert(release_ok);
 
-    // Testa avanço de múltiplos frames no gameloop
-    for (int i = 0; i < 5; ++i) {
+    // Testa avanço de múltiplos frames no gameloop (60 frames)
+    for (int i = 0; i < 60; ++i) {
         bool frame_ok = ZeetrisRunner::step_frame(uc, ctx);
         assert(frame_ok);
     }
-    std::printf("[+] Positivo: ZeetrisRunner avançou 5 frames com sucesso!\n");
+    std::printf("[+] Positivo: ZeetrisRunner avançou 60 frames com sucesso! (display_updates=%u, drawrect=%u, bitblt=%u)\n",
+                ctx.display_update_calls, ctx.display_drawrect_calls, ctx.display_bitblt_calls);
+
+    // Validação de vídeo: verifica se o framebuffer tem conteúdo desenhado
+    assert(ctx.display_drawrect_calls > 0);
+    assert(ctx.display_update_calls > 0);
+    size_t non_white = 0;
+    for (uint16_t px : ctx.framebuffer) {
+        if (px != 0xFFFF) non_white++;
+    }
+    std::printf("[+] Framebuffer RGB565: %zu pixels desenhados (diferentes de branco)\n", non_white);
+    assert(non_white > 0);
 
     uc_close(uc);
     std::printf("=== Test ZeetrisRunner: PASS ===\n");

@@ -87,23 +87,21 @@ enum : u32 {
     EVT_KEY         = 0x0102, // 258
 };
 
-// Códigos de tecla AVK do Zeebo / Z-Pad (subconjunto usado no console).
+// Códigos de tecla AVK do Zeebo / Z-Pad (padrão oficial Qualcomm SDK - AEEVCodes.h).
 enum : u32 {
-    AVK_LEFT   = 0xFF51,
-    AVK_UP     = 0xFF52,
-    AVK_RIGHT  = 0xFF53,
-    AVK_DOWN   = 0xFF54,
-    AVK_SELECT = 0xFF0D, // Enter / Botão A (confirmar)
-    AVK_CLR    = 0xFF08, // Backspace / Botão B (voltar/limpar)
-    AVK_0      = 0x30,   // '0'..'9' = 0x30..0x39
-    AVK_9      = 0x39,
-    // Botões de jogo do Z-Pad. [infer] AVK_SOFT1/2 e AVK_INFO/SPACE seguem a
-    // faixa AVK_* padrão do BREW SDK; usados p/ mapear C/V/Espaço/Esc do host.
-    AVK_SOFT1  = 0xFF57, // Z-Pad botão 1
-    AVK_SOFT2  = 0xFF58, // Z-Pad botão 2
-    AVK_INFO   = 0xFF59, // Z-Pad botão 3
-    AVK_SPACE  = 0x20,   // Z-Pad botão 4 (Espaço)
-    AVK_FUNC   = 0xFF1B, // Home / Escape (menu)
+    AVK_0      = 0xE021, // 0xE021..0xE02A = '0'..'9'
+    AVK_9      = 0xE02A,
+    AVK_CLR    = 0xE030, // Escape / Backspace / Botão B (voltar/limpar)
+    AVK_UP     = 0xE031, // Direcional Cima
+    AVK_DOWN   = 0xE032, // Direcional Baixo
+    AVK_LEFT   = 0xE033, // Direcional Esquerda
+    AVK_RIGHT  = 0xE034, // Direcional Direita
+    AVK_SELECT = 0xE035, // Enter / Espaço / Botão A (confirmar)
+    AVK_SOFT1  = 0xE036, // Z-Pad botão 1
+    AVK_SOFT2  = 0xE037, // Z-Pad botão 2
+    AVK_INFO   = 0xE038, // Z-Pad botão 3
+    AVK_SPACE  = 0xE039, // Z-Pad botão 4
+    AVK_FUNC   = 0xE03A, // Home / Escape (menu)
 };
 
 // Botões lógicos do Z-Pad (independente do backend de entrada). O mapa
