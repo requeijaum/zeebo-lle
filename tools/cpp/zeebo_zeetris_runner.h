@@ -46,6 +46,7 @@ struct ZeetrisContext {
     uint32_t input_poll_calls = 0;    // execucoes do poll da mascara (0x1200c3dc)
     uint32_t input_block_calls = 0;   // execucoes do bloco de input do gameloop
     uint32_t input_store_calls = 0;   // execucoes da rotina que escreve no struct de input
+    uint32_t tex_loader_calls = 0;    // execucoes da rotina de carga de textura (0x120056fc)
     // Quantas vezes cada handler de bit da mascara executou (8 bits do gameloop).
     uint32_t btn_handler_calls[8] = {0,0,0,0,0,0,0,0};
     uint32_t igl_calls = 0;
@@ -182,6 +183,14 @@ public:
         uc_reg_read(uc, UC_ARM_REG_SB, &sb);
         printf("[poll@0x%x] mask(R0)=0x%08x prev_ptr(R7)=0x%08x cur(R11/sb)=0x%08x\n",
                (u32)addr, r0, r7, sb);
+    }
+
+    // A rotina que carrega texturas (0x120056fc: chama glGenTextures/glTexImage2D
+    // 17x) nao tem BL caller nem referencia literal. Instrumento de CÓDIGO para
+    // responder se ela executa alguma vez (env-gated).
+    static void hook_tex_loader(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)addr; (void)size;
+        if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->tex_loader_calls++;
     }
 
     static void hook_input_store(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
@@ -600,6 +609,10 @@ public:
             uc_hook h_ap = 0;
             uc_hook_add(uc, &h_ap, UC_HOOK_CODE, (void*)hook_after_poll, &ctx,
                         0x1200ad0cu, 0x1200ad10u);
+            uc_hook h_tl = 0;
+            uc_err e8 = uc_hook_add(uc, &h_tl, UC_HOOK_CODE, (void*)hook_tex_loader, &ctx,
+                                    0x120056fcu, 0x12005a98u);
+            (void)e8;
             uc_hook h_pa = 0;
             uc_hook_add(uc, &h_pa, UC_HOOK_CODE, (void*)hook_poll_addr, &ctx,
                         0x1200c3deu, 0x1200c3e2u);

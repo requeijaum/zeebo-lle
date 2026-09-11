@@ -233,15 +233,17 @@ int main(int argc, char** argv) {
             ZeetrisRunner::set_platform_buttons(uc, ctx, m);
             ZeetrisRunner::step_frame(uc, ctx);
             ZeetrisRunner::set_platform_buttons(uc, ctx, 0);
-            for (int i = 0; i < 3; ++i) ZeetrisRunner::step_frame(uc, ctx);
+            for (int i = 0; i < 12; ++i) ZeetrisRunner::step_frame(uc, ctx);
             std::string fired;
             for (int i = 0; i < 8; ++i)
                 if (ctx.btn_handler_calls[i])
                     fired += " bit" + std::to_string(1u << i) + "=" +
                              std::to_string(ctx.btn_handler_calls[i]);
-            std::printf("[buttons] mask=0x%04x -> handlers:%s | slots GL %zu->%zu\n",
+            std::printf("[buttons] mask=0x%04x -> handlers:%s | slots GL %zu->%zu | "
+                        "loader_textura=%u | IMedia(play=%u)\n",
                         m, fired.empty() ? " NENHUM" : fired.c_str(),
-                        slots_before, ctx.igl_slot_calls.size());
+                        slots_before, ctx.igl_slot_calls.size(),
+                        ctx.tex_loader_calls, ctx.media_play_calls);
         }
         ZeetrisRunner::set_platform_buttons(uc, ctx, 0);
     }
@@ -253,6 +255,8 @@ int main(int argc, char** argv) {
                     ctx.input_poll_calls, ctx.input_block_calls);
         std::printf("[state] rotina de escrita no struct de input: %u execucoes\n",
                     ctx.input_store_calls);
+        std::printf("[state] rotina de CARGA DE TEXTURA (0x120056fc): %u execucoes\n",
+                    ctx.tex_loader_calls);
         // Os dois espelhos: o módulo acessa seus dados por 0x003Cxxxx (absoluto)
         // e por 0x123Cxxxx (relocado). Só um deles carrega o estado vivo.
         const u32 bases[2] = {0x123c141cu, 0x003c141cu};
