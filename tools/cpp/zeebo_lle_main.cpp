@@ -3669,7 +3669,7 @@ private:
         //     negativo (VA irrelevante 0xb0424000, mesma página, offset diferente).
         static const bool alias_on = std::getenv("ZEEBO_PC14_ALIAS") != nullptr;
         if (alias_on) {
-            const u32 PC_LDR = 0xb04001d4;  // ldr r1,[r4]  (r4 esperado = 0xb04241a8)
+            const u32 PC_LDR = 0xb04001d4;  // ldr r1,[r4]  (capturar o r4 real aqui)
             const u32 PC_MOV = 0xb04001d8;  // mov r0,r4     (logo APÓS o ldr)
             const u32 PC_BX  = 0xb04001e0;  // bx  r1
             const u32 VA_NEG = 0xb0424000;  // controle negativo: mesma página, off !=

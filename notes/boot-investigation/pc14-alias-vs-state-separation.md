@@ -52,19 +52,19 @@ neg(0xb0424000) uc=0 em todos os pontos
    controle negativo (`0xb0424000`) permanece 0 e não-perturbado.
 
 Portanto **não há defeito de aliasing/mapeamento do Unicorn nesta
-fronteira**. O defeito é de **estado de guest legítimo**: `r4` é um
-ponteiro de objeto inválido (aponta para região baixa identidade
-`0xb00xxxxx`), cujo slot 0 contém um inteiro pequeno (5) onde deveria
-haver um ponteiro de função. O `bx 5` é fielmente executado.
+fronteira**. O estado observado é legitimamente visível ao guest: `r4` aponta para
+`0xb0046fa8`, cujo slot 0 contém o inteiro pequeno `5` onde o consumidor em
+`b04001e0` espera um destino chamável. O `bx 5` é fielmente executado. Isso prova o
+valor inválido no ponto de consumo, mas ainda não prova se `r4` está incorreto, se a
+estrutura está incompleta ou qual produtor deixou `5` nesse slot.
 
-## Origem a montante (consistente com QW99)
-A causa raiz sobe para o **defeito de atribuição de SID do
-scatterload** já documentado em `qw99-scatterload-core1-measurement.md`:
-a fonte comprimida é registrada sob `0x80000100`, mas o consumidor roda
-em `0x8000c001`, cujo conjunto de regiões não cobre a fonte → o decoder
-lê backing plano/zerado e produz objetos corrompidos (ponteiro `r4`
-lixo). Não é um bug de emulador nesta instrução nem na camada de
-mapeamento; é a propagação do estado corrompido a montante.
+## Origem a montante ainda aberta
+O defeito anterior de atribuição de SID no scatterload foi corrigido antes desta
+fronteira e o avanço até `b04001e0` depende dessa correção. Portanto não é válido
+atribuir automaticamente o `5` ao estado produzido pelo bug antigo. O próximo passo
+causal é rastrear a procedência de `r4=0xb0046fa8` e da última escrita em
+`[0xb0046fa8]`, com controles positivo e negativo, até identificar o produtor ou uma
+lacuna de inicialização.
 
 ## Consequência de protocolo
 Como **NÃO** se provou bug de alias do emulador no caminho de
@@ -72,5 +72,5 @@ produção/activate/mapping, **não** foi escrito teste RED contra esse
 caminho nem aplicado qualquer fix (o mapping está correto: guest==host).
 Apenas instrumentação read-only env-gated (`ZEEBO_PC14_ALIAS`) + esta
 nota foram commitadas. Ponteiro/PC/memória do guest **não** patcheados.
-O gancho medido para a próxima iteração permanece o **SID-attribution do
-scatterload** (QW99), não a memória do Unicorn.
+O gancho medido para a próxima iteração é a procedência de `r4` e da escrita do valor
+`5`, não o SID já corrigido nem a memória do Unicorn.
