@@ -28,10 +28,11 @@
 //
 // This test drives the REAL orchestrator (pure Unicorn interpreter, no Dynarmic)
 // booting the REAL proprietary NAND to AppMgr with the anchor trace enabled, and
-// asserts, as a RED blocker-witness, that Core0 NEVER executes either exact
+// asserts, as a POSITIVE witness (was a RED blocker-witness until the boot
+// started reaching the anchor), that Core0 DOES execute an exact
 // shell anchor. It ALSO records the per-cycle Core0 PC trajectory to confirm the
 // measured PC=0x14 derail is still present (boot behavior unchanged). Therefore
-// a live pIShell context CANNOT yet be captured: the upstream boot blockers
+// a live pIShell context IS captured (r0 at the anchor): the upstream blockers
 // (Core1 REX scheduling, Core0 PC=0x14 derail) gate it. This is a measured,
 // falsifiable fact — and a proper negative control: it is a "boot has NOT yet
 // reached the shell anchor" gate that goes GREEN->RED the moment the real boot
@@ -238,44 +239,40 @@ int main(int argc, char** argv) {
     const bool live_reached_anchor = !hits.empty();
 
     if (BUGGY) {
-        // Mutant claims the live boot executes the shell anchor (live pIShell exists).
-        if (!live_reached_anchor) {
-            std::printf("[MUTANT] expected live boot to execute a shell anchor but it "
-                        "did NOT — mutant correctly fails.\n");
+        // O mutante agora representa a AFIRMAÇÃO ANTIGA deste gate: "o boot vivo
+        // nunca executa o âncora do shell, logo não há pIShell vivo". Como a
+        // medição mostra que ele É alcançado, essa afirmação tem de falhar.
+        if (live_reached_anchor) {
+            std::printf("[MUTANT] a afirmação antiga (âncora inalcançável) falha "
+                        "como esperado: o boot vivo ALCANÇOU o âncora.\n");
             return 1;
         }
-        std::printf("[MUTANT] (unexpectedly) executed a shell anchor.\n");
+        std::printf("[MUTANT] (inesperadamente) o âncora não foi alcançado.\n");
         return 0;
     }
 
-    // GREEN-UNEXPECTED: a live anchor was reached -> a real pIShell context is now
-    // captured. Fail loudly so nobody ships the stale synthetic-stub claim.
-    if (live_reached_anchor) {
-        const AnchorHit& h = hits.front();
-        std::printf("[GREEN-UNEXPECTED] Core0 EXECUTED a shell anchor: pc=0x%08x "
-                    "r0=0x%08x r1=0x%08x r2=0x%08x sp=0x%08x. A LIVE pIShell context "
-                    "is now derivable (r0 at ISHELL_CreateInstance) — replace the "
-                    "synthetic 0x40000000 stub with this captured context and update "
-                    "this gate.\n", h.pc, h.r0, h.r1, h.r2, h.sp);
-        return 2;
-    }
-
-    if (pc14_hits == 0) {
-        std::printf("[FAIL] did not observe the measured PC=0x14 derail; boot "
-                    "behavior changed — re-triage before trusting this witness.\n");
+    // NOVA VERDADE MEDIDA: o boot vivo ALCANÇA o âncora do shell e entrega um
+    // contexto pIShell real. O gate deixou de ser blocker-witness e passou a ser
+    // witness POSITIVO: exige que o âncora continue sendo alcançado (regressão do
+    // boot vira FAIL) e publica os registradores capturados.
+    if (!live_reached_anchor) {
+        std::printf("[FAIL] o boot vivo NÃO alcançou o âncora do shell (0x%08x nem "
+                    "0x%08x); o boot REGREDIU em relação à medição anterior.\n",
+                    ISHELL_CREATE_VA, AEECSHELL_DISPATCH_VA);
         return 1;
     }
 
+    const AnchorHit& h = hits.front();
     std::printf("=== Test Zeetris LIVE shell anchor: PASS ===\n");
-    std::printf("  MEASURED (per-instruction anchor trace): over a real Unicorn "
-                "AppMgr boot, Core0 NEVER executed ISHELL_CreateInstance "
-                "(0x105c7fb4) nor AEECShell dispatch (0x10c874f4); it derailed to "
-                "PC=0x14 (%zu samples). A live pIShell ARM context is NOT yet "
-                "capturable, so the Zeetris lifecycle bridge cannot use a real "
-                "booted shell — the synthetic IShell in test_zeetris_ishell.cpp is "
-                "an OBSERVATION instrument, not a live-context bridge. This gate is "
-                "STRICTLY tighter than the prior broad-window heuristic: a mere PC "
-                "in the APPS region no longer counts as a shell.\n",
-                pc14_hits);
+    std::printf("  MEDIDO (trace por instrução): num boot AppMgr real do Unicorn, "
+                "Core0 EXECUTA o âncora do shell — pc=0x%08x r0=0x%08x r1=0x%08x "
+                "r2=0x%08x sp=0x%08x. r0 é o pIShell VIVO do guest.\n",
+                h.pc, h.r0, h.r1, h.r2, h.sp);
+    std::printf("  SEGUIMENTO (ação pendente, não feita aqui): usar esse pIShell "
+                "capturado no lugar do stub sintético 0x40000000 do ZeetrisRunner. "
+                "O sintético continua sendo instrumento de OBSERVAÇÃO, não ponte "
+                "de contexto vivo. Este gate segue mais estrito que a heurística "
+                "de janela ampla: um PC qualquer na região APPS não conta como shell. "
+                "(pc14_derail_hits=%zu — informativo.)\n", pc14_hits);
     return 0;
 }

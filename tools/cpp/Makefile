@@ -422,17 +422,18 @@ test-zeetris-runner: test_zeetris_runner
 
 # Blocker-witness (Tier B): drives the REAL Unicorn AppMgr boot and MEASURES
 # that Core0 never reaches ISHELL_CreateInstance/AEECShell/APPS user-space,
-# proving a LIVE pIShell context is NOT yet derivable. Requires the real NAND +
-# the built orchestrator; without them -> SKIP (exit 77). Mutant ("buggy")
-# claims the live boot DOES reach the shell and MUST fail.
+# proving a LIVE pIShell context IS derivable (positive witness since the boot
+# started reaching the anchor). Requires the real NAND + the built orchestrator;
+# without them -> SKIP (exit 77). Mutant ("buggy") now carries the OLD claim
+# ("the live boot never reaches the shell") and MUST fail.
 test_zeetris_live_shell: test_zeetris_live_shell.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_live_shell.cpp
 
 test-zeetris-live-shell: test_zeetris_live_shell zeebo_lle_main
 	./test_zeetris_live_shell || [ $$? -eq 77 ]
 	@if ./test_zeetris_live_shell buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (boot ao vivo alcanca o shell) passou"; exit 1; \
-	else echo "OK: mutante falha como esperado (boot NAO alcanca o shell)"; fi
+	  echo "FAIL: mutante (afirmacao antiga: ancora inalcancavel) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (o boot ALCANCA o shell)"; fi
 
 # SEMANTIC gate (Tier B, negative control): drives the REAL Unicorn AppMgr boot
 # with the read-only ZEEBO_SHELL_SEM instrument and MEASURES whether the exact
