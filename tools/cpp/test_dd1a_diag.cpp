@@ -330,14 +330,24 @@ int main(int argc, char** argv) {
             // ddragonz @0x1201a610 lê r0 = IDisplay->vtable (em DISPLAY_OBJ + 0)
             // e em 0x1201a618 lê r2 = vtable[4] (offset 0x10) e faz bx r2.
             // Para que r0 seja válido, DISPLAY_OBJ precisa conter ponteiro para vtable:
-            // e [DISP_VTBL + 0x10] deve apontar para DISP_GETINFO_STUB.
+            // e [DISP_VTBL + 0x10] deve apontar para DISP_OFF10_DIMS_STUB.
             // Além disso, [r0 + 0xc] é dereferenciado em 0x1201a608 (r0 = [r0, #0xc]).
             // Vamos montar a vtable de IDisplay em DISP_VTBL e o sub-objeto de bitmap/device.
             const u32 DISP_VTBL = SCRATCH + 0x700;
             uc_mem_write(uc2, DISPLAY_OBJ, &DISP_VTBL, 4);
 
-            const u32 DISP_GETINFO_STUB = SCRATCH + 0x2200;
-            u32 disp_getinfo_code[6] = {
+            // ATENÇÃO — identidade NÃO provada para este offset.
+            // O layout do SDK (tools/py/vtbl_layout.py, gate make test-vtbl-layout)
+            // diz que IDisplay::vtbl[4] (offset 0x10) é DrawText. Mas o call-site
+            // 0x1201a618 deriva a vtable de [obj + 0xc], onde obj vem da static-base
+            // +0xc0 — NÃO é o IDisplay devolvido por ISHELL_CreateInstance.
+            // Ou seja: este slot pertence a OUTRA interface, ainda não identificada.
+            // A semântica que o binário exige aqui (escrever w/h num out-param)
+            // é de um "get dimensions", não de DrawText.
+            // Por isso o nome é descritivo do OFFSET e do COMPORTAMENTO observado,
+            // não de um método do SDK que não podemos afirmar. Ver docs/dd_contract.md.
+            const u32 DISP_OFF10_DIMS_STUB = SCRATCH + 0x2200;
+            u32 disp_off10_dims_code[6] = {
                 0xe59f200c, // ldr r2, [pc, #12] -> 0x01e00280 (h=480, w=640)
                 0xe5812004, // str r2, [r1, #4]  -> grava em [sp+4] do chamador
                 0xe3a00000, // mov r0, #0        -> return 0
@@ -345,10 +355,10 @@ int main(int argc, char** argv) {
                 0x01e00280, // w=640 (0x0280), h=480 (0x01e0)
                 0x00000000
             };
-            uc_mem_write(uc2, DISP_GETINFO_STUB, disp_getinfo_code, sizeof(disp_getinfo_code));
-            uc_mem_write(uc2, DISP_VTBL + 0x10, &DISP_GETINFO_STUB, 4); // vtbl[4] = DISP_GETINFO_STUB
+            uc_mem_write(uc2, DISP_OFF10_DIMS_STUB, disp_off10_dims_code, sizeof(disp_off10_dims_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x10, &DISP_OFF10_DIMS_STUB, 4); // vtbl[4] = DISP_OFF10_DIMS_STUB
             // Também mapear vtbl + 0x10 (caso o objeto seja o próprio pIShell/SCRATCH)
-            uc_mem_write(uc2, vtbl + 0x10, &DISP_GETINFO_STUB, 4);
+            uc_mem_write(uc2, vtbl + 0x10, &DISP_OFF10_DIMS_STUB, 4);
 
             u32 ppObj = SCRATCH + 0x200;
 
@@ -662,13 +672,13 @@ int main(int argc, char** argv) {
             //   0x12023a70: mov lr, pc ; 0x12023a74: bx ip
             // Portanto a proxima dependencia do tick e o slot 5 da vtable de IDisplay.
             // Stub minimo: retorna 0 (AEE_SUCCESS) e volta por lr.
-            const u32 DISP_SLOT5_STUB = SCRATCH + 0x2900;
-            u32 disp_slot5_code[2] = {
+            const u32 DISP_DRAWRECT_STUB = SCRATCH + 0x2900;
+            u32 disp_drawrect_code[2] = {
                 0xe3a00000, // mov r0, #0
                 0xe12fff1e  // bx lr
             };
-            uc_mem_write(uc2, DISP_SLOT5_STUB, disp_slot5_code, sizeof(disp_slot5_code));
-            uc_mem_write(uc2, DISP_VTBL + 0x14, &DISP_SLOT5_STUB, 4);
+            uc_mem_write(uc2, DISP_DRAWRECT_STUB, disp_drawrect_code, sizeof(disp_drawrect_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x14, &DISP_DRAWRECT_STUB, 4);
 
             // Observado (instr=199, last_pc=0x120244c8):
             //   0x120244b4: ldr r0, [r0]      (r0 = DISPLAY_OBJ)
@@ -676,13 +686,13 @@ int main(int argc, char** argv) {
             //   0x120244bc: ldr r3, [r2, #0x28] (DISP_VTBL[10], nao instalado => r3 = 0)
             //   0x120244c4: mov r1, #1 ; 0x120244c8: bx r3
             // Proxima dependencia: slot 10 da vtable de IDisplay (tail-call, volta por lr do caller).
-            const u32 DISP_SLOT10_STUB = SCRATCH + 0x2980;
-            u32 disp_slot10_code[2] = {
+            const u32 DISP_SETCOLOR_STUB = SCRATCH + 0x2980;
+            u32 disp_setcolor_code[2] = {
                 0xe3a00000, // mov r0, #0
                 0xe12fff1e  // bx lr
             };
-            uc_mem_write(uc2, DISP_SLOT10_STUB, disp_slot10_code, sizeof(disp_slot10_code));
-            uc_mem_write(uc2, DISP_VTBL + 0x28, &DISP_SLOT10_STUB, 4);
+            uc_mem_write(uc2, DISP_SETCOLOR_STUB, disp_setcolor_code, sizeof(disp_setcolor_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x28, &DISP_SETCOLOR_STUB, 4);
 
             // Observado (instr=237, last_pc=0x12023b08, r0=0x1204df18 = ponteiro para .rodata do mod):
             //   0x12023af8: ldr r0, [r6, #-4]   (static base)
@@ -725,13 +735,13 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, STRTOWSTR_STUB, strtowstr_code, 7 * 4);
             uc_mem_write(uc2, STATIC_BASE + 0xe4, &STRTOWSTR_STUB, 4);
 
-            // Observado (instr=460, last_pc=0x00302204 = DISP_GETINFO_STUB+4, fault write @0x00008004):
+            // Observado (instr=460, last_pc=0x00302204 = DISP_OFF10_DIMS_STUB+4, fault write @0x00008004):
             // No tick o slot 4 de IDisplay e reinvocado com r1 = 0x00008000, que NAO e um
             // ponteiro de saida valido no nosso harness (o construtor passava um buffer de pilha).
             // Ou seja: o slot 4 aqui tem outra semantica (parametro escalar, nao out-param).
             // Para nao falsificar dados, o stub passa a escrever apenas quando r1 aponta para
             // a regiao SCRATCH mapeada; caso contrario apenas retorna 0.
-            u32 disp_getinfo_code2[10] = {
+            u32 disp_off10_dims_code2[10] = {
                 0xe59f3018, // ldr  r3, [pc, #24]  -> 0x00300000 (SCRATCH)
                 0xe1510003, // cmp  r1, r3
                 0x3a000003, // bcc  pula escrita
@@ -744,9 +754,9 @@ int main(int argc, char** argv) {
                 0x00400000
             };
             // corrige a instrucao condicional de escrita: strcc r2, [r1, #4]
-            disp_getinfo_code2[5] = 0x35812004; // strcc r2, [r1, #4]
+            disp_off10_dims_code2[5] = 0x35812004; // strcc r2, [r1, #4]
             // r2 precisa conter o valor de dimensoes antes da escrita
-            u32 disp_getinfo_code3[12] = {
+            u32 disp_off10_dims_code3[12] = {
                 0xe59f2024, // ldr  r2, [pc, #36] -> 0x01e00280
                 0xe59f3024, // ldr  r3, [pc, #36] -> 0x00300000
                 0xe1510003, // cmp  r1, r3
@@ -760,8 +770,8 @@ int main(int argc, char** argv) {
                 0x00300000,
                 0x00400000
             };
-            (void)disp_getinfo_code2;
-            uc_mem_write(uc2, DISP_GETINFO_STUB, disp_getinfo_code3, sizeof(disp_getinfo_code3));
+            (void)disp_off10_dims_code2;
+            uc_mem_write(uc2, DISP_OFF10_DIMS_STUB, disp_off10_dims_code3, sizeof(disp_off10_dims_code3));
 
             // Observado (instr=1571, last_pc=0x12024538, r0=DISPLAY_OBJ, ip=DISPLAY_OBJ):
             //   0x12024528: ldr r0, [r0]        (r0 = DISPLAY_OBJ)
@@ -769,13 +779,13 @@ int main(int argc, char** argv) {
             //   0x12024530: ldr r2, [r1, #0x1c] (DISP_VTBL[7], nao instalado => r2 = 0)
             //   0x12024534: mov r1, #1 ; 0x12024538: bx r2   (tail-call)
             // Proxima dependencia: slot 7 da vtable de IDisplay.
-            const u32 DISP_SLOT7_STUB = SCRATCH + 0x2b00;
-            u32 disp_slot7_code[2] = {
+            const u32 DISP_UPDATE_STUB = SCRATCH + 0x2b00;
+            u32 disp_update_code[2] = {
                 0xe3a00000, // mov r0, #0
                 0xe12fff1e  // bx lr
             };
-            uc_mem_write(uc2, DISP_SLOT7_STUB, disp_slot7_code, sizeof(disp_slot7_code));
-            uc_mem_write(uc2, DISP_VTBL + 0x1c, &DISP_SLOT7_STUB, 4);
+            uc_mem_write(uc2, DISP_UPDATE_STUB, disp_update_code, sizeof(disp_update_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x1c, &DISP_UPDATE_STUB, 4);
 
             // ── DD3 Game Loop: disparar o callback do timer (0x120239dc) ──
             // O timer callback registrado pelo applet é uma função C que recebe pUser (applet) em r0:

@@ -67,13 +67,85 @@ não faz.
 ## Limitações conhecidas
 
 - **Só modo ARM.** Trechos THUMB (a vtable do applet, por exemplo) não são varridos.
-- **Não resolve identidade de interface.** Emite `(base, offset)`, não `IDisplay::Blt`.
-  Ligar offset → nome exige cruzar com os headers do BREW SDK.
 - **Janela fixa de 8 instruções** entre a carga do slot e o `bx`. Idiomas mais espaçados
   escapam. O gate de 8/8 mostra que a janela cobre o que encontramos até aqui, não que
   cobre tudo.
 - **Não distingue call-site alcançável de morto.** 432 é o teto estático, não a demanda
   real de execução.
+- ~~**Não resolve identidade de interface.**~~ **RESOLVIDO** para `IDisplay` por
+  `tools/py/vtbl_layout.py` — ver seção "Identidade dos slots de IDisplay" abaixo.
+  Continua em aberto para as demais interfaces e para a static-base.
+
+## Identidade dos slots de `IDisplay`
+
+`scan_deps.py` dá offsets; não dá nomes. Os nomes usados até `09eaf3f` eram
+**suposição**, e estavam errados. `tools/py/vtbl_layout.py` expande as macros
+`INHERIT_*` do SDK e devolve a ordem real (26 slots; raiz `IQueryInterface` =
+`AddRef`, `Release`, `QueryInterface`, portanto o primeiro método próprio de
+`IDisplay` cai em `0x0c`, não em `0x08`).
+
+### Correção de rotulagem
+
+| offset | real (SDK) | eu supunha | call-site | conferido por aridade? |
+|---|---|---|---|---|
+| `0x14` | `DrawRect` | *slot 5* | `0x12023a74` | **sim** (5 args, 5º na pilha) |
+| `0x1c` | `Update` | *slot 7* | `0x12024538` | **sim** (2 args, tail-call) |
+| `0x28` | `SetColor` | *slot 10* | `0x120244c8` | não — só posição no layout |
+| `0x48` | `SetClipRect` | *GetDestination* | `0x12023a48` | não — só posição no layout |
+
+Os dois primeiros têm confirmação independente pelo binário. Os dois últimos vêm
+**apenas** da posição no layout do SDK: são melhores que os rótulos antigos, mas
+ainda não foram cruzados com os argumentos do call-site. Tratar como provisórios.
+
+`GetDestination` é o slot 15 (`0x3c`) e `GetDeviceBitmap` o slot 16 (`0x40`) —
+nenhum dos dois é chamado no caminho exercitado hoje.
+
+### Caso NÃO resolvido: offset `0x10`
+
+Eu rotulava `0x10` como *GetInfo*; no `IDisplay` esse slot é `DrawText`. Mas
+**não** basta trocar a etiqueta, porque o call-site `0x1201a618` obtém a vtable de
+`[obj + 0xc]`, com `obj` vindo da static-base `+0xc0` — não é o `IDisplay`
+devolvido por `ISHELL_CreateInstance`. O objeto pertence a outra interface, ainda
+não identificada.
+
+O comportamento que o binário exige ali (escrever largura/altura num out-param)
+é de um *get dimensions*, e não de `DrawText`. No harness o stub passou a chamar-se
+`DISP_OFF10_DIMS_STUB`: nome descritivo do offset e do comportamento observado,
+sem afirmar um método do SDK que não foi provado. Identificar essa interface é
+trabalho pendente e depende de mapear a static-base `+0xc0` (138 call-sites).
+
+### Por que a identificação é confiável (e não outra suposição)
+
+Três evidências independentes, todas verificáveis:
+
+1. **CLSID por aritmética do SDK.** `AEECLSID_CORE = QVERSION + 0x1000 = 0x01001000`;
+   `AEECLSID_DISPLAY = CORE+1 = 0x01001001`, exatamente o literal passado a
+   `ISHELL_CreateInstance` em `@0x60c`. (`0x01001002` = `CORE+2` = `AEECLSID_HEAP`,
+   o que também confere com o uso observado.)
+
+2. **Aridade de `DrawRect`.** `void DrawRect(iname*, const AEERect*, RGBVAL, RGBVAL, uint32)`
+   = 5 argumentos, o quinto empilhado. O call-site faz `mov r3,#2; str r3,[sp]`
+   antes do `bx ip` — um método de 1–2 argumentos não explicaria esse store.
+   Args observados: `pRect=NULL` (tela toda), `clrFrame=-1`, `dwFlags=2`.
+
+3. **Aridade de `Update`.** `void Update(iname*, boolean)` = 2 args, retorno não
+   usado. O call-site carrega `r0`, `mov r1,#1` e faz **tail-call** (`bx r2` sem
+   `mov lr,pc`), consistente com `void`.
+
+Gate: `make test-vtbl-layout`. Controle negativo incluído — deslocar a numeração
+em um único slot faz a conferência de aridade reprovar.
+
+### Consequência para DD4
+
+Os slots que DD3 stubou como no-op retornando 0 incluem `DrawRect` e `Update`
+(ambos confirmados por aridade) e, provavelmente, `SetColor` e `SetClipRect` —
+o caminho de desenho. O tick de DD3 **já estava pedindo para desenhar**; os
+pedidos caíam em stubs mudos.
+
+DD4 não precisa descobrir por onde a imagem sai. Precisa dar semântica real a
+`DrawRect`/`Update` e capturar o resultado num framebuffer, com o controle
+negativo óbvio: se o frame não mudar quando o jogo pede `DrawRect`, o stub não
+está desenhando nada.
 
 ## Uso
 
