@@ -15,14 +15,20 @@ qdsp5_smoke: qdsp5_smoke.cpp $(QDSP5_SRC) $(QDSP5_HDR)
 qdsp5_capture_test: qdsp5_capture_test.cpp qdsp5_capture_hook.h
 	$(CXX) $(CXXFLAGS) qdsp5_capture_test.cpp -o qdsp5_capture_test
 
+qdsp5_audplay_route_test: qdsp5_audplay_route_test.cpp $(QDSP5_SRC) $(QDSP5_HDR)
+	$(CXX) $(CXXFLAGS) qdsp5_audplay_route_test.cpp $(QDSP5_SRC) -o qdsp5_audplay_route_test
+
 .PHONY: test clean
-test: qdsp5_smoke qdsp5_capture_test
+
+test: qdsp5_smoke qdsp5_capture_test qdsp5_audplay_route_test
 	./qdsp5_smoke
 	@echo "--- Q0.1 capture parser ---"
 	./qdsp5_capture_test
+	@echo "--- Q1.2a AUDPLAY routing boundary (no decode claim) ---"
+	./qdsp5_audplay_route_test
 
 clean:
-	rm -f qdsp5_smoke qdsp5_out.wav qdsp5_capture_test
+	rm -f qdsp5_smoke qdsp5_out.wav qdsp5_capture_test qdsp5_audplay_route_test
 
 # Fuzzing dirigido do parser (Q0.1 hardening). Requer clang++ (libFuzzer+ASAN).
 # NÃO faz parte de 'test' default p/ não exigir clang. Uso: make -f Makefile.qdsp5 fuzz

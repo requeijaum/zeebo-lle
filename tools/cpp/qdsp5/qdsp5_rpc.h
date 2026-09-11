@@ -93,6 +93,41 @@ constexpr QueueDef kQueues[] = {
     { Engine::Audrec,  "UPAUDRECCMDQUEUE",                0 },
 };
 
+// ---- QDSP5 command-queue identity (VERIFIED task<->queue association) ------
+// The destination command queue is what selects the DSP task. This association
+// is PRIMARY-SOURCE (assertion strings `cmd_size <= QDSP_<task>_<queue>...`;
+// notes/qdsp5_proc_ids.md §3, notes/qdsp5_program_ids.md). AUDPLAY0-4 bitstream
+// queues drive the real per-voice decoder tasks a game feeds (this is the path
+// Zeetris MP3 uses); AUDPP queues are the downstream post-processor/host-PCM.
+//
+// HONEST LIMIT: the byte offset inside the ADSP_RTOS app_to_modem_command
+// sub-payload that carries this queue id is UNVERIFIED (Q0.1-pending, needs one
+// captured guest packet). So this is the routing SEAM: callers pass a resolved
+// QueueId; we do NOT parse a queue id out of a guessed payload layout.
+enum class QueueId : u32 {
+    Unknown = 0,
+    UpAudPlay0BitstreamCtrl,
+    UpAudPlay1BitstreamCtrl,
+    UpAudPlay2BitstreamCtrl,
+    UpAudPlay3BitstreamCtrl,
+    UpAudPlay4BitstreamCtrl,
+    UpAudPpCmd1,
+    UpAudPpCmd2,
+    UpAudPpCmd3,
+    UpAudRecBitstream,
+    UpAudRecCmd,
+    UpJpegActionCmd,
+    UpJpegCfgCmd,
+    VfeCommand,
+    VfeCommandScale,
+    VfeCommandTable,
+    UpVocProc,
+};
+
+// Maps a VERIFIED queue id to its DSP task engine. Returns Unknown for anything
+// unmapped — no guessing.
+Engine classify_queue(QueueId q);
+
 // ---- ONCRPC CALL header (mirror of oncrpc_packet_header in smd_bridge) -----
 // program/procedure marcados UNVERIFIED: hardcoded no código atual, sem dump.
 #pragma pack(push,1)
