@@ -3019,6 +3019,10 @@ private:
                         // thread ENTRE fatias (fora de hook — handler de escalonamento).
                         {
                             u32 nsid = sys->thread_table_.thread_space(next_tid);
+                            if (std::getenv("ZEEBO_QW99"))
+                                fprintf(stderr,"[QW99/IPC-sched] cur=0x%x next=0x%x nsid=0x%x has=%d spaces=%zu\n",
+                                    cur_tid, next_tid, nsid, (int)sys->space_manager_.has_space(nsid),
+                                    sys->space_manager_.space_count());
                             if (nsid && sys->space_manager_.has_space(nsid))
                                 sys->space_manager_.activate(uc, nsid);
                         }
@@ -3207,6 +3211,10 @@ private:
                         u64 size = it.fpage.size_bytes();
                         u64 phys = it.phys.phys_base();
                         u8* hp   = sys->apps_pool_.host_of(phys);
+                        if (std::getenv("ZEEBO_QW99") && (va <= 0xb04151a4ull && 0xb04151a4ull < va+size))
+                            fprintf(stderr,"[QW99/MC-record] sid=0x%x va=0x%llx size=0x%llx phys=0x%llx hp=%p contains=%d COVERS_b04151a4\n",
+                                sid,(unsigned long long)va,(unsigned long long)size,(unsigned long long)phys,(void*)hp,
+                                (int)sys->apps_pool_.contains(phys,size));
                         if (!hp || !sys->apps_pool_.contains(phys, size)) continue;
                         int prot = zeebo_l4::fpage_to_uc_prot(it.fpage);
                         sys->space_manager_.record(sid, va, size, prot, hp);
@@ -3463,6 +3471,45 @@ private:
         }
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
+
+        // [QW99] Instrumentação read-only da entrada do scatterload em 0xb0400000.
+        // Loga TID, SID ativo, SP/LR, offset físico de backing e hash de 252B em
+        // 0xb04151a4, a cada entrada em 0xb0400000. Gated por ZEEBO_QW99.
+        static const bool qw99_on = std::getenv("ZEEBO_QW99") != nullptr;
+        if (qw99_on && (uint32_t)ad == 0xb0400000) {
+            static uint64_t q_entries = 0;
+            ++q_entries;
+            u32 sp=0, lr=0;
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 tid = sys->thread_table_.current_tid();
+            u32 tsid = sys->thread_table_.thread_space(tid);
+            u32 asid = sys->space_manager_.active_sid();
+            bool has = sys->space_manager_.has_space(tsid);
+            // backing físico de 0xb04151a4 na pool APPS (host_of via VA identidade? não;
+            // usamos a regiao registrada no SpaceManager para o SID da thread).
+            u8 buf[252]={0};
+            uc_mem_read(uc, 0xb04151a4, buf, sizeof(buf));
+            // FNV-1a 32-bit hash (determinístico, sem deps)
+            u32 h=2166136261u; for (size_t i=0;i<sizeof(buf);i++){h^=buf[i];h*=16777619u;}
+            // offset de backing: procura a regiao do SID cobrindo 0xb0415000
+            long backoff = -1; const void* hostp=nullptr;
+            if (auto* regs = sys->space_manager_.regions_of(tsid)) {
+                for (auto& r : *regs) {
+                    if (0xb04151a4ull >= r.va && 0xb04151a4ull < r.va + r.size) {
+                        backoff = (long)(0xb04151a4ull - r.va);
+                        hostp = r.host ? (r.host + backoff) : nullptr;
+                        break;
+                    }
+                }
+            }
+            fprintf(stderr,
+                "[QW99] entry#%llu tid=0x%x tsid=0x%x active_sid=0x%x has_space=%d sp=0x%08x lr=0x%08x "
+                "b04151a4:off=%ld host=%p fnv=0x%08x b0=%02x%02x%02x%02x sm_spaces=%zu\n",
+                (unsigned long long)q_entries, tid, tsid, asid, (int)has, sp, lr,
+                backoff, hostp, h, buf[0],buf[1],buf[2],buf[3],
+                sys->space_manager_.space_count());
+        }
 
         // Traco de execucao do Core0. Ambos os backends passam por este hook,
         // entao gravar aqui produz trajetorias comparaveis instrucao a
