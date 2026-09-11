@@ -2359,15 +2359,20 @@ integrados com controles negativos. **5 e 6 foram reabertos pela auditoria**: mo
 isolados não satisfazem o caminho real do firmware. Os números deste painel são os do
 backlog de dez bugs, não as subseções de `AUDIT_2026-09-10.md`.
 
-- [ ] Bug 5: ligar leituras/escritas MMIO do guest aos modelos VIC/GPT. Escritas em
-  ENABLE/MATCH/INTENABLE/ACK/EOI devem alterar o modelo; RAM plana não conta.
+- [ ] Bug 5: ligar leituras/escritas MMIO do guest **em `zeebo_lle_main`** aos modelos
+  VIC/GPT por um decoder compartilhado com os testes. Escritas em ENABLE/MATCH/
+  INTENABLE/ACK/EOI devem alterar o modelo; ligação apenas em `zeebo_dual_core` ou RAM
+  plana não conta. Resolver por evidência primária a divergência de base GPT/CSR
+  (`0xc0100000` versus `0xc5000000`) antes de declarar o mapa correto.
 - [ ] Modelar `pending`, `enabled` e `in_service`; não redeliver a mesma IRQ antes do
   EOI nem sobrescrever `LR_irq/SPSR_irq`.
 - [ ] Substituir `ticks = instruções Core0 + instruções Core1` por tempo virtual
   determinístico independente dos dois cores, calibrado contra polling observado.
 - [ ] Bug 6: resolver a colisão `PCOM_CMD_RESET_MODEM == PCOM_CMD_DONE == 1` usando
   estado shadow real (`pending_cmd/has_pending`) ou estado equivalente. O Core1 deve
-  ser o único produtor da conclusão.
+  ser o único produtor da conclusão, **fora de `UC_HOOK_MEM_WRITE` e após o STR guest**;
+  escrever DONE dentro do hook antes da store original permite que o comando o
+  sobrescreva e não fecha o gate.
 - [ ] Criar testes de integração pelo caminho de produção: escrita guest MMIO → GPT →
   VIC → exceção → ACK/EOI; e Core0 escreve RESET_MODEM → SMEM → Core1 atende → Core0
   observa DONE/status.
