@@ -244,6 +244,16 @@ test_l4_space_switch: test_l4_space_switch.cpp zeebo_l4_mmu.h
 	  echo "FAIL: flat-mapping (buggy) unexpectedly passed"; exit 1; \
 	else echo "OK: flat-mapping (buggy) fails as expected (RED reproduced)"; fi
 
+# QW99: OKL4 base<-extension PD domain/window sharing. Positivo: o espaco de
+# extensao resolve a pagina-fonte que so existe no espaco base (pager). Negativo
+# (buggy): sem link_base o mapeamento isolado FALHA (RED reproduzido).
+test_l4_base_ext_share: test_l4_base_ext_share.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_base_ext_share.cpp -lunicorn
+	./test_l4_base_ext_share
+	@if ./test_l4_base_ext_share buggy >/dev/null 2>&1; then \
+	  echo "FAIL: unlinked (buggy) unexpectedly passed"; exit 1; \
+	else echo "OK: unlinked (buggy) fails as expected (RED reproduced)"; fi
+
 # Bug 1/2: SID vem do SpaceSpecifier(r1) do ThreadControl, NÃO do r5 do ExRegs
 # (UserDefHandle); + round-trip do contexto ARM completo via helper central.
 # Negativo (buggy): SID lido de r5 (UserDefHandle) FALHA.
