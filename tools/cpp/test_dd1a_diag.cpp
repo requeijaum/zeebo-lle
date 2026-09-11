@@ -297,6 +297,22 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, ADDREF_STUB, addref_code, sizeof(addref_code));
             uc_mem_write(uc2, vtbl, &ADDREF_STUB, 4); // vtbl[0] = ADDREF_STUB
 
+            // Slot 2 de IShell: CreateInstance(this=r0, clsid=r1, ppObj=r2)
+            // Chamado em 0x1200058c para instanciar AEECLSID_DISPLAY (0x01001001).
+            // Stub de IShell::CreateInstance em SCRATCH + 0x180:
+            // Grava objeto de display simulado (SCRATCH + 0x500) em *ppObj (*r2) e retorna 0 (AEE_SUCCESS)
+            const u32 DISPLAY_OBJ = SCRATCH + 0x500;
+            const u32 SHELL_CREATE_STUB = SCRATCH + 0x180;
+            u32 shell_create_code[4] = {
+                0xe59f3004, // ldr r3, [pc, #4]  -> DISPLAY_OBJ
+                0xe5823000, // str r3, [r2]      -> *ppObj = DISPLAY_OBJ
+                0xe3a00000, // mov r0, #0        -> return AEE_SUCCESS
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, SHELL_CREATE_STUB, shell_create_code, sizeof(shell_create_code));
+            uc_mem_write(uc2, SHELL_CREATE_STUB + 16, &DISPLAY_OBJ, 4);
+            uc_mem_write(uc2, vtbl + 8, &SHELL_CREATE_STUB, 4); // vtbl[2] = SHELL_CREATE_STUB
+
             u32 ppObj = SCRATCH + 0x200;
 
             // Suprir o ponteiro de static-base (AEEHelperFuncs) em moduleBase - 4 (0x11fffffc)
@@ -395,13 +411,15 @@ int main(int argc, char** argv) {
                          DD_CLSID, r_match.ran ? "SIM" : "nao", r_match.entered_module ? "SIM" : "nao",
                          r_match.first_pc, r_match.last_pc, (unsigned long long)r_match.instructions,
                          fault_label(r_match.fault), r_match.fault_va);
+
             // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
-            // avança através do construtor de applet e atinge 96 instruções executadas,
-            // parando em 0x1200058c (bx r3 = IShell::CreateInstance slot 2) onde busca o primeiro serviço do shell!
+            // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), e avança
+            // até a instrução 174 no módulo guest!
             assert(r_match.ran && r_match.entered_module);
-            assert(r_match.instructions == 96);
-            assert(r_match.last_pc == 0x1200058c);
+            assert(r_match.instructions == 174);
+            assert(r_match.last_pc == 0x1201a68c);
             assert(r_match.fault == FAULT_FETCH_UNMAPPED);
+            assert(r_match.fault_va == 0x00000000);
 
             uc_close(uc2);
         }

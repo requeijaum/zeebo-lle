@@ -2448,7 +2448,9 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   rejeitando outras classes e despachando para o construtor do applet em `0x12000490`.
   Execução assistida em `test_dd1a_diag` comprovou a rejeição com r0=1 para classes divergentes
   e a entrada com 96 instruções para `0x0102f789`, alcançando o primeiro pedido de serviço
-  do shell em `0x1200058c: bx r3` (slot 2 de `pIShell->vtable` = `IShell::CreateInstance`).
+  do shell em `0x1200058c: bx r3` (slot 2 de `pIShell->vtable` = `IShell::CreateInstance` para
+  `AEECLSID_DISPLAY = 0x01001001`). Suprido o mock de `IShell::CreateInstance`, o construtor do
+  applet avançou até 174 instruções no guest, registrando seu display e avançando a inicialização.
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
