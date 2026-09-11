@@ -3619,6 +3619,75 @@ private:
             }
         }
 
+        // [SHELL-SEM] Instrumentação SEMÂNTICA read-only, gated por ZEEBO_SHELL_SEM.
+        // O [SHELL-ANCHOR] acima prova apenas que o Core0 EXECUTOU o VA de dispatch
+        // e imprime os registradores vivos — mas r0=0xb0d02000 num AEECShell dispatch
+        // NÃO prova que r0 é o pIShell. Uma pilha/registrador só vira "objeto IShell
+        // vivo" quando: (a) r0 aponta para memória mapeada e legível; (b) word[0]
+        // desse objeto (o ponteiro de vtable) aponta para memória mapeada e legível;
+        // (c) as primeiras entradas dessa vtable são VAs de código plausíveis (região
+        // APPS/BREW), i.e. um vtable real, não lixo; e (d) o caminho de retorno (LR)
+        // aponta para o site de chamada que consome o ppOut de ISHELL_CreateInstance.
+        // Este bloco LÊ (uc_mem_read) essas memórias e as classifica — nunca escreve
+        // PC/registrador/ponteiro/memória do guest. Ausente a env, é inerte.
+        static const bool shell_sem_on = std::getenv("ZEEBO_SHELL_SEM") != nullptr;
+        if (shell_sem_on && sys->brew_) {
+            const u32 here = (u32)ad;
+            const u32 ish  = sys->brew_->symbols().ishell_create_va;
+            const u32 aees = sys->brew_->symbols().aeecshell_dispatch_va;
+            if ((ish && here == ish) || here == aees) {
+                const bool is_create = (ish && here == ish);
+                u32 r0=0,r1=0,r2=0,r3=0,sp=0,lr=0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                // (a) r0 legível?  (b) vtable = *r0 legível?  (c) vtable[0..3] em código?
+                auto mem_ok = [&](u32 va, u32* out)->bool {
+                    if (va == 0) return false;
+                    u32 tmp = 0;
+                    return uc_mem_read(uc, va, &tmp, 4) == UC_ERR_OK && (*out = tmp, true);
+                };
+                auto looks_code = [](u32 va)->bool {
+                    // APPS/BREW user-space code region observada neste firmware.
+                    return va >= 0x10000000u && va < 0x12000000u;
+                };
+                u32 vptr = 0; bool r0_read = mem_ok(r0, &vptr);
+                u32 v0=0,v1=0,v2=0,v3=0;
+                bool vt_read = r0_read && mem_ok(vptr, &v0);
+                if (vt_read) { mem_ok(vptr+4,&v1); mem_ok(vptr+8,&v2); mem_ok(vptr+12,&v3); }
+                int code_slots = (looks_code(v0)?1:0)+(looks_code(v1)?1:0)+
+                                 (looks_code(v2)?1:0)+(looks_code(v3)?1:0);
+                // Veredito semântico: só é "IShell vivo" se r0 e vtable são legíveis
+                // E a maioria dos 4 primeiros slots aponta para código. Caso contrário
+                // é NÃO-SEMÂNTICO (a mera presença de r0 no dispatch não prova nada).
+                const bool is_live_ishell = r0_read && vt_read && code_slots >= 2;
+                fprintf(stderr,
+                    "[SHELL-SEM] site=%s pc=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x "
+                    "r3=0x%08x sp=0x%08x lr=0x%08x r0_read=%d vptr=0x%08x vt_read=%d "
+                    "vt[0..3]=0x%08x,0x%08x,0x%08x,0x%08x code_slots=%d lr_code=%d "
+                    "VERDICT=%s insns=%llu\n",
+                    is_create ? "ISHELL_CreateInstance" : "AEECShell_dispatch",
+                    here, r0, r1, r2, r3, sp, lr, r0_read?1:0, vptr, vt_read?1:0,
+                    v0, v1, v2, v3, code_slots, looks_code(lr)?1:0,
+                    is_live_ishell ? "LIVE_ISHELL" : "NON_SEMANTIC",
+                    (unsigned long long)sys->core0_.insns);
+                // Para ISHELL_CreateInstance, r2=ppOut é o ponteiro de saída do objeto
+                // criado: o caminho de retorno (LR) grava *r2. Lê (read-only) *r2 antes
+                // do retorno para expor o slot que o site de chamada vai consumir.
+                if (is_create) {
+                    u32 ppout_slot = 0; bool ppout_read = mem_ok(r2, &ppout_slot);
+                    fprintf(stderr,
+                        "[SHELL-SEM]   CreateInstance clsid=0x%08x ppOut=0x%08x "
+                        "ppOut_read=%d *ppOut(pre)=0x%08x return_to=0x%08x\n",
+                        r1, r2, ppout_read?1:0, ppout_slot, lr);
+                }
+                fflush(stderr);
+            }
+        }
+
         // [QW-PC14] Instrumentação read-only da fronteira PC=0x00000014 pós-scatterload.
         // Mantém um ring buffer dos últimos PCs/opcodes executados no Core0 e, na
         // PRIMEIRA vez que o PC cai na página de vetores baixos (0x00..0x1f), despeja
