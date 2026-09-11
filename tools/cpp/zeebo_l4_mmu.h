@@ -673,6 +673,21 @@ public:
 
         active_sid_ = sid;
         activated_once_ = true;
+        // [QW-ALIAS] Rastreio read-only de remapeamento que toca a página de
+        // 0xb04241a8 (VA 0xb0424000). Se activate() re-liga o backing dessa página
+        // ENTRE o ldr e o bx, o host uc_mem_read posterior verá outro conteúdo que
+        // o r1 arquitetural já capturado — provando remap-após-leitura (hipótese B).
+        if (std::getenv("ZEEBO_PC14_ALIAS")) {
+            for (const auto& tr : eff) {
+                if (0xb0424000ull >= tr.va && 0xb0424000ull < tr.va + tr.size) {
+                    fprintf(stderr, "[ALIAS/activate] sid=0x%x REMAPEOU pagina de 0xb0424000: "
+                            "va=0x%llx size=0x%llx host=%p prot=%d\n",
+                            sid, (unsigned long long)tr.va,
+                            (unsigned long long)tr.size, (void*)tr.host, tr.prot);
+                    fflush(stderr);
+                }
+            }
+        }
         return first_err;
     }
 #endif
