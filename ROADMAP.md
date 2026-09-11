@@ -2338,9 +2338,10 @@ refatoração ampla antes de mover a fronteira de boot.
 - [ ] Em `tools/cpp/Makefile`, separar `check-fast`, `check-firmware` e `check-full`; o
   gate de firmware deve **falhar**, não virar verde, quando a NAND necessária estiver
   ausente. Exibir totais PASS/FAIL/SKIP e derivar build/check/clean de listas únicas.
-- [ ] **DD0 — gate honesto de módulo:** arquivo inválido falha antes da execução;
+- [x] **DD0 — gate honesto de módulo:** arquivo inválido falha antes da execução;
   `test-roms-external` deixa de emitir PASS de jogo; Reksio/DD permanecem `loaded_only`
-  até um PC pertencente ao módulo realmente executar.
+  até um PC pertencente ao módulo realmente executar. Integrado em `7045164`, com
+  mutante PASS-on-load vermelho.
 - [ ] Inventariar e encerrar worktrees/branches `agent/qw*` já integrados; nenhum
   resultado durável deve existir apenas em `/tmp`.
 - [ ] Extrair `L4KernelShim/CoreScheduler`, `PeripheralBus`, `IntercoreFabric` e remover
@@ -2394,12 +2395,13 @@ Core1 avançando por MapControl; essa contradição deve ser resolvida, não her
   backing físico e hash dos 252 bytes em `0xb04151a4`, antes/depois da ativação do SID.
   Medido em `7588e3e`: a segunda entrada usa SID `0x8000c001`, mas a página fonte foi
   registrada apenas em `0x80000100`; o decoder recebia bytes errados e o tamanho
-  underflowava. A correção causal foi integrada em `1ec165c` no item seguinte.
-- [x] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
+  underflowava. `1ec165c` demonstrou uma correção provisória, ainda sob o gate abaixo.
+- [ ] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
   registradas antes de a task receber SID; não aceitar somente LUT paralela ou teste
-  sintético. `1ec165c` implementa relação base→extensão derivada de ThreadControl e
-  remapeia o backing real: a segunda entrada passou ao hash correto `0x8c04405d`, saiu
-  de `0xb0400064..6c` e avançou até a nova fronteira `PC=0x00000014`.
+  sintético. `1ec165c` produziu avanço real e hash correto, mas a revisão encontrou
+  que o teste cobre `resolve_host()`, não `activate()`, e que inferir base diretamente
+  do Pager confunde thread ID com space ID. O item permanece aberto até um teste
+  Unicorn de `activate()` e semântica base/extensão não ambígua.
 - [x] Reestabelecer a fronteira real do Core1 com trace não filtrado e controle
   negativo; reconciliar QW49/QW59 e atualizar `notes/core1_boot_estado_real.md`.
   QW99 confirmou ~272,5M instruções e zero hits nos endereços de panic; QW49 fica
