@@ -381,6 +381,22 @@ test-zeetris-lifecycle: test_zeetris_lifecycle
 	  echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
 	else echo "OK: mutante (ABI Thumb) falha como esperado (RED reproduzido)"; fi
 
+# Zeetris IShell lifecycle: prova que o VA-0 read (0x123c1bdc) é o ARGUMENTO DE
+# CONTEXTO r0=pIShell ausente, não um import/GOT faltante; e implementa o modelo
+# mínimo fiel de interface IShell (obj->vtable) que avança a execução até o 1º
+# dispatch (ISHELL_CreateInstance, slot 2, ClassID 0x0106e415). Sem Dynarmic.
+# Sem o zeetris.mod real → SKIP (exit 77).
+test_zeetris_ishell: test_zeetris_ishell.cpp zeebo_brew_ishell.h zeebo_brew_loader.h
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_ishell.cpp -lunicorn
+
+# Gate com controles: run principal (ROM real → exit 0, ou SKIP exit 77) +
+# mutação (vtable NULL "roda limpo") que DEVE falhar (RED reproduzido).
+test-zeetris-ishell: test_zeetris_ishell
+	./test_zeetris_ishell || [ $$? -eq 77 ]
+	@if ./test_zeetris_ishell buggy >/dev/null 2>&1; then \
+	  echo "FAIL: mutante (vtable NULL) passou"; exit 1; \
+	else echo "OK: mutante (vtable NULL) falha como esperado (RED reproduzido)"; fi
+
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
 # Gate: o scanner deve prever retroativamente as 8 fronteiras que foram
 # descobertas reativamente até 0f64ffa. Exit 77 = SKIP (.mod proprietário ausente).
