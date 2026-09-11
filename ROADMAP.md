@@ -2398,12 +2398,12 @@ Core1 avançando por MapControl; essa contradição deve ser resolvida, não her
   Medido em `7588e3e`: a segunda entrada usa SID `0x8000c001`, mas a página fonte foi
   registrada apenas em `0x80000100`; o decoder recebia bytes errados e o tamanho
   underflowava. `1ec165c` demonstrou uma correção provisória, ainda sob o gate abaixo.
-- [ ] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
+- [x] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
   registradas antes de a task receber SID; não aceitar somente LUT paralela ou teste
-  sintético. `1ec165c` produziu avanço real e hash correto, mas a revisão encontrou
-  que o teste cobre `resolve_host()`, não `activate()`, e que inferir base diretamente
-  do Pager confunde thread ID com space ID. O item permanece aberto até um teste
-  Unicorn de `activate()` e semântica base/extensão não ambígua.
+  sintético. `3fd982a` substitui o vínculo Pager→SID cru por Pager thread→thread_space,
+  exercita o caminho real `activate()` sob Unicorn, preserva/restaura mappings estáticos
+  entre trocas e mantém um mutante sem o vínculo em RED. O avanço real obtido por
+  `1ec165c` permanece a testemunha externa do scatterload.
 - [x] Reestabelecer a fronteira real do Core1 com trace não filtrado e controle
   negativo; reconciliar QW49/QW59 e atualizar `notes/core1_boot_estado_real.md`.
   QW99 confirmou ~272,5M instruções e zero hits nos endereços de panic; QW49 fica
