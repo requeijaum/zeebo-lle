@@ -210,7 +210,7 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Gates por pixels: `gpu_smoke`, `igl_smoke`, display, transform e bridge fazem parte de `make check`; clear `0xF800/0x001F`, textura `0x001F`, depth `0x07E0`, blend `0x8010`, bilinear `0x8410`.
 - [x] Quick wins GL QW4/QW5/QW7 (`e078422`, `9dfdc9e`): alpha-test; culling com defaults GLES CCW/`GL_BACK`; `glTexParameterx` por textura (NEAREST/LINEAR, REPEAT/CLAMP); oito depth funcs e fatores usuais de blend. Gate `gl_quickwins_smoke`: 13/13 pixels/comportamentos PASS. `glFrontFace` não foi inventado porque nenhum slot vivo foi observado; MIN_FILTER permanece estado-only até existir LOD/minificação.
 - [x] ATITC clean-room em `glCompressedTexImage2D` slot 15 (QW9, `94a449c`): RGB methods 0/1, alpha explícito/interpolado e crop 6×6; oracle independente e gate 15/15 por pixels/FNV.
-- [ ] Compatibilidade restante: clipping homogêneo do near-plane e interpolação perspectiva (QW10/QW11 em execução), além de `GL_OES_draw_texture`.
+- [x] Compatibilidade restante: clipping homogêneo do near-plane e interpolação perspectiva (QW10/QW11 em `gl_clip_smoke.cpp`, testado no gate GPU), além de `GL_OES_draw_texture`.
 - [ ] Caminhos guest reais: observar o retorno do `eglGetProcAddress` do firmware e registrar apenas o VA vivo; resolver `IEGLSurfaceManip` somente após QueryInterface/objeto vivo. Não usar trampolim, string ou vtable sintética do Zeebx.
 
 ### Fase 10: Subsistema QDSP5 (Áudio e Multimídia) — acoplamento ONCRPC e streaming
