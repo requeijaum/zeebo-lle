@@ -2277,3 +2277,39 @@ travado — esta' fazendo setup de espaco de enderecamento. A ultima linha do co
 `pc >= 0xf0000000 && pc < 0xf0020000` ANTES de contar — poder zero contra a
 hipotese "o hook e' cego fora da faixa". Trocado por `hi[pc >> 28]` cobrindo os
 16 nibbles + janela fina. Foi o que revelou o trafego real.
+
+### QW97-QW98 — Auditoria cruzada Zeebx/LLE e primeiras correções **[VERIFICADO]**
+
+Auditoria integral das bases atuais: LLE (183 fontes, 30.473 linhas C/C++/Python)
+e Zeebx `64844bd` (47 fontes, 30.627 linhas Rust/Python). Zeebx está sincronizado
+com `origin/master`; `cargo test --all-targets` passou **273/273** testes (4
+ignorados). É GPL-2.0-only: usar apenas contratos observáveis e fatos de RE; não
+copiar implementação para o LLE.
+
+**Achados críticos confirmados no LLE:**
+
+1. `handle_map_control` ignora `space_id`; o único address space causa a colisão
+   CRT QW88. O contexto de thread também perde R0-R12/CPSR e não guarda o SID.
+2. A SMEM era mapeada duas vezes com backing anônimo independente; nenhum protocolo
+   Core0↔Core1 poderia convergir. Corrigido em QW97 com um único buffer host-backed
+   mapeado por `uc_mem_map_ptr` nos dois engines e teste bidirecional real.
+3. O parser MIF procurava qualquer `0x010xxxxx` byte a byte, aceitava falsos
+   positivos e rejeitava ClassIDs fora dessa faixa. Corrigido em QW98: magic
+   `0x0011`, tabela `n+1` de limites, seção de applet de 20 bytes e campos-zero
+   estruturais; teste inclui DD `0x0102f789`, ClassID fora da faixa, decoy,
+   não-applet e truncamento.
+4. O loader ainda aceita apenas ELF; Double Dragon é MOD ARM cru. O dispatch ainda
+   chama o handler fixo da Z-Wheel `0x10532344`; isso continua barrado como evidência.
+5. VIC/GPT ainda são RAM/polling sem entrada de exceção IRQ; ProcComm ainda dá ACK
+   sintético. Corrigir após isolamento de espaços/contextos.
+6. Bugs adicionais: revogação `rwx=0` vira leitura em `zeebo_l4_mmu.h`; writes JIT
+   de 8/16 bits perdem store unmapped (não atacar enquanto o foco for interpretador);
+   payload SMD >0x380 colide com o queue node; loader ELF/relocator requer hardening.
+
+**Otimização QW97:** `getenv()` saiu do hook por-instrução dos dois cores e passou a
+ser cacheado uma vez. Em três execuções de 3 s, a mediana subiu de 710 para 1000
+slices (**+40,8%**); no gate longo de 45 s, Core0 chegou a **187.244.226** instruções
+contra mediana anterior de **157.410.000** (**+19,0%**), interpretador puro, exit 0.
+O próximo hotspot medido é a releitura de opcode por instrução no slide-detector do
+Core1; deve ser tornado opt-in ou migrado para hook de bloco sem perder o controle
+positivo do detector.

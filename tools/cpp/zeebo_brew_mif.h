@@ -1,16 +1,13 @@
 #pragma once
-// zeebo_brew_mif.h — Parser determinístico de MIF (Module Information File) do BREW 4.0.2
-//
-// Extrai metadados do applet (AEECLSID, tipo de módulo, flags de privilégio,
-// referências de arquivo .mod/.bar) a partir dos bytes estruturados do MIF.
-// Clean-room: baseado na especificação de registros do BREW SDK e metadados de ClassDB.
+// zeebo_brew_mif.h — parser estrutural de MIF do BREW 4.0.2.
+// Clean-room: contrato derivado da estrutura observável dos arquivos MIF.
 
-#include <cstdint>
-#include <vector>
-#include <string>
-#include <cstring>
-#include <cstdio>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <vector>
 
 namespace zeebo::brew {
 
@@ -25,39 +22,66 @@ class MifParser {
 public:
     static MifAppletInfo parse(const uint8_t* data, size_t size) {
         MifAppletInfo info;
-        if (!data || size < 32) return info;
+        if (!data || size < kHeaderSize || read16(data) != kMagic) return info;
 
-        // O MIF BREW inicia com uma tabela de cabeçalho e ponteiros de blocos.
-        // Varre registros em busca de CLSIDs válidos (faixas 0x01000000 - 0x010fffff ou registradas)
-        for (size_t i = 0; i + 4 <= size; ++i) {
-            uint32_t val = 0;
-            std::memcpy(&val, data + i, 4);
-            // Identifica padrões de CLSID de aplicações BREW / Zeebo (ex: 0x0100xxxx, 0x0102xxxx, 0x0107xxxx)
-            if ((val & 0xff000000) == 0x01000000 && (val & 0x00ff0000) <= 0x000f0000 && val != 0x01000000) {
-                info.clsid = val;
-                info.valid = true;
-                break;
-            }
+        const uint32_t table_offset = read32(data + 0x10);
+        const uint32_t section_count = read32(data + 0x14);
+        if (section_count == 0 || section_count > (size / sizeof(uint32_t))) return info;
+
+        const size_t bounds_count = static_cast<size_t>(section_count) + 1;
+        if (table_offset > size || bounds_count > (size - table_offset) / sizeof(uint32_t)) {
+            return info;
         }
 
-        // Tenta localizar nomes de módulo (.mod) nas strings ASCII
-        for (size_t i = 0; i + 4 < size; ++i) {
-            if (std::memcmp(data + i, ".mod", 4) == 0) {
-                // Retrocede até o início da string nula ou caractere não imprimível
-                size_t start = i;
-                while (start > 0 && data[start - 1] >= 0x20 && data[start - 1] <= 0x7e) {
-                    --start;
+        uint32_t previous = read32(data + table_offset);
+        if (previous > size) return info;
+        for (uint32_t i = 0; i < section_count; ++i) {
+            const uint32_t next = read32(data + table_offset + (static_cast<size_t>(i) + 1) * 4);
+            if (next < previous || next > size) return MifAppletInfo{};
+
+            if (next - previous == kAppletRecordSize &&
+                read32(data + previous + 4) == 0 &&
+                read32(data + previous + 12) == 0) {
+                const uint32_t clsid = read32(data + previous);
+                if (clsid != 0 && !info.valid) {
+                    info.clsid = clsid;
+                    info.valid = true;
                 }
-                info.mod_file = std::string(reinterpret_cast<const char*>(data + start), (i + 4) - start);
-                break;
             }
+            previous = next;
         }
 
+        // Module filename is a separate string field in observed files. Keep the
+        // extraction conservative and bounded; it does not establish validity.
+        for (size_t i = 0; i + 4 <= size; ++i) {
+            if (std::memcmp(data + i, ".mod", 4) != 0) continue;
+            size_t start = i;
+            while (start > 0 && data[start - 1] >= 0x20 && data[start - 1] <= 0x7e) --start;
+            info.mod_file.assign(reinterpret_cast<const char*>(data + start), i + 4 - start);
+            break;
+        }
         return info;
     }
 
     static MifAppletInfo parse(const std::vector<uint8_t>& data) {
         return parse(data.data(), data.size());
+    }
+
+private:
+    static constexpr uint16_t kMagic = 0x0011;
+    static constexpr size_t kHeaderSize = 0x20;
+    static constexpr uint32_t kAppletRecordSize = 20;
+
+    static uint16_t read16(const uint8_t* p) {
+        return static_cast<uint16_t>(p[0]) |
+               (static_cast<uint16_t>(p[1]) << 8);
+    }
+
+    static uint32_t read32(const uint8_t* p) {
+        return static_cast<uint32_t>(p[0]) |
+               (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) |
+               (static_cast<uint32_t>(p[3]) << 24);
     }
 };
 

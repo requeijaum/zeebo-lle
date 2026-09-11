@@ -49,6 +49,7 @@
 #include "gpu/igl_guest_bridge.h"
 #include "zeebo_brew_loader.h"
 #include "zeebo_efs2_fs.h"
+#include "zeebo_shared_memory.h"
 #include "zeebo_cli_paths.h"
 #include "zeebo_dynarmic_core.h"
 
@@ -1271,7 +1272,7 @@ public:
         core1_state_ = &core1_;
 
         // 5. Build Shared Bus Fabric & Peripherals
-        setup_memory_maps();
+        if (!setup_memory_maps()) return false;
 
         // 6. Load APPS and AMSS Firmwares via Hardware DMOV DMA from NAND
         if (!load_apps_dmov(nand_path, apps_path)) return false;
@@ -2212,19 +2213,23 @@ public:
     }
 
 private:
-    void setup_memory_maps() {
-        // Shared SMEM 2MB
-        uc_mem_map(core0_.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
-        uc_mem_map(core1_.uc, SMEM_BASE, SMEM_SIZE, UC_PROT_ALL);
+    bool setup_memory_maps() {
+        // SMEM é RAM física compartilhada: os dois cores devem observar os
+        // mesmos bytes, não duas regiões anônimas independentes.
+        uc_err smem_err = zeebo::map_shared_region_pair(
+            core0_.uc, core1_.uc, SMEM_BASE, SMEM_SIZE, smem_mem_);
+        if (smem_err != UC_ERR_OK) {
+            fprintf(stderr, "[Fatal] shared SMEM map failed: %s\n", uc_strerror(smem_err));
+            return false;
+        }
 
-        // Initialize ProcComm and SMSM in SMEM
+        // Initialize ProcComm and SMSM in the single shared backing.
         std::vector<u8> smem_init(0x1000, 0);
         u32 ready = 1; // PCOM_READY
         memcpy(smem_init.data() + 0x14, &ready, 4); // MDM_STATUS
         u32 apps_state = 0x0000002b; // SMSM_INIT | SMSM_OSENTERED | SMSM_SMDINIT | SMSM_RPCINIT
         memcpy(smem_init.data() + 0x100, &apps_state, 4);
         uc_mem_write(core0_.uc, SMEM_BASE, smem_init.data(), smem_init.size());
-        uc_mem_write(core1_.uc, SMEM_BASE, smem_init.data(), smem_init.size());
 
         // Inter-core Doorbell MSM_CSR (0xC0100000)
         uc_mem_map(core0_.uc, MSM_CSR_BASE, MSM_CSR_SIZE, UC_PROT_ALL);
@@ -2343,6 +2348,7 @@ private:
         uc_mem_write(core0_.uc, 0xff000ff0, &initial_utcb, 4);
         u32 dummy_utcb_hdr = 0x80000100;
         uc_mem_write(core0_.uc, 0xdff00000, &dummy_utcb_hdr, 4);
+        return true;
     }
 
     // KIP (Kernel Interface Page) para o OKL4 / Iguana
@@ -3206,6 +3212,25 @@ private:
     }
 
     static void c0_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
+        // [QW88] Cacheia a flag: este hook executa uma vez por instrução.
+        static const bool table_debug_enabled = std::getenv("ZEEBO_TBL_DBG") != nullptr;
+        if (table_debug_enabled && (uint32_t)ad >= 0xb040001c && (uint32_t)ad <= 0xb0400034) {
+            static uint64_t step = 0;
+            if ((uint32_t)ad == 0xb0400024) { // ldm sl!, {r0,r1,r2,r3}
+                u32 sl=0, fp=0, sp=0;
+                uc_reg_read(uc, UC_ARM_REG_R10, &sl);
+                uc_reg_read(uc, UC_ARM_REG_R11, &fp);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                u32 ent[4] = {0};
+                uc_mem_read(uc, sl, ent, 16);
+                fprintf(stderr, "[QW88] step=%llu sl=0x%08x fp=0x%08x sp=0x%08x -> ent: src=0x%08x dst=0x%08x len=0x%x h=0x%08x\n",
+                        (unsigned long long)++step, sl, fp, sp, ent[0], ent[1], ent[2], ent[3]);
+            } else if ((uint32_t)ad == 0xb0400020) { // beq 0xb0410070
+                u32 cpsr=0; uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                bool z = (cpsr >> 30) & 1;
+                fprintf(stderr, "[QW88] beq b0410070: Z=%d (fim da tabela)\n", (int)z);
+            }
+        }
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
 
@@ -3631,11 +3656,13 @@ private:
         sys->core1_.insns++;
 
         // ── [TCB-PROBE] instrumentacao temporaria da cadeia do alocador ──────
+        // Cacheia a flag: getenv por instrução domina o custo do hook.
+        static const bool tcb_probe_enabled = std::getenv("ZEEBO_TCB_PROBE") != nullptr;
         // Cadeia provada por desassemblagem estatica:
         //   allocate_tcb(f0007008) -> bitmap_alloc(f00067e4) -> refill(f00065f0)
         //   -> pool_alloc(f0002b7c) com pool head 0xf001a508, pedido 0x1000.
         // Objetivo: ver POR QUE f0002b7c devolve 0 (=> panic thread.cc:1273).
-        if (getenv("ZEEBO_TCB_PROBE")) {
+        if (tcb_probe_enabled) {
             u32 pc = (u32)ad;
             auto rd = [&](u32 a)->u32 { u32 v=0; uc_mem_read(uc,a,&v,4); return v; };
             auto reg = [&](int r)->u32 { u32 v=0; uc_reg_read(uc,r,&v); return v; };
@@ -4039,6 +4066,7 @@ private:
     zeebo_l4::ThreadTable thread_table_;
     zeebo_l4::SystemServiceRegistry service_registry_;
     zeebo_l4::VtlbLut   vtlb_;
+    std::vector<uint8_t> smem_mem_;      // único backing físico, visível aos dois cores
     std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
     CoreState core0_;
