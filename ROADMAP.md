@@ -2486,6 +2486,18 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   Os stubs de display não escrevem pixels; DD4 continua aberto e é o próximo gargalo real.
 - [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear azul,
   padrão sintético, soma de pixels ou harness Z-Wheel não contam.
+  PREPARAÇÃO (feita): inventário estático de dependências em `tools/py/scan_deps.py`,
+  gate `make test-scan-deps`, documento `docs/dd_contract.md`. Inverte o método de
+  descoberta: em vez de achar cada slot por falha `ip=0` (uma janela por slot), varre o
+  `.mod` e emite a lista completa antes de executar. Valida-se prevendo retroativamente
+  **8/8** das fronteiras de DD3; controle negativo executado (decodificação ingênua →
+  0 hits, 8 MISS, gate RED).
+  MEDIDA DA SUPERFÍCIE: 432 call-sites indiretos — 194 de vtable (45 offsets) e 238 de
+  static-base (13 offsets). O tick completo de DD3 cobre **25,3%** dos sites de vtable e
+  **16,8%** dos de static-base. Primeira vez que existe denominador.
+  PRÓXIMO ALVO indicado pelo dado: static-base `+0xc0` (**138 call-sites**, maior
+  consumidor isolado do binário) e `+0x6c` (32 sites) — juntos 71% dos sites de
+  static-base, ambos ainda não alcançados porque o tick retorna antes.
 - [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
 - [ ] **DD6 — áudio e jogabilidade:** bloqueado até liberação explícita do freeze de
   `tools/cpp/qdsp5/`. Depois, provar PCM originado pelo guest e sessão de cinco minutos
