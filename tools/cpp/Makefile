@@ -427,6 +427,26 @@ test-zeetris-shell-semantics: test_zeetris_shell_semantics zeebo_lle_main
 	  echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao prova shell vivo)"; fi
 
+# CALL-PROVENANCE gate: prova ESTATICAMENTE (bytes reais do APPS.bin) que o
+# anchor 0x10c874f4 rotulado "AEECShell_dispatch" e' na verdade um instalador de
+# env do bootstrap APPS/AMSS (chamada direta absoluta cujo retorno ajusta o sp;
+# callee THUMB folha que guarda o env num global e retorna constante), NAO um
+# dispatch BREW por vtable — e que o simbolo ISHELL_CreateInstance (0x105c7fb4) e'
+# uma string rodata. Read-only; nunca inicializa/muda o guest. Exige o APPS.bin
+# real; ausente -> SKIP (77). Mutante ("buggy") afirma ser dispatch BREW e falha.
+APPS_BIN := ../../nand/1.1.2_APPS.bin
+
+test_zeetris_shell_provenance: test_zeetris_shell_provenance.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_provenance.cpp
+
+test-zeetris-shell-provenance: test_zeetris_shell_provenance
+	@if [ ! -s "$(APPS_BIN)" ]; then \
+	  echo "OK: APPS.bin real ausente ($(APPS_BIN)) — SKIP (77) esperado"; fi
+	./test_zeetris_shell_provenance || [ $$? -eq 77 ]
+	@if ./test_zeetris_shell_provenance buggy >/dev/null 2>&1; then \
+	  echo "FAIL: mutante (AMSS_BOOTSTRAP tratado como dispatch BREW) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (bootstrap nao e' dispatch BREW)"; fi
+
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
 # Gate: o scanner deve prever retroativamente as 8 fronteiras que foram
 # descobertas reativamente até 0f64ffa. Exit 77 = SKIP (.mod proprietário ausente).
@@ -830,12 +850,12 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance *.o
 	rm -rf testkit/build
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell
+.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
