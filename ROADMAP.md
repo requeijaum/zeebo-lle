@@ -2439,8 +2439,10 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   localizadas: ISHELL_CreateInstance @ `0x105c7fb4`, AEEAppletNew @ `0x105322f2`);
   obter IShell vivo, aplicar RW/ZI/relocações/imports/GOT e provar
   `CreateInstance(0x0102F789) → objeto → HandleEvent`. Probe assistido em `test_dd1a_diag`
-  provou execução completa do `AEEMod_Load` (46 instruções reais com static_base `AEEHelperFuncs`
-  suprido em `LB-4` e mock de MALLOC @ `+0x68`, retornando limpo em `0x12000030: bx lr`).
+  provou execução completa do `AEEMod_Load` (73 instruções reais com static_base `AEEHelperFuncs`
+  suprido em `LB-4`, mock de MALLOC @ `+0x68` e `pIShell->AddRef`, instanciando a vtable
+  do IModule com AddRef=`0x12002064`, Release=`0x120020ac`, CreateInstance=`0x12002078`,
+  FreeResources=`0x120020a8`, retornando limpo em `0x12000030: bx lr` com `r0=0`).
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.

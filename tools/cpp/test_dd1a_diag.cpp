@@ -282,6 +282,21 @@ int main(int argc, char** argv) {
             uc_mem_map(uc2, SCRATCH, 0x10000, UC_PROT_ALL);
             u32 vtbl = SCRATCH + 0x100;
             uc_mem_write(uc2, SCRATCH, &vtbl, 4); // pIShell->vtable
+
+            // vtable de IShell: slot 0 é AddRef (ou QueryInterface). Em 0x120021e8:
+            //   ldr r0, [r6]      (r6 = pIShell -> r0 = vtable)
+            //   ldr r1, [r0]      (slot 0)
+            //   mov r0, r6        (r0 = pIShell / this)
+            //   bx r1             (chama AddRef)
+            // Stub trivial para AddRef em SCRATCH + 0x150: mov r0, #1; bx lr
+            const u32 ADDREF_STUB = SCRATCH + 0x150;
+            u32 addref_code[2] = {
+                0xe3a00001, // mov r0, #1
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, ADDREF_STUB, addref_code, sizeof(addref_code));
+            uc_mem_write(uc2, vtbl, &ADDREF_STUB, 4); // vtbl[0] = ADDREF_STUB
+
             u32 ppObj = SCRATCH + 0x200;
 
             // Suprir o ponteiro de static-base (AEEHelperFuncs) em moduleBase - 4 (0x11fffffc)
@@ -297,10 +312,15 @@ int main(int argc, char** argv) {
             //   ldr r0, [pc, #4]  (retorna buffer pré-alocado)
             //   bx lr
             //   .word ALLOC_BUF
+            // Stub MALLOC deve retornar ALLOC_BUF no registrador r0
+            // Stub ARM em SCRATCH + 0x2000:
+            //   ldr r0, [pc, #0]
+            //   bx lr
+            //   .word ALLOC_BUF
             const u32 MALLOC_STUB = SCRATCH + 0x2000;
             const u32 ALLOC_BUF = SCRATCH + 0x3000;
             u32 stub_code[3] = {
-                0xe59f0004, // ldr r0, [pc, #4]
+                0xe59f0000, // ldr r0, [pc, #0]
                 0xe12fff1e, // bx lr
                 ALLOC_BUF
             };
@@ -319,14 +339,39 @@ int main(int argc, char** argv) {
                          r2.first_pc, r2.last_pc, (unsigned long long)r2.instructions,
                          fault_label(r2.fault), r2.fault_va);
 
-            // Prova observável: com static_base em LB-4 e MALLOC mockado, o AEEMod_Load
-            // inicializa com sucesso a estrutura do módulo (IModule + vtable), grava o ponteiro
-            // de saída em *ppObj, e retorna limpo (0x12000030: bx lr com r0 = 0)!
-            // Total de instruções executadas no módulo: 46 (completa AEEMod_Load com sucesso).
+            // Prova observável: com static_base em LB-4, MALLOC mockado e pIShell->AddRef,
+            // o AEEMod_Load inicializa com sucesso a estrutura do módulo (IModule + vtable),
+            // grava o ponteiro de saída em *ppObj, chama AddRef em pIShell, e retorna limpo
+            // (0x12000030: bx lr com r0 = 0)!
+            // Total de instruções executadas no módulo: 73 (completa AEEMod_Load com sucesso pleno).
             assert(r2.ran && r2.entered_module);
-            assert(r2.instructions == 46);
+            assert(r2.instructions == 73);
             assert(r2.last_pc == 0x12000030);
             assert(r2.fault == FAULT_NONE);
+
+            // Prova complementar: verificar que ppObj recebeu o ponteiro do objeto alocado (ALLOC_BUF)
+            // e que r0 retornou 0 (AEE_SUCCESS)
+            u32 created_mod_obj = 0;
+            uc_mem_read(uc2, ppObj, &created_mod_obj, 4);
+            u32 r0_val = 0;
+            uc_reg_read(uc2, UC_ARM_REG_R0, &r0_val);
+            u32 mod_vtable_ptr = 0;
+            uc_mem_read(uc2, created_mod_obj, &mod_vtable_ptr, 4);
+            std::fprintf(stderr, "[DD1-runtime/probe] retorno r0=0x%08x *ppObj=0x%08x (obj[0]=0x%08x)\n",
+                         r0_val, created_mod_obj, mod_vtable_ptr);
+            assert(r0_val == 0);
+            assert(created_mod_obj == ALLOC_BUF);
+            // vtable de AEEStaticMod gerada dinamicamente no buffer do objeto (ALLOC_BUF + 0x14)
+            assert(mod_vtable_ptr == ALLOC_BUF + 0x14);
+
+            // Verificar os 4 métodos da vtable do módulo (AddRef, Release, CreateInstance, FreeResources)
+            u32 vtbl_methods[4] = {0};
+            uc_mem_read(uc2, mod_vtable_ptr, vtbl_methods, sizeof(vtbl_methods));
+            for (int i = 0; i < 4; ++i) {
+                assert(vtbl_methods[i] >= LB && vtbl_methods[i] < LB + m.size);
+            }
+            std::fprintf(stderr, "[DD1-runtime/probe] vtable IModule: AddRef=0x%08x Release=0x%08x CreateInstance=0x%08x FreeRes=0x%08x\n",
+                         vtbl_methods[0], vtbl_methods[1], vtbl_methods[2], vtbl_methods[3]);
 
             uc_close(uc2);
         }
