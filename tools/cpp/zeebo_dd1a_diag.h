@@ -65,14 +65,67 @@ inline const char* fault_label(int f) {
     }
 }
 
-// Identidade do pacote (etapa 1).
+// Derivação ESTRITA do App ID a partir do caminho real do pacote.
+struct AppIdParse {
+    bool ok     = false;
+    u32  app_id = 0;
+};
+
+// Converte `s` em u32 apenas se for uma sequência não-vazia de dígitos que cabe
+// em 32 bits (parsing estrito: nada de sinais, espaços, prefixos ou overflow).
+inline bool parse_u32_strict(const std::string& s, u32& out) {
+    if (s.empty()) return false;
+    uint64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10u + static_cast<uint64_t>(c - '0');
+        if (v > 0xFFFFFFFFull) return false;   // overflow u32
+    }
+    out = static_cast<u32>(v);
+    return true;
+}
+
+// Deriva o App ID do caminho real: diretório após ".../mod/<id>/..." OU o stem
+// do arquivo em ".../mif/<id>.mif". PROVENIÊNCIA: o identificador vem do layout
+// EFS real do pacote, não de uma constante passada pelo chamador (que tornava a
+// checagem tautológica). Retorna ok=false se o segmento não for numérico estrito.
+inline AppIdParse parse_app_id_from_path(const std::string& path) {
+    AppIdParse r;
+    // Caminho de módulo: .../mod/<id>/<arquivo>
+    size_t pm = path.find("/mod/");
+    if (pm != std::string::npos) {
+        size_t start = pm + 5;
+        size_t end = path.find('/', start);
+        std::string seg = (end == std::string::npos)
+                              ? path.substr(start)
+                              : path.substr(start, end - start);
+        r.ok = parse_u32_strict(seg, r.app_id);
+        return r;
+    }
+    // Caminho de MIF: .../mif/<id>.mif
+    size_t pf = path.find("/mif/");
+    if (pf != std::string::npos) {
+        std::string fname = path.substr(pf + 5);
+        size_t dot = fname.rfind(".mif");
+        if (dot == std::string::npos) return r;
+        r.ok = parse_u32_strict(fname.substr(0, dot), r.app_id);
+        return r;
+    }
+    return r;
+}
+
+// Identidade do pacote (etapa 1). Autoridade estrutural, corroboração diagnóstica.
 struct PackageIdentity {
-    bool app_id_ok   = false; // diretório/idx == 274754
-    u32  app_id      = 0;
-    bool clsid_ok    = false; // 0x0102F789 presente nos bytes do MIF
-    u32  clsid       = 0;
-    bool mod_size_ok = false; // ddragonz.mod == 462748 bytes
-    u32  mod_size    = 0;
+    bool app_id_ok             = false; // App ID derivado do caminho == 274754
+    u32  app_id                = 0;
+    bool clsid_ok              = false; // CLSID estrutural do MIF == 0x0102F789
+    u32  clsid                 = 0;     // CLSID do registro estrutural (MifParser)
+    bool clsid_structural      = false; // o CLSID DD veio do registro estrutural
+    bool clsid_scan_corroborates = false; // varredura crua achou os 4 bytes (diag.)
+    bool mod_size_ok           = false; // ddragonz.mod == 462748 bytes
+    u32  mod_size              = 0;
+    // Identidade só é válida por AUTORIDADE ESTRUTURAL — a varredura crua nunca
+    // decide, apenas corrobora.
     bool valid() const { return app_id_ok && clsid_ok && mod_size_ok; }
 };
 
@@ -93,26 +146,46 @@ struct FirstPcResult {
     const char* label() const { return "hybrid/assisted"; }
 };
 
-// Confirma a identidade do pacote a partir dos bytes do MIF e do tamanho do mod.
-// `app_id` é o índice do diretório (274754). Honesto: cada campo é independente.
-inline PackageIdentity validate_package(u32 app_id,
+// Confirma a identidade do pacote por AUTORIDADE ESTRUTURAL:
+//   * App ID: DERIVADO dos caminhos reais (dir mod/<id>/ e/ou mif/<id>.mif),
+//     com parsing estrito — não é mais o constante passado pelo chamador.
+//   * CLSID: extraído do REGISTRO ESTRUTURAL de applet do MIF via
+//     zeebo::brew::MifParser (NÃO por varredura cega). A varredura crua de
+//     4 bytes é apenas CORROBORAÇÃO diagnóstica, jamais autoridade.
+//   * mod_size: tamanho do ddragonz.mod.
+// Cada campo é independente e honesto.
+inline PackageIdentity validate_package(const std::string& mod_path,
+                                        const std::string& mif_path,
                                         const std::vector<u8>& mif_bytes,
                                         u64 mod_size) {
     PackageIdentity id;
-    id.app_id = app_id;
-    id.app_id_ok = (app_id == DD_APP_ID);
+
+    // App ID derivado do caminho (preferência ao dir de módulo; fallback ao MIF).
+    AppIdParse ap = parse_app_id_from_path(mod_path);
+    if (!ap.ok) ap = parse_app_id_from_path(mif_path);
+    id.app_id = ap.app_id;
+    id.app_id_ok = ap.ok && (ap.app_id == DD_APP_ID);
+
     id.mod_size = static_cast<u32>(mod_size);
     id.mod_size_ok = (mod_size == DD_MOD_SIZE);
-    // O AEECLSID autoritativo NÃO é derivável pelo heurístico genérico do
-    // MifParser (ele casa outro registro). Confirmamos a IDENTIDADE pela
-    // presença explícita de 0x0102F789 (little-endian) nos bytes do MIF —
-    // é o que a referência do laboratório fixa como CLSID do Double Dragon.
+
+    // CLSID: autoridade ESTRUTURAL (registro de applet do MIF).
+    zeebo::brew::MifAppletInfo mi =
+        zeebo::brew::MifParser::parse(mif_bytes.data(), mif_bytes.size());
+    if (mi.valid) {
+        id.clsid = mi.clsid;
+        if (mi.clsid == DD_CLSID) {
+            id.clsid_ok = true;
+            id.clsid_structural = true;
+        }
+    }
+
+    // Varredura crua: CORROBORAÇÃO diagnóstica apenas (nunca decide validade).
     const u8 le[4] = { (u8)(DD_CLSID), (u8)(DD_CLSID >> 8),
                        (u8)(DD_CLSID >> 16), (u8)(DD_CLSID >> 24) };
     for (size_t i = 0; i + 4 <= mif_bytes.size(); ++i) {
         if (std::memcmp(mif_bytes.data() + i, le, 4) == 0) {
-            id.clsid = DD_CLSID;
-            id.clsid_ok = true;
+            id.clsid_scan_corroborates = true;
             break;
         }
     }

@@ -221,7 +221,6 @@ test_applet_dispatch: test_applet_dispatch.cpp zeebo_applet_dispatch.h
 # loaded-only (PASS_ON_LOAD=1) e DEVE ficar vermelha.
 test_module_gate: test_module_gate.cpp zeebo_module_gate.h
 	$(CXX) $(CXXFLAGS) -o $@ test_module_gate.cpp
-	./test_module_gate
 
 test-module-gate: test_module_gate
 	./test_module_gate
@@ -622,7 +621,6 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a
 	./test_applet_dispatch
 	./test_applet_exec_perm
-	./test_module_gate
 	./test_brew_timer
 	./test_audio_sink
 	./test_audio_lifetime
@@ -664,7 +662,6 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
 	$(MAKE) test-proccomm
 	$(MAKE) test-proccomm-integration
 	$(MAKE) test-proccomm-production-order
-	$(MAKE) test-dd1a
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
 	./test_l4_thread_table
