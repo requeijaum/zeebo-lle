@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <vector>
 #include <chrono>
 #include <unicorn/unicorn.h>
@@ -26,6 +27,17 @@ struct ZeetrisContext {
     uint32_t display_bitblt_calls = 0;
     uint32_t uptime_ms = 100;
 
+    // IMedia tracking
+    uint32_t media_register_notify_calls = 0;
+    uint32_t media_set_param_calls = 0;
+    uint32_t media_play_calls = 0;
+    uint32_t media_notify_fn = 0;
+    uint32_t media_notify_user = 0;
+
+    // IGL (GL ES) dispatch tracking
+    uint32_t igl_calls = 0;
+    std::map<uint32_t, uint32_t> igl_slot_calls;
+
     // Framebuffer 640x480 RGB565 (inicializado em branco 0xFFFF)
     std::vector<uint16_t> framebuffer = std::vector<uint16_t>(640 * 480, 0xFFFF);
 };
@@ -42,8 +54,18 @@ public:
     static constexpr u32 GETUPTIME_VA    = 0x30002100u;
     static constexpr u32 EXTRA_OBJ_VA    = 0x60000000u;
     static constexpr u32 EXTRA_VTBL_VA   = 0x60001000u;
-    static constexpr u32 DISPLAY_OBJ_VA  = 0x60002000u;
-    static constexpr u32 DISPLAY_VTBL_VA = 0x60003000u;
+    static constexpr u32 IGL_OBJ_VA      = 0x60007000u;
+    static constexpr u32 IGL_VTBL_VA     = 0x60008000u;
+    static constexpr u32 IGL_SENTINEL_VA = 0x50001000u;
+    static constexpr u32 IGL_SLOTS       = 80u;
+    // PROVADO: no Zeebo o objeto devolvido por ISHELL_CreateInstance(0x01001001)
+    // É a interface de 80 slots (0..2 IBase + 3..79 gl*). Evidência:
+    //  (a) os 108 thunks do módulo cobrem offsets 12..316 (slots 3..79) e todos
+    //      leem o MESMO global 0x003c14c4;
+    //  (b) o jogo grava nesse global o ponteiro que recebeu de CreateInstance;
+    //  (c) o slot 7 é chamado com r0=0x4000 = GL_COLOR_BUFFER_BIT (bit de glClear).
+    static constexpr u32 DISPLAY_OBJ_VA  = IGL_OBJ_VA;
+    static constexpr u32 DISPLAY_VTBL_VA = IGL_VTBL_VA;
     static constexpr u32 BITMAP_OBJ_VA   = 0x60004000u;
     static constexpr u32 BITMAP_VTBL_VA  = 0x60005000u;
 
@@ -162,7 +184,28 @@ public:
             u32 lr = 0, zero = 0;
             uc_reg_read(uc, UC_ARM_REG_LR, &lr);
             u32 slot = (pc - 0x50000100u) / 4u;
-            std::printf("[EXTRA OBJ] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
+            if (slot == 3 && ctx) { // RegisterNotify(IMedia *po, PFNMEDIANOTIFY pfnNotify, void *pUser)
+                u32 pfnNotify = 0, pUser = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pfnNotify);
+                uc_reg_read(uc, UC_ARM_REG_R2, &pUser);
+                ctx->media_notify_fn = pfnNotify;
+                ctx->media_notify_user = pUser;
+                ctx->media_register_notify_calls++;
+                std::printf("[IMedia] RegisterNotify pfnNotify=0x%08x pUser=0x%08x (calls=%u)\n",
+                            pfnNotify, pUser, ctx->media_register_notify_calls);
+            } else if (slot == 4 && ctx) { // SetMediaParm(IMedia *po, int nParamID, int32 p1, int32 p2)
+                u32 nParamID = 0, p1 = 0, p2 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &nParamID);
+                uc_reg_read(uc, UC_ARM_REG_R2, &p1);
+                uc_reg_read(uc, UC_ARM_REG_R3, &p2);
+                ctx->media_set_param_calls++;
+                std::printf("[IMedia] SetMediaParm param=%u p1=0x%08x p2=0x%08x\n", nParamID, p1, p2);
+            } else if (slot == 6 && ctx) { // Play(IMedia *po)
+                ctx->media_play_calls++;
+                std::printf("[IMedia] Play called! (total=%u)\n", ctx->media_play_calls);
+            } else {
+                std::printf("[IMedia] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
+            }
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
         } else if (pc >= 0x50000200u && pc < 0x50000500u) {
@@ -210,6 +253,29 @@ public:
                     uc_mem_write(uc, ppBitmap, &b_obj, 4);
                 }
             }
+            uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+            uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        } else if (pc >= IGL_SENTINEL_VA && pc < IGL_SENTINEL_VA + IGL_SLOTS * 4u) {
+            // Slots 0..2 (IBase) recebem `po` em R0; slots 3..79 (gl*) NÃO —
+            // R0 é o PRIMEIRO ARGUMENTO REAL (ABI do macro IGL_glXxx).
+            u32 lr = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_reg_read(uc, UC_ARM_REG_R0, &a0);
+            uc_reg_read(uc, UC_ARM_REG_R1, &a1);
+            uc_reg_read(uc, UC_ARM_REG_R2, &a2);
+            uc_reg_read(uc, UC_ARM_REG_R3, &a3);
+            u32 slot = (pc - IGL_SENTINEL_VA) / 4u;
+            if (ctx) {
+                ctx->igl_calls++;
+                if (ctx->igl_slot_calls.find(slot) == ctx->igl_slot_calls.end())
+                    ctx->igl_slot_calls[slot] = 0;
+                ctx->igl_slot_calls[slot]++;
+                if (ctx->igl_slot_calls[slot] <= 3) {
+                    std::printf("[IGL] slot %u gl* (lr=0x%08x) a0=0x%08x a1=0x%08x "
+                                "a2=0x%08x a3=0x%08x\n", slot, lr, a0, a1, a2, a3);
+                }
+            }
+            // Slots 3..79 devolvem void; 0..2 devolvem int 0 (sucesso).
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
         } else if (pc >= 0x50000500u && pc < 0x50000600u) {
@@ -271,8 +337,10 @@ public:
         uc_mem_write(uc, LOAD_VA - 8, &sb, 4);
         uc_mem_write(uc, LOAD_VA - 4, &sb, 4);
 
-        // Inicializa ponteiro de IDisplay global (0x003c14c4 / 0x123c14c4)
-        u32 disp_ptr = DISPLAY_OBJ_VA;
+        // Global do módulo em 0x003c14c4 aponta para o objeto IGL (ver
+        // constantes IGL_*): os 108 thunks do módulo provam que é a interface
+        // GL ES (slots 3..79), não IDisplay.
+        u32 disp_ptr = IGL_OBJ_VA;
         uc_mem_write(uc, 0x003c14c4, &disp_ptr, 4);
         uc_mem_write(uc, 0x123c14c4, &disp_ptr, 4);
 
@@ -331,12 +399,14 @@ public:
             uc_mem_write(uc, EXTRA_VTBL_VA + i * 4u, &s, 4);
         }
 
-        // Objeto DISPLAY vtable (128 slots para cobrir até slot 71 = 0x11c)
-        u32 disp_vt = DISPLAY_VTBL_VA;
-        uc_mem_write(uc, DISPLAY_OBJ_VA, &disp_vt, 4);
-        for (u32 i = 0; i < 128; ++i) {
-            u32 s = 0x50000200u + i * 4u;
-            uc_mem_write(uc, DISPLAY_VTBL_VA + i * 4u, &s, 4);
+        // Objeto IGL (80 slots: 0 AddRef / 1 Release / 2 QueryInterface / 3..79 gl*).
+        // É também o objeto devolvido para AEECLSID_DISPLAY (0x01001001): no Zeebo
+        // a interface de display exposta ao jogo é a de 80 slots (ver IGL_*).
+        u32 igl_vt = IGL_VTBL_VA;
+        uc_mem_write(uc, IGL_OBJ_VA, &igl_vt, 4);
+        for (u32 i = 0; i < IGL_SLOTS; ++i) {
+            u32 s = IGL_SENTINEL_VA + i * 4u;
+            uc_mem_write(uc, IGL_VTBL_VA + i * 4u, &s, 4);
         }
 
         // Objeto BITMAP vtable
@@ -353,7 +423,7 @@ public:
         uc_hook_add(uc, &h_uptime, UC_HOOK_CODE, (void*)hook_getuptime, &ctx,
                     GETUPTIME_VA, GETUPTIME_VA);
         uc_hook_add(uc, &h_code, UC_HOOK_CODE, (void*)hook_code, &ctx,
-                    0x50000000u, 0x50000600u);
+                    0x50000000u, 0x50001200u);
         uc_hook h_trace = 0;
         uc_hook_add(uc, &h_trace, UC_HOOK_CODE, (void*)hook_trace_gameloop, &ctx,
                     0x12008614u, 0x12008658u);
