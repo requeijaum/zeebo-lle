@@ -2390,13 +2390,18 @@ real, mas não explicação suficiente para o estado atual. QW49 e
 `notes/core1_boot_estado_real.md` ainda descrevem panic de TCB, enquanto QW59 registra
 Core1 avançando por MapControl; essa contradição deve ser resolvida, não herdada.
 
-- [ ] Instrumentar **agora**, em cada entrada de `0xb0400000`: TID, SID ativo, SP/LR,
+- [x] Instrumentar **agora**, em cada entrada de `0xb0400000`: TID, SID ativo, SP/LR,
   backing físico e hash dos 252 bytes em `0xb04151a4`, antes/depois da ativação do SID.
+  Medido em `7588e3e`: a segunda entrada usa SID `0x8000c001`, mas a página fonte foi
+  registrada apenas em `0x80000100`; o decoder recebe bytes errados e o tamanho
+  underflowa. A correção causal ainda está aberta.
 - [ ] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
   registradas antes de a task receber SID; não aceitar somente LUT paralela ou teste
   sintético.
-- [ ] Reestabelecer a fronteira real do Core1 com trace não filtrado e controle
+- [x] Reestabelecer a fronteira real do Core1 com trace não filtrado e controle
   negativo; reconciliar QW49/QW59 e atualizar `notes/core1_boot_estado_real.md`.
+  QW99 confirmou ~272,5M instruções e zero hits nos endereços de panic; QW49 fica
+  explicitamente histórico.
 - [ ] Aplicar janelas e histogramas não filtrados de `STATS_TECHNIQUES.md`; progresso
   exige efeito externo novo, não instruções/slices maiores.
 - [ ] Levar o fluxo sem restauração host, salto forçado ou dispatch fixo até

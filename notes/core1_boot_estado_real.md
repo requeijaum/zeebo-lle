@@ -1,5 +1,14 @@
 # Core1 — estado real do boot (medido, 2026-09-10)
 
+> **ATUALIZAÇÃO QW99 (`7588e3e`):** as seções 1–4 abaixo são histórico de um HEAD
+> anterior e não descrevem a fronteira atual. Em boot interpretado de 45 s, Core1
+> alcançou ~272,5 milhões de instruções, permaneceu na faixa de scheduler
+> `0xf0003b–0xf0004xxx` e teve **zero** hits em `0xf0016d14` (panic real) e
+> `0xf0016bec`. Isso confirma QW59: não há panic TCB atual. O bloqueio medido agora é
+> Core0: a segunda entrada no scatterload roda em SID `0x8000c001`, enquanto a página
+> fonte `0xb0410000` foi registrada somente em `0x80000100`. Evidência e controles:
+> `notes/boot-investigation/qw99-scatterload-core1-measurement.md`.
+
 Nota de correção. Registra o que foi **medido** nesta sessão e corrige afirmações
 desatualizadas de `okl4_source_para_boot.md` e `ig_naming_init_order.md`.
 
