@@ -19,6 +19,7 @@ struct GptTimer {
     uint32_t match  = 0;     // MATCH_VAL compare
     bool     enabled = false;// TIMER_ENABLE
     bool     match_armed = true; // fire once until re-armed (write to match/clear)
+    bool     clr_on_match = false; // GPT_ENABLE_CLR_ON_MATCH_EN: zero count on fire
 
     void enable()  { enabled = true; }
     void disable() { enabled = false; }
@@ -41,7 +42,7 @@ struct GptTimer {
         } else { // wrapped
             crossed = (match > before) || (match <= count);
         }
-        if (crossed) { match_armed = false; return true; }
+        if (crossed) { match_armed = false; if (clr_on_match) count = 0; return true; }
         return false;
     }
 };

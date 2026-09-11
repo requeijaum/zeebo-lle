@@ -13,6 +13,10 @@
 #include <string>
 #include <algorithm>
 #include <unicorn/unicorn.h>
+#ifndef ZEEBO_VIC_WITH_UNICORN
+#define ZEEBO_VIC_WITH_UNICORN
+#endif
+#include "zeebo_peripheral_bus.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -156,6 +160,13 @@ static void core0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int s
 }
 
 // Hook for Core 1 (AMSS)
+// ---- QW99 Bug 5: production peripheral decoder + deterministic virtual time ----
+// The guest's VIC/GPT MMIO is decoded through PeripheralBus so ENABLE/MATCH/
+// INTENABLE/ACK/EOI mutate the real models instead of flat RAM. Virtual time is
+// advanced by a FIXED quantum per scheduler slice (see the slice loop), NOT by
+// Core0.insns+Core1.insns, so the timer is deterministic and independent of how
+// many instructions either core happened to retire.
+static zeebo::PeripheralBus g_pbus;
 static void core1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
     CoreState* cs = (CoreState*)ud;
     cs->insns++;
@@ -172,6 +183,24 @@ static void core1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud)
 
 // Hook for Core 1 (AMSS MMIO)
 static void core1_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
+    (void)size; (void)ud;
+    u32 a = (u32)addr;
+    // Route real VIC/GPT MMIO through the production decoder (Bug 5). Writes to
+    // ENABLE/MATCH/INTENABLE/ACK/EOI mutate the models; reads reflect them back
+    // into the flat cell the load returns.
+    if (type == UC_MEM_WRITE) {
+        g_pbus.mmio_write(a, (u32)value);
+        return;
+    }
+    if (type == UC_MEM_READ) {
+        u32 out = 0;
+        if (g_pbus.mmio_read(a, &out)) {
+            uc_mem_write(uc, a, &out, 4);
+            return;
+        }
+    }
+    // Legacy DGT-style ticker cell (non-primary-source address 0xc5000108, kept
+    // for the discovery harness's older polling path).
     if (addr == 0xc5000108 && type == UC_MEM_READ) {
         static u32 virtual_ticker = 100000;
         virtual_ticker += 5000;
@@ -320,6 +349,10 @@ int main(int argc, char** argv) {
     // Interleaved execution slices
     const int SLICE_INSNS = 10000;
     const int TOTAL_CYCLES = 60;
+    // QW99 Bug 5: deterministic virtual time. Advance the peripheral clock by a
+    // FIXED quantum per scheduler cycle, independent of Core0/Core1 retired
+    // instruction counts, so the GPT is reproducible run-to-run.
+    g_pbus.ticks_per_slice = 5000; // model quantum per cycle (calibrated placeholder)
     for (int cycle = 0; cycle < TOTAL_CYCLES; cycle++) {
         // Step Core 0
         uc_err e0 = uc_emu_start(core0.uc, core0.entry, 0, 0, SLICE_INSNS);
@@ -329,9 +362,19 @@ int main(int argc, char** argv) {
         uc_err e1 = uc_emu_start(core1.uc, core1.entry, 0, 0, SLICE_INSNS);
         core1.entry = rreg(core1.uc, UC_ARM_REG_PC);
 
-        printf("  [Cycle %02d] Core0: pc=0x%08x insns=%llu (%s) | Core1: pc=0x%08x insns=%llu (%s)\n",
+        // Advance deterministic virtual time and drive the GPT -> VIC line.
+        bool fired = g_pbus.tick_slice();
+        // Between slices (engine quiescent): deliver at most one non-reentrant
+        // IRQ into Core 1 (the modem VIC path). in_service prevents redelivery /
+        // LR_irq/SPSR_irq overwrite before the guest EOIs.
+        bool delivered = g_pbus.deliver_irq(core1.uc, /*vector_base=*/0x0);
+        if (delivered) core1.entry = rreg(core1.uc, UC_ARM_REG_PC);
+
+        printf("  [Cycle %02d] Core0: pc=0x%08x insns=%llu (%s) | Core1: pc=0x%08x insns=%llu (%s) | vt=%llu gpt=%s irq=%s\n",
                cycle, core0.entry, (unsigned long long)core0.insns, e0 ? uc_strerror(e0) : "ok",
-               core1.entry, (unsigned long long)core1.insns, e1 ? uc_strerror(e1) : "ok");
+               core1.entry, (unsigned long long)core1.insns, e1 ? uc_strerror(e1) : "ok",
+               (unsigned long long)g_pbus.virtual_ticks, fired ? "FIRE" : "-",
+               delivered ? "DELIVERED" : "-");
     }
 
     printf("[DualCore] Completed dual-core concurrent execution run.\n");
