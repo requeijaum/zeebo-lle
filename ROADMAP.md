@@ -1469,6 +1469,43 @@ escrita, o teste aborta com exit 2 em vez de concluir.
 — exigia que o boot travasse no TCB. Rebaixadas a INFO; os dois controles negativos
 seguem valendo.
 
+### QW88 — Anatomia da tabela de inicialização CRT em `0xb0400000` e o conflito entre Task 1 e Task 2  **[MEDIDO com probe dinâmico]**
+
+Aprofundando a causa levantada no QW86-87, a rotina em `0xb0400000` (segmento 4 do `1.1.2_APPS.bin`) foi totalmente desassemblada e analisada contra os binários e em tempo de execução (`ZEEBO_TBL_DBG`).
+
+**Estrutura da rotina (`0xb0400008..0xb0400034`):**
+Ela não é um descompressor genérico isolado, mas um despachante de inicialização de CRT/runtime com uma tabela iterativa `{src, dst, len, handler}`:
+
+    b0400008  add ip, pc, #0x28      ; ip = b0400038
+    b040000c  ldm ip, {sl, fp}       ; sl = início da tabela, fp = fim
+    b040001c  cmp sl, fp             ; terminou a tabela?
+    b0400020  beq b0410070           ; SIM -> salta para o entry point real do serviço
+    b0400024  ldm sl!, {r0,r1,r2,r3} ; r0=src, r1=dst, r2=len, r3=handler
+    b0400028  sub lr, pc, #0x14      ; lr = b040001c (retorno fixo)
+    b0400034  mov pc, r3             ; chama handler
+
+**A tabela em `0xb0415174..0xb04151a4` possui exatamente 3 entradas:**
+1. **Entrada 0 (`h=0xb040009c`)**: `memcpy` ARM de 252 bytes (`len=0xfc`) de `0xb04151a4` para `0xb04155b4`.
+2. **Entrada 1 (`h=0xb0400040`)**: descompressor LZ/RLE Thumb in-place — lê 252 bytes de `0xb04155b4` e descomprime 1.040 bytes (`len=0x410`) gravando de volta em `0xb04151a4`. O buffer descomprimido contém strings como `"spinlockarm.s"` e `"Invalid argument"`, além de parâmetros para a etapa seguinte.
+3. **Entrada 2 (`h=0xb04000c4`)**: `memset(0)` ARM de 61.220 bytes (`len=0xef24`) a partir de `0xb04155b4` (limpeza de BSS).
+
+**O que o probe dinâmico (`ZEEBO_TBL_DBG`) comprovou:**
+- **Task 1 (`SP=0xb0046f7c`)**:
+  - Executa a Entrada 0 (`memcpy` 252B).
+  - Executa a Entrada 1 (descompressão LZ 1040B).
+  - Executa a Entrada 2 (`memset` zero 61KB).
+  - Em `0xb040001c`, `cmp sl, fp` encontra `sl == fp` (`Z=1`).
+  - O salto `beq b0410070` é tomado com sucesso e a Task 1 atinge o corpo do serviço em `0xb0410070`!
+- **Task 2 (`SP=0xb0327e3c`)**:
+  - Uma segunda task re-executa `0xb0400000`.
+  - Como o emulador possui um único espaço plano de memória para o Core0, a área `0xb04151a4` já havia sido sobrescrita pelos 1.040 bytes da descompressão da Task 1.
+  - A Entrada 0 copia dados já descomprimidos (`01 00 00 00...`) para `0xb04155b4`.
+  - A Entrada 1 tenta descomprimir dados que já foram expandidos; o parser RLE consome tamanho zero e o laço interno em `0xb040006c` (`subs r4, #1`) sofre sob underflow para `r4 = 0xFFFFFFFF`, travando o Core0 em 4 bilhões de iterações.
+
+**Estratégia de resolução definida (Diretiva: mais rápido e fácil primeiro, depois o estrutural):**
+1. **Fase Rápida/Fácil (Próxima etapa)**: Repristinar o buffer original de 252 bytes em `0xb04151a4` (obtido da imagem limpa do ELF) quando uma nova task re-executar o vetor de inicialização, ou preservar/restaurar no chaveamento de contexto. Isso neutraliza o underflow e permite medir se a Task 2 também completa o init e avança para `b0410070`.
+2. **Fase Estrutural/Difícil**: Implementar separação real de address space (múltiplas instâncias de `uc_engine` por L4 space ID ou comutação dinâmica de TLB/page tables baseada no `sid` do `handle_map_control`).
+
 ### QW81-QW87 — Causa raiz do Core0: **um unico address space para todas as tasks**  **[MEDIDO — bloqueio arquitetural]**
 
 Com o teto de 45s removido (QW78-80), rodei ate 180s: `insns=640.944.226`, sem
