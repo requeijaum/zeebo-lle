@@ -48,6 +48,7 @@
 #include "gpu/igpu_rasterizer.h"
 #include "gpu/igl_guest_bridge.h"
 #include "zeebo_brew_loader.h"
+#include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
 #include "zeebo_cli_paths.h"
@@ -963,14 +964,71 @@ public:
         return ok;
     }
 
-    // QW36: Despacho unificado de ciclo de vida para Applet / Jogo (Double Dragon, AppMgr, Z-Wheel)
-    bool dispatch_applet_start(const std::string& app_name, u32 handler_va = 0x10532344) {
-        printf("[BREW/Applet] Despachando ciclo de vida para '%s' (HandleEvent@0x%08x)...\n",
-               app_name.c_str(), handler_va);
-        bool ok = dispatch_zwheel_app_start();
-        if (ok) {
-            printf("[BREW/Applet] PASS: Jogo/Applet '%s' entrou em execução e renderizou frame.\n", app_name.c_str());
+    // Bug 4: Despacho de ciclo de vida com seleção HONESTA de manipulador por
+    // módulo. O manipulador fixo da Z-Wheel (0x10532344) SÓ é usado quando o
+    // applet é explicitamente a Z-Wheel (274755) — preview/harness preservado.
+    // Módulos não relacionados usam o próprio manipulador resolvido (entry_va),
+    // e apenas se ele estiver realmente mapeado/executável; caso contrário
+    // permanecem honestamente loaded_only (nunca PASS azul).
+    //   is_zwheel : o caller rotulou este applet como a Z-Wheel explícita?
+    bool dispatch_applet_start(const std::string& app_name, bool is_zwheel) {
+        using namespace zeebo::applet;
+        // Manipulador candidato resolvido do próprio módulo (0 = não resolvido).
+        u32 mod_handler = (brew_ && brew_->has_module()) ? brew_->module().entry_va : 0u;
+        bool mapped = false;
+        if (mod_handler && core0_.uc) {
+            u8 probe[2] = {0};
+            mapped = (uc_mem_read(core0_.uc, mod_handler & ~1u, probe, 2) == UC_ERR_OK);
         }
+        DispatchDecision dec = select_lifecycle_handler(is_zwheel, mod_handler, mapped);
+        printf("[BREW/Applet] '%s': seleção de manipulador → %s (handler@0x%08x) [%s]\n",
+               app_name.c_str(),
+               dec.mode == DISPATCH_ZWHEEL ? "Z-WHEEL" :
+               dec.mode == DISPATCH_MODULE ? "MÓDULO"  : "REJEITADO (loaded_only)",
+               dec.handler_va, dec.reason);
+
+        if (dec.mode == DISPATCH_ZWHEEL) {
+            bool ok = dispatch_zwheel_app_start();
+            if (ok)
+                printf("[BREW/Applet] PASS: Z-Wheel '%s' entrou em execução e renderizou frame.\n",
+                       app_name.c_str());
+            return ok;
+        }
+        if (dec.mode == DISPATCH_REJECT) {
+            printf("[BREW/Applet] loaded_only: '%s' carregado mas SEM manipulador honesto "
+                   "para executar — sem despacho de ciclo de vida (sem PASS).\n",
+                   app_name.c_str());
+            return false;
+        }
+        // DISPATCH_MODULE: despacha EVT_APP_START ao manipulador REAL do módulo.
+        return dispatch_module_app_start(app_name, dec.handler_va);
+    }
+
+    // Despacha EVT_APP_START ao manipulador REAL resolvido do módulo (não o fixo
+    // da Z-Wheel). Executa o handler de verdade sob Unicorn; só retorna true se a
+    // execução foi limpa e o applet consumiu o evento (r0==1). Sem forjar frame
+    // nem clear azul: honestidade dos gates.
+    bool dispatch_module_app_start(const std::string& app_name, u32 handler_va) {
+        static constexpr u32 EVT_APP_START = 0x1f96;
+        if (!brew_ || !core0_.uc) {
+            printf("[BREW/Applet] BrewLoader/Core0 indisponível — dispatch abortado.\n");
+            return false;
+        }
+        const u32 SB = 0x22000000, SS = 0x00100000;
+        const u32 APPLET = SB + 0x0100, STACKTP = SB + 0xf000, RETMAG = SB + 0xfffe;
+        uc_mem_map(core0_.uc, SB, SS, UC_PROT_ALL); // ok se já mapeado
+        std::vector<u8> zeros(SS, 0);
+        uc_mem_write(core0_.uc, SB, zeros.data(), zeros.size());
+        printf("[BREW/Applet] '%s': despachando EVT_APP_START(0x%04x) → HandleEvent@0x%08x "
+               "(manipulador REAL do módulo)\n", app_name.c_str(), EVT_APP_START, handler_va);
+        bool clean = false;
+        u32 r0 = brew_->dispatch_event(handler_va, APPLET, EVT_APP_START,
+                                       /*keycode=*/0, STACKTP, RETMAG, /*dwparam=*/0, &clean);
+        bool ok = clean && r0 == 1;
+        printf("[BREW/Applet] '%s': EVT_APP_START → r0=%u (uc=%s) → %s\n",
+               app_name.c_str(), r0, clean ? "clean" : "abortado",
+               ok ? "applet consumiu o evento (execução real)"
+                  : "loaded_only (manipulador não consumiu — sem PASS)");
         return ok;
     }
 
@@ -4515,7 +4573,9 @@ int main(int argc, char** argv) {
             std::string app_label = (efs2_run == "274755") ? "Z-Wheel (274755)" :
                                     (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
                                     (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
-            bool life_ok = sys.dispatch_applet_start(app_label);
+            // Bug 4: apenas 274755 é a Z-Wheel explícita; demais módulos usam
+            // seleção honesta do próprio manipulador (ou permanecem loaded_only).
+            bool life_ok = sys.dispatch_applet_start(app_label, /*is_zwheel=*/efs2_run == "274755");
             // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0),
             // GUI, ou um cliente de controle esperando comandos (senão o processo
             // encerraria antes de responder).
@@ -4532,8 +4592,10 @@ int main(int argc, char** argv) {
         if (!sys.load_applet(applet_path, 0x12000000)) {
             printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
         } else {
-            // Executa ciclo de vida automático para applet/jogo externo (estilo Zeebx/Dolphin run game)
-            bool life_ok = sys.dispatch_applet_start(applet_path);
+            // Executa ciclo de vida automático para applet/jogo externo. Bug 4:
+            // um applet externo NÃO é a Z-Wheel — usa seleção honesta do próprio
+            // manipulador; arquivo inválido/sem entry permanece loaded_only.
+            bool life_ok = sys.dispatch_applet_start(applet_path, /*is_zwheel=*/false);
             if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }
