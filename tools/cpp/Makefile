@@ -411,6 +411,22 @@ test-zeetris-live-shell: test_zeetris_live_shell zeebo_lle_main
 	  echo "FAIL: mutante (boot ao vivo alcanca o shell) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (boot NAO alcanca o shell)"; fi
 
+# SEMANTIC gate (Tier B, negative control): drives the REAL Unicorn AppMgr boot
+# with the read-only ZEEBO_SHELL_SEM instrument and MEASURES whether the exact
+# AEECShell/ISHELL_CreateInstance anchor yields a LIVE IShell object+vtable (r0 ->
+# *r0 vtable of code) and a real ppOut return pathway. Proves the old "r0 present
+# at dispatch == pIShell" inference INVALID; goes GREEN only after the exact
+# semantic chain is captured. Real NAND + orchestrator required; else SKIP (77).
+# Mutant ("buggy") accepts a NON_SEMANTIC hit as a live shell and MUST fail.
+test_zeetris_shell_semantics: test_zeetris_shell_semantics.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_semantics.cpp
+
+test-zeetris-shell-semantics: test_zeetris_shell_semantics zeebo_lle_main
+	./test_zeetris_shell_semantics || [ $$? -eq 77 ]
+	@if ./test_zeetris_shell_semantics buggy >/dev/null 2>&1; then \
+	  echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao prova shell vivo)"; fi
+
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
 # Gate: o scanner deve prever retroativamente as 8 fronteiras que foram
 # descobertas reativamente até 0f64ffa. Exit 77 = SKIP (.mod proprietário ausente).
