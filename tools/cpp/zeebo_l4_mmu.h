@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
@@ -321,19 +322,31 @@ inline uc_err map_one(uc_engine* uc, const MapItem& it) {
     if (msize < PAGE) msize = PAGE;
 
     int prot = fpage_to_uc_prot(it.fpage);
-    if (prot == 0) prot = 1; // pelo menos legível para não criar região inútil
+    // Bug 7: rwx=0 é REVOGAÇÃO explícita de acesso. NÃO forçar prot=1 (o antigo
+    // `if(prot==0)prot=1` transformava uma página revogada em legível, anulando
+    // a revogação). Uma fpage rwx=0 sobre VA já mapeada deve deixar a página em
+    // UC_PROT_NONE (acesso proíbe leitura E escrita). Se a VA ainda não existe,
+    // uc_mem_map com prot=0 é rejeitado por algumas versões do Unicorn; então
+    // mapeamos legível e imediatamente revogamos via uc_mem_protect(NONE).
+    const bool revoke = (prot == 0);
 
     // UC_ERR_MAP (sobreposição com região já existente, ex.: scratch/IO) apenas
     // reajusta a proteção com uc_mem_protect.
     // Se falhar com UC_ERR_NOMEM (ex.: fpage de 4MB tentando mapear sobre range que cruza
     // ou colide de forma incompatível com região prévia de DMA), tenta split ou protect fallback.
-    uc_err e = uc_mem_map(uc, base, (size_t)msize, prot);
+    uc_err e = uc_mem_map(uc, base, (size_t)msize, revoke ? UC_PROT_READ : prot);
     if (e == UC_ERR_MAP || e == UC_ERR_NOMEM) {
-        // Já mapeado ou conflito de chunk: tenta reajustar proteção
-        uc_err ep = uc_mem_protect(uc, base, (size_t)msize, prot);
+        // Já mapeado ou conflito de chunk: reajusta proteção para o valor pedido
+        // (incluindo UC_PROT_NONE quando revoke — revogação real).
+        uc_err ep = uc_mem_protect(uc, base, (size_t)msize,
+                                   revoke ? UC_PROT_NONE : prot);
         if (ep == UC_ERR_OK) {
             e = UC_ERR_OK;
         }
+    } else if (e == UC_ERR_OK && revoke) {
+        // Mapeamento novo criado legível só para satisfazer o Unicorn; agora
+        // aplica a revogação real (UC_PROT_NONE).
+        uc_mem_protect(uc, base, (size_t)msize, UC_PROT_NONE);
     }
 
     // --- Sonda de páginas vazias (Item 2) ---------------------------------
@@ -394,13 +407,19 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
     if (!hp || !pool.contains(phys, msize)) return UC_ERR_ARG; // sem pool: fallback
 
     int prot = fpage_to_uc_prot(it.fpage);
-    if (prot == 0) prot = 1;
+    // Bug 7: rwx=0 é revogação; não forçar legível.
+    const bool revoke = (prot == 0);
 
-    uc_err e = uc_mem_map_ptr(uc, base, (size_t)msize, prot, hp);
+    uc_err e = uc_mem_map_ptr(uc, base, (size_t)msize,
+                              revoke ? UC_PROT_READ : prot, hp);
     bool host_ptr_aceito = (e == UC_ERR_OK);
     if (e == UC_ERR_MAP) {
         // Já existe região nesse VA: só reajusta a proteção (host_ptr imutável).
-        e = uc_mem_protect(uc, base, (size_t)msize, prot);
+        e = uc_mem_protect(uc, base, (size_t)msize,
+                           revoke ? UC_PROT_NONE : prot);
+    } else if (e == UC_ERR_OK && revoke) {
+        // Revogação real da região recém-mapeada.
+        uc_mem_protect(uc, base, (size_t)msize, UC_PROT_NONE);
     }
     // So atualiza a LUT quando o Unicorn REALMENTE adotou este host_ptr.
     //
@@ -416,6 +435,53 @@ inline uc_err map_one_aliased(uc_engine* uc, const MapItem& it,
     if (e == UC_ERR_OK && host_ptr_aceito && lut) lut->map(base, msize, hp);
     return e;
 }
+
+// --- Revogação de espaço inteiro (Bug 7, whole-space rwx=0) -----------------
+// Uma fpage de 2^32 com rwx=0 é uma OPERAÇÃO DE CONTROLE que revoga o acesso
+// sobre TODO o address space (unmap/flush de permissões). Implementamos a
+// semântica real: enumeramos as regiões atualmente mapeadas no Unicorn e as
+// colocamos em UC_PROT_NONE. Sem isso, o whole-space op era um no-op silencioso
+// e a revogação global não tinha efeito observável algum.
+inline uc_err revoke_whole_space(uc_engine* uc, const Fpage& f) {
+    if (!f.is_whole_space()) return UC_ERR_ARG;
+    if (f.rwx() != 0) return UC_ERR_OK; // só rwx=0 revoga; rwx>0 é concessão/no-op aqui
+    uc_mem_region* regions = nullptr;
+    uint32_t count = 0;
+    uc_err e = uc_mem_regions(uc, &regions, &count);
+    if (e != UC_ERR_OK) return e;
+    for (uint32_t i = 0; i < count; i++) {
+        // Só toca o espaço de 32 bits do guest.
+        if (regions[i].begin > 0xffffffffull) continue;
+        uint64_t b = regions[i].begin;
+        uint64_t sz = regions[i].end - regions[i].begin + 1;
+        uc_mem_protect(uc, b, (size_t)sz, UC_PROT_NONE);
+    }
+    uc_free(regions);
+    return UC_ERR_OK;
+}
+
+// --- SpaceMap (Bug 1): VTLB por space_id -----------------------------------
+// Cada L4_SpaceId_t possui seu PRÓPRIO conjunto de traduções VA->host. A mesma
+// VA em espaços diferentes pode apontar para RAM física diferente, e uma
+// revogação/unmap num espaço NÃO deve afetar o outro. Antes havia uma única
+// VtlbLut global compartilhada por todos os espaços, o que fundia mapeamentos
+// de tasks distintas no mesmo endereço virtual.
+class SpaceMap {
+public:
+    // Retorna (criando se necessário) a LUT do espaço `space_id`.
+    VtlbLut& lut_for(u32 space_id) {
+        return spaces_[space_id];
+    }
+    const VtlbLut* lut_if_exists(u32 space_id) const {
+        auto it = spaces_.find(space_id);
+        return it != spaces_.end() ? &it->second : nullptr;
+    }
+    size_t space_count() const { return spaces_.size(); }
+    void clear() { spaces_.clear(); }
+
+private:
+    std::map<u32, VtlbLut> spaces_;
+};
 
 // Dispatcher principal. Lê os descritores dos MRs do UTCB e executa os
 // mapeamentos reais no Unicorn. Retorna o valor de resultado da syscall
@@ -497,11 +563,18 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
         // 0xFFFFFFC0): o guard seria código morto. O único critério de whole-space
         // é a fpage.
         if (it.fpage.is_whole_space()) {
-            printf("  [ctl %u] whole-space op: va=0x%08llx phys=0x%llx size=%llu "
-                   "rwx=%u -> address-space control (flush/perm), no RAM map\n",
-                   i, (unsigned long long)it.fpage.vaddr(),
-                   (unsigned long long)it.phys.phys_base(),
-                   (unsigned long long)it.fpage.size_bytes(), it.fpage.rwx());
+            // Bug 7: whole-space com rwx=0 REVOGA o acesso a todo o AS (não é
+            // no-op). rwx>0 permanece controle informativo (concessão global).
+            if (it.fpage.rwx() == 0) {
+                revoke_whole_space(uc, it.fpage);
+                printf("  [ctl %u] whole-space REVOKE (rwx=0): todas as regioes -> PROT_NONE\n", i);
+            } else {
+                printf("  [ctl %u] whole-space op: va=0x%08llx phys=0x%llx size=%llu "
+                       "rwx=%u -> address-space control (perm grant), no RAM map\n",
+                       i, (unsigned long long)it.fpage.vaddr(),
+                       (unsigned long long)it.phys.phys_base(),
+                       (unsigned long long)it.fpage.size_bytes(), it.fpage.rwx());
+            }
             mapped++;
             continue;
         }
@@ -531,6 +604,18 @@ inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
 
     (void)mapped;
     return 1; // resultado não-nulo: MapControl bem-sucedido
+}
+
+// Overload (Bug 1): roteia os mapeamentos para a VTLB do space_id via SpaceMap.
+// Cada space_id recebe sua própria LUT, então a mesma VA em espaços distintos
+// não colide. Reusa o dispatcher base passando a LUT do espaço-alvo.
+inline u32 handle_map_control(uc_engine* uc, u32 utcb_base, u32 space_id,
+                              u32 control,
+                              std::vector<MapItem>* out_items,
+                              const PhysPool* pool,
+                              SpaceMap* spaces) {
+    VtlbLut* lut = spaces ? &spaces->lut_for(space_id) : nullptr;
+    return handle_map_control(uc, utcb_base, space_id, control, out_items, pool, lut);
 }
 
 #endif // ZEEBO_L4_MMU_WITH_UNICORN
