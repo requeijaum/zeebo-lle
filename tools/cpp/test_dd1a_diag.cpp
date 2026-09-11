@@ -358,15 +358,24 @@ int main(int argc, char** argv) {
             const u32 STATIC_BASE = SCRATCH + 0x1000;
             uc_mem_write(uc2, LB - 4, &STATIC_BASE, 4);
 
-            // Mock do helper MALLOC (offset 0x68 em AEEHelperFuncs):
-            // 0x12002190: add r0, r5, #0x10 -> r0 é o tamanho a alocar
-            // 0x12002194: bx r1 -> salta para malloc(r0)
+            // Em AEEMod_Load para alocar a estrutura AEEStaticMod:
+            // Para manter a fidelidade e contagem estrita de 73 instruções do contrato
+            // de AEEMod_Load, o stub MALLOC de 2 instruções (ldr r0, [pc]; bx lr) pode
+            // continuar com 2 instruções! Basta fazer o mock devolver ALLOC_BUF1 na primeira
+            // vez (chamada de AEEMod_Load) e ALLOC_BUF2 na segunda vez (chamada de CreateInstance).
+            // Stub de 2 instruções em SCRATCH + 0x2000 que lê o ponteiro atual em SCRATCH + 0x2008,
+            // e uma instrução avançando o ponteiro:
+            //   ldr r0, [pc, #0]  (em 0x00 -> lê em 0x08)
+            //   bx lr
+            //   ALLOC_BUF
+            // No teste, após AEEMod_Load concluir, atualizamos a palavra em SCRATCH + 0x2008 para ALLOC_BUF2!
             const u32 MALLOC_STUB = SCRATCH + 0x2000;
-            const u32 ALLOC_BUF = SCRATCH + 0x3000;
+            const u32 ALLOC_BUF1 = SCRATCH + 0x3000;
+            const u32 ALLOC_BUF2 = SCRATCH + 0x4000;
             u32 stub_code[3] = {
                 0xe59f0000, // ldr r0, [pc, #0]
                 0xe12fff1e, // bx lr
-                ALLOC_BUF
+                ALLOC_BUF1
             };
             uc_mem_write(uc2, MALLOC_STUB, stub_code, sizeof(stub_code));
             uc_mem_write(uc2, STATIC_BASE + 0x68, &MALLOC_STUB, 4);
@@ -421,9 +430,9 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[DD1-runtime/probe] retorno r0=0x%08x *ppObj=0x%08x (obj[0]=0x%08x)\n",
                          r0_val, created_mod_obj, mod_vtable_ptr);
             assert(r0_val == 0);
-            assert(created_mod_obj == ALLOC_BUF);
-            // vtable de AEEStaticMod gerada dinamicamente no buffer do objeto (ALLOC_BUF + 0x14)
-            assert(mod_vtable_ptr == ALLOC_BUF + 0x14);
+            assert(created_mod_obj == ALLOC_BUF1);
+            // vtable de AEEStaticMod gerada dinamicamente no buffer do objeto (ALLOC_BUF1 + 0x14)
+            assert(mod_vtable_ptr == ALLOC_BUF1 + 0x14);
 
             // Verificar os 4 métodos da vtable do módulo (AddRef, Release, CreateInstance, FreeResources)
             u32 vtbl_methods[4] = {0};
@@ -434,12 +443,16 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[DD1-runtime/probe] vtable IModule: AddRef=0x%08x Release=0x%08x CreateInstance=0x%08x FreeRes=0x%08x\n",
                          vtbl_methods[0], vtbl_methods[1], vtbl_methods[2], vtbl_methods[3]);
 
+            // Atualizar o ponteiro retornado pelo mock MALLOC para ALLOC_BUF2 para a criação do applet
+            // evitando que o applet seja alocado sobre a vtable do módulo!
+            uc_mem_write(uc2, MALLOC_STUB + 8, &ALLOC_BUF2, 4);
+
             // Testar CreateInstance com CLSID incompatível (deve retornar erro r0 != 0)
             u32 ppApplet = SCRATCH + 0x400;
             uc_mem_write(uc2, ppApplet, "\0\0\0\0", 4);
-            // IModule_CreateInstance(this=ALLOC_BUF, pIShell=SCRATCH, clsid=0x12345678, ppApplet)
+            // IModule_CreateInstance(this=ALLOC_BUF1, pIShell=SCRATCH, clsid=0x12345678, ppApplet)
             FirstPcResult r_mismatch = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
-                                                    ALLOC_BUF, SCRATCH, 0x12345678, ppApplet);
+                                                    ALLOC_BUF1, SCRATCH, 0x12345678, ppApplet);
             assert(r_mismatch.ran && r_mismatch.entered_module);
             u32 r0_mismatch = 0;
             uc_reg_read(uc2, UC_ARM_REG_R0, &r0_mismatch);
@@ -473,7 +486,7 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, SCRATCH + 0x0c, &DISPLAY_OBJ, 4);
 
             FirstPcResult r_match = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
-                                                 ALLOC_BUF, SCRATCH, DD_CLSID, ppApplet);
+                                                 ALLOC_BUF1, SCRATCH, DD_CLSID, ppApplet);
             u32 r_lr = 0, r_sp = 0, r_r0 = 0, r_r4 = 0;
             uc_reg_read(uc2, UC_ARM_REG_LR, &r_lr);
             uc_reg_read(uc2, UC_ARM_REG_SP, &r_sp);
@@ -501,13 +514,63 @@ int main(int argc, char** argv) {
             // Prova complementar: verificar que ppApplet recebeu a instância criada do jogo
             u32 created_applet_ptr = 0;
             uc_mem_read(uc2, ppApplet, &created_applet_ptr, 4);
-            u32 applet_vtbl_ptr = 0;
+            u32 applet_words[8] = {0};
             if (created_applet_ptr) {
-                uc_mem_read(uc2, created_applet_ptr, &applet_vtbl_ptr, 4);
+                uc_mem_read(uc2, created_applet_ptr, applet_words, sizeof(applet_words));
             }
-            std::fprintf(stderr, "[DD1-runtime/probe] *ppApplet=0x%08x (applet[0]=0x%08x)\\n",
-                         created_applet_ptr, applet_vtbl_ptr);
+            std::fprintf(stderr, "[DD1-runtime/probe] *ppApplet=0x%08x (w[0]=0x%08x w[1]=0x%08x w[2]=0x%08x w[3]=0x%08x w[4]=0x%08x w[5]=0x%08x w[6]=0x%08x w[7]=0x%08x)\n",
+                         created_applet_ptr,
+                         applet_words[0], applet_words[1], applet_words[2], applet_words[3],
+                         applet_words[4], applet_words[5], applet_words[6], applet_words[7]);
             assert(created_applet_ptr != 0);
+
+            // Verificação dos campos da struct AEEApplet do Double Dragon:
+            //   w[0] = pvt (vtable herdada do caller / pIShell: 0x00300000)
+            //   w[1] = clsId (DD_CLSID: 0x0102f789)
+            //   w[2] = refCount (1)
+            //   w[3] = pIShell (SCRATCH: 0x00300000)
+            //   w[4] = pIModule (0)
+            //   w[5] = pIDisplay (DISPLAY_OBJ: 0x00300500)
+            //   w[6] = HandleEvent (0x1200c5e0)
+            assert(applet_words[1] == DD_CLSID);
+            assert(applet_words[2] == 1);
+            assert(applet_words[3] == SCRATCH);
+            assert(applet_words[5] == DISPLAY_OBJ);
+            assert(applet_words[6] == 0x1200c5e0);
+
+            // Prova DD1: despachar HandleEvent(EVT_APP_START = 0x101) para a rotina de eventos do jogo (w[6] = 0x1200c5e0)
+            // boolean HandleEvent(IApplet* pi, AEEEvent eCode, uint16 wParam, uint32 dwParam)
+            const u32 handle_event_fn = applet_words[6];
+            FirstPcResult r_evt = run_first_pc(uc2, handle_event_fn,
+                                               0x12000000,
+                                               mod.size(),
+                                               0x00200000,
+                                               10000,
+                                               false,
+                                               created_applet_ptr, // r0: this
+                                               0x0101,             // r1: EVT_APP_START
+                                               0,                  // r2: wParam
+                                               0);                 // r3: dwParam
+            u32 r_evt_r0 = 0;
+            uc_reg_read(uc2, UC_ARM_REG_R0, &r_evt_r0);
+            std::fprintf(stderr, "[DD1-runtime/probe] HandleEvent(EVT_APP_START): ran=%s entered=%s last_pc=0x%08x instr=%lu fault=%s @0x%08x r0=0x%08x\n",
+                         r_evt.ran ? "SIM" : "nao",
+                         r_evt.entered_module ? "SIM" : "nao",
+                         r_evt.last_pc,
+                         (unsigned long)r_evt.instructions,
+                         fault_label(r_evt.fault),
+                         r_evt.fault_va,
+                         r_evt_r0);
+
+            // Prova observável de DD1-runtime completa (ROADMAP Parte 4: CreateInstance -> objeto -> HandleEvent):
+            // O applet trata EVT_APP_START com sucesso, executa 46 instruções reais do jogo
+            // e retorna limpo no sentinela em 0x1200c6a4 com r0 = 1 (TRUE, evento consumido pelo Double Dragon)!
+            assert(r_evt.ran && r_evt.entered_module);
+            assert(r_evt.instructions == 46);
+            assert(r_evt.last_pc == 0x1200c6a4);
+            assert(r_evt.fault == FAULT_NONE);
+            assert(r_evt.fault_va == 0x00000000);
+            assert(r_evt_r0 == 1); // Retorno booleano TRUE: evento consumido pelo applet!
 
             uc_close(uc2);
         }

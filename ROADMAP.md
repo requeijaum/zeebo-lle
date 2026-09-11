@@ -2434,7 +2434,7 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   não reimplementar o falso gap “ELF-only” nem usar `0x10532344`. Concluído em `c86e4cb`/`542f5ce`,
   com 23 instruções executadas sob helper assistido. Integrado no Makefile sob target
   `test-dd1a` com mutação negativa que reprova fabricação de entrada.
-- [ ] **DD1-runtime — objetos/imports:** resolver VAs reais de
+- [x] **DD1-runtime — objetos/imports:** resolver VAs reais de
   `ishell_create_va/aeemod_load_va/aeeclscreate_va` (VAs de referência de segmento 11 do APPS
   localizadas: ISHELL_CreateInstance @ `0x105c7fb4`, AEEAppletNew @ `0x105322f2`);
   obter IShell vivo, aplicar RW/ZI/relocações/imports/GOT e provar
@@ -2457,6 +2457,9 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   com sucesso a execução completa do construtor e de `CreateInstance` com 530 instruções
   reais executadas no guest, retornando limpo em `0x12000724: bx lr` com `r0=0` e gravando
   a instância criada do applet em `*ppApplet`.
+  Em seguida, o despacho do evento inicial do ciclo de vida BREW (`HandleEvent(EVT_APP_START = 0x101)`)
+  foi provado através do handler do jogo em `0x1200c5e0`, consumindo o evento com 46 instruções
+  adicionais e retornando limpo com `r0 = 1` (TRUE).
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
