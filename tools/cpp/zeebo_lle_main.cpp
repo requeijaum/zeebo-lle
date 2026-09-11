@@ -1189,11 +1189,18 @@ public:
         }
         // Atualiza a máscara de botões da plataforma -- é o que o jogo lê de
         // verdade (o HandleEvent consome evento mas não move a máscara).
+        // Registra o pico AQUI (no instante do aperto): amostrar a máscara no fim
+        // da iteração não serve, porque o roteiro/teclado já soltou o botão.
         auto set_btn = [this](u32 avk, bool pressed) {
             uint16_t bit = avk_to_platform_bit(avk);
             if (!bit) return;
-            if (pressed) zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons | bit);
-            else         zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons & ~bit);
+            if (pressed) {
+                zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons | bit);
+                if (zeetris_ctx_.platform_buttons > peak_buttons_)
+                    peak_buttons_ = zeetris_ctx_.platform_buttons;
+            } else {
+                zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons & ~bit);
+            }
         };
 
         // Liga a vtable IGL do guest ao rasterizador real: sem isto os comandos
@@ -1339,8 +1346,9 @@ public:
             for (size_t i = 0; p && i < n; ++i) if (p[i] != c0) diff++;
             printf("[Zeetris/Loop] rasterizador: pixel0=0x%04x, pixels diferentes=%zu/%zu\n",
                    c0, diff, n);
-        printf("[Zeetris/Loop] mascara de botoes final=0x%04x\n",
-               (unsigned)zeetris_ctx_.platform_buttons);
+        printf("[Zeetris/Loop] mascara de botoes final=0x%04x | PICO=0x%04x "
+               "(prova de que o input do host chegou ao jogo)\n",
+               (unsigned)zeetris_ctx_.platform_buttons, (unsigned)peak_buttons_);
         }
     }
 
@@ -5315,6 +5323,7 @@ private:
     zeebo::zeetris::ZeetrisContext zeetris_ctx_{};
     // Roteiro de teclas headless (env ZEEBO_ZEETRIS_KEYS), par (frame, AVK).
     std::vector<std::pair<u64, u32>> scripted_keys_;
+    uint16_t peak_buttons_ = 0;   // pico da máscara de botões durante o loop
     zeebo::brew::BrewTimerQueue brew_timers_;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
