@@ -308,12 +308,25 @@ int main(int argc, char** argv) {
                 else std::printf("        [+0x%02x] = <nao mapeado>\n", off);
             }
         }
-        // Flags de tela que o gameloop consulta: sb = app_ctx+0x9000, e o
-        // gameloop lê [sb+0x30] como flag de transição.
-        std::printf("[state] sb = 0x%08x; flags do gameloop:\n", ctx.app_ctx_va + 0x9000);
+        // Flags de tela que o gameloop consulta. Com o contexto sendo o do JOGO
+        // (evt=0 -> malloc(0x9094)), sb = [pApplet+0x20] + 0x9000 -> dentro do
+        // bloco (0x9000 < 0x9094, medido no literal do malloc).
+        u32 gctx = 0;
+        uc_mem_read(uc, ctx.pApplet + 0x20, &gctx, 4);
+        std::printf("[state] contexto do JOGO = 0x%08x (malloc 0x9094); sb = 0x%08x\n",
+                    gctx, gctx + 0x9000);
+        if (gctx) {
+            std::printf("[state] inicio do contexto do jogo:\n");
+            for (u32 off = 0; off <= 0x20; off += 4) {
+                u32 v = 0;
+                if (uc_mem_read(uc, gctx + off, &v, 4) == UC_ERR_OK)
+                    std::printf("        [ctx+0x%02x] = 0x%08x (%u)\n", off, v, v);
+            }
+        }
+        std::printf("[state] sb = 0x%08x; flags do gameloop:\n", gctx + 0x9000);
         for (u32 off = 0; off <= 0x40; off += 4) {
             u32 v = 0;
-            if (uc_mem_read(uc, ctx.app_ctx_va + 0x9000 + off, &v, 4) == UC_ERR_OK)
+            if (uc_mem_read(uc, gctx + 0x9000 + off, &v, 4) == UC_ERR_OK)
                 std::printf("        [sb+0x%02x] = 0x%08x (%u)\n", off, v, v);
         }
         const u32 ib[2] = {0x123c14acu, 0x003c14acu};
