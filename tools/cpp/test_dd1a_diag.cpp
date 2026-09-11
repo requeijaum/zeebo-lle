@@ -26,12 +26,40 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <map>
 #include <unicorn/unicorn.h>
 #include "zeebo_dd1a_diag.h"
 #include "zeebo_brew_loader.h"
 
 using namespace zeebo::dd1a;
 using zeebo::brew::BrewLoader;
+
+// Relogio virtual do guest (aee_GetUpTimeMS).
+//
+// Precisa ser um hook do host, e nao um `mov r0,#K` fixo: um game loop deriva o
+// delta de tempo desta funcao. Com valor constante o jogo ve dt=0 e nao anima —
+// falha silenciosa, porque nada quebra, o frame so fica igual para sempre.
+static u32 g_uptime_ms = 100;
+static u32 g_uptime_step_ms = 33;   // ~30 fps
+static int g_uptime_reads = 0;
+
+static void uptime_clock_hook(uc_engine* uc, uint64_t, uint32_t, void*) {
+    uc_reg_write(uc, UC_ARM_REG_R0, &g_uptime_ms);
+    g_uptime_ms += g_uptime_step_ms;
+    ++g_uptime_reads;
+}
+
+// Detector de slot de vtable chamado mas nao implementado.
+// Uma entrada de vtable vazia devolve 0 e o jogo segue como se a chamada tivesse
+// funcionado: e o modo de falha mais caro aqui, porque nada quebra e o frame so
+// fica parado. Mapeamos endereco-do-stub -> offset para nomear quem foi chamado.
+static std::map<u32, u32> g_probe_off;
+static std::map<u32, int> g_missing;
+
+static void missing_slot_hook(uc_engine*, uint64_t address, uint32_t, void*) {
+    auto it = g_probe_off.find(static_cast<u32>(address));
+    if (it != g_probe_off.end()) ++g_missing[it->second];
+}
 
 static void put32(std::vector<u8>& b, size_t off, u32 v) {
     if (off + 4 > b.size()) b.resize(off + 4, 0);
@@ -597,15 +625,36 @@ int main(int argc, char** argv) {
             assert(r_evt.fault_va == 0x00000000);
             assert(r_evt_r0 == 1); // Retorno booleano TRUE: evento consumido pelo applet!
 
-            // Mock de aee_GetUpTimeMS (slot 0xb0 em AEEHelperFuncs / static-base):
-            // Retorna o tempo em milissegundos em r0 e faz bx lr.
+            // Mock de aee_GetUpTimeMS (slot 0xb0 em AEEHelperFuncs / static-base).
+            //
+            // ATENCAO: nao pode ser constante. Um game loop calcula o delta entre
+            // frames a partir deste relogio; se ele nao anda, dt=0 e o jogo
+            // conclui, corretamente, que nao ha nada a animar. Uma constante aqui
+            // congela o jogo e a causa e invisivel (nada falha, o frame so nao
+            // muda).
+            //
+            // Em vez de codigo ARM fixo, instalamos um HOOK no host: cada leitura
+            // devolve um instante maior que o anterior. O passo e 33 ms (~30 fps),
+            // proximo do intervalo que o proprio jogo pede ao ISHELL_SetTimer.
             const u32 GETUPTIMEMS_STUB = SCRATCH + 0x2500;
             u32 getuptimems_code[2] = {
-                0xe3a00064, // mov r0, #100 (100 ms)
+                0xe1a00000, // nop (mov r0,r0) — mantem o stub com 2 instrucoes,
+                            // igual ao anterior, para que a contagem de
+                            // instrucoes continue comparavel. r0 e sobrescrito
+                            // pelo hook do host antes desta instrucao executar.
                 0xe12fff1e  // bx lr
             };
             uc_mem_write(uc2, GETUPTIMEMS_STUB, getuptimems_code, sizeof(getuptimems_code));
             uc_mem_write(uc2, STATIC_BASE + 0xb0, &GETUPTIMEMS_STUB, 4);
+            g_uptime_ms = 100; // mesmo instante inicial de antes
+
+            // Hook do relogio: quando o PC chega no stub, preenche r0 com o
+            // instante atual e avanca o contador. Hook proprio (o CallSiteWatch
+            // ja esta ocupado pelo DrawRect) — nao interfere com ele.
+            uc_hook clock_h = 0;
+            uc_hook_add(uc2, &clock_h, UC_HOOK_CODE,
+                        reinterpret_cast<void*>(&uptime_clock_hook),
+                        nullptr, GETUPTIMEMS_STUB, GETUPTIMEMS_STUB);
 
             // Mock de memset (slot 0x04 em AEEHelperFuncs / static-base):
             // r0 = dest, r1 = val, r2 = len. Retorna r0 e faz bx lr.
@@ -955,6 +1004,113 @@ int main(int argc, char** argv) {
                     std::fclose(f);
                     std::fprintf(stderr, "[DD4/frame] gravado em %s\n", outp);
                 }
+            }
+
+            // ── DD4 Bloco 3: o frame EVOLUI entre ticks? ──
+            // Ate aqui medimos UM tick. Se o jogo so souber pintar o fundo, todo
+            // tick produz o mesmo frame e nao ha animacao — sinal de dependencia
+            // faltando. Rodamos ticks sucessivos no MESMO estado de guest (uc2
+            // preserva memoria entre chamadas) e comparamos os frames.
+            {
+                const int N_TICKS = 8;
+                std::vector<u64> digests;
+                std::vector<int>  calls_por_tick;
+                std::vector<u64>  instr_por_tick;
+                int faults = 0;
+
+                for (int t = 0; t < N_TICKS; ++t) {
+                    const int calls_antes = cap.calls;
+                    // Zera o frame a cada tick: queremos o que ESTE tick desenha.
+                    std::fill(fb.px.begin(), fb.px.end(), 0u);
+                    fb.fills = 0;
+
+                    FirstPcResult rt = run_first_pc(uc2, timer_cb_fn,
+                                                    0x12000000, mod.size(),
+                                                    0x00200000, 10000, false,
+                                                    created_applet_ptr,
+                                                    0, 0, 0, &watch);
+                    if (rt.fault != FAULT_NONE) ++faults;
+                    instr_por_tick.push_back(rt.instructions);
+                    calls_por_tick.push_back(cap.calls - calls_antes);
+
+                    // FNV-1a sobre o frame: barato e sensivel a 1 pixel.
+                    u64 h = 1469598103934665603ull;
+                    for (u32 v : fb.px) {
+                        h ^= v; h *= 1099511628211ull;
+                    }
+                    digests.push_back(h);
+                }
+
+                std::fprintf(stderr, "[DD4/ticks] %d ticks:", N_TICKS);
+                for (int t = 0; t < N_TICKS; ++t)
+                    std::fprintf(stderr, " #%d(instr=%llu,draw=%d)", t,
+                                 (unsigned long long)instr_por_tick[t],
+                                 calls_por_tick[t]);
+                std::fprintf(stderr, "\n");
+
+                size_t distintos = 0;
+                for (size_t i = 0; i < digests.size(); ++i) {
+                    bool novo = true;
+                    for (size_t j = 0; j < i; ++j)
+                        if (digests[j] == digests[i]) { novo = false; break; }
+                    if (novo) ++distintos;
+                }
+                // Quais slots de IDisplay o tick REALMENTE chama? Se o frame nao
+                // muda, ou o jogo nao esta pedindo mais nada, ou esta pedindo
+                // algo que nao stubamos (e ai o retorno 0 padrao mente para ele).
+                // Instrumentamos a vtable inteira: cada entrada ainda nao
+                // instalada aponta para um stub proprio que apenas registra.
+                std::fprintf(stderr, "[DD4/slots] vtable IDisplay em uso:");
+                for (u32 off = 0; off < 26 * 4; off += 4) {
+                    u32 target = 0;
+                    uc_mem_read(uc2, DISP_VTBL + off, &target, 4);
+                    if (target != 0)
+                        std::fprintf(stderr, " 0x%02x", off);
+                }
+                std::fprintf(stderr, "\n");
+
+                // Detector de slot faltante: preenche TODA entrada vazia da
+                // vtable com um stub que registra o offset chamado. Se o jogo
+                // estiver pedindo algo que nao implementamos, ele aparece aqui.
+                // Sem isto, a entrada vazia devolve 0 e o jogo segue achando que
+                // funcionou — falha silenciosa, exatamente o modo de erro que
+                // deixa o frame parado sem nada quebrar.
+                for (u32 off = 0; off < 26 * 4; off += 4) {
+                    u32 target = 0;
+                    uc_mem_read(uc2, DISP_VTBL + off, &target, 4);
+                    if (target != 0) continue;
+                    const u32 probe = SCRATCH + 0x3000 + off * 4;
+                    u32 code[2] = { 0xe3a00000 /* mov r0,#0 */,
+                                    0xe12fff1e /* bx lr */ };
+                    uc_mem_write(uc2, probe, code, sizeof(code));
+                    uc_mem_write(uc2, DISP_VTBL + off, &probe, 4);
+                    uc_hook h = 0;
+                    uc_hook_add(uc2, &h, UC_HOOK_CODE,
+                                reinterpret_cast<void*>(&missing_slot_hook),
+                                nullptr, probe, probe);
+                    g_probe_off[probe] = off;
+                }
+
+                g_missing.clear();
+                std::fill(fb.px.begin(), fb.px.end(), 0u);
+                run_first_pc(uc2, timer_cb_fn, 0x12000000, mod.size(),
+                             0x00200000, 10000, false, created_applet_ptr,
+                             0, 0, 0, &watch);
+
+                std::fprintf(stderr, "[DD4/faltantes] slots chamados sem stub:");
+                if (g_missing.empty()) std::fprintf(stderr, " (nenhum)");
+                for (auto& kv : g_missing)
+                    std::fprintf(stderr, " 0x%02x(x%d)", kv.first, kv.second);
+                std::fprintf(stderr, "\n");
+
+                std::fprintf(stderr,
+                    "[DD4/ticks] frames distintos=%zu/%d  faults=%d  "
+                    "leituras_do_relogio=%d  uptime_final=%u ms\n",
+                    distintos, N_TICKS, faults, g_uptime_reads, g_uptime_ms);
+
+                // Fato observado, registrado sem exagero: todos os ticks rodam.
+                assert(faults == 0);
+                assert(calls_por_tick[0] >= 1);
             }
 
             uc_close(uc2);

@@ -185,6 +185,40 @@ faz o deslocamento correto. O jogo limpa a tela de **branco**, não de amarelo.
 Assertiva de regressão: `exp_xrgb == 0x00ffffff`. Mutante que volta à
 decodificação ingênua reprova com `Assertion fb.px[0] == exp_xrgb failed`.
 
+## Por que o frame não muda entre ticks
+
+Oito ticks sucessivos no mesmo estado de guest produzem **1 frame distinto**,
+com 1587 instruções e exatamente uma chamada a `DrawRect` em cada um. Duas
+hipóteses foram testadas e **refutadas**:
+
+**1. Relógio parado — refutada como causa.** O mock de `aee_GetUpTimeMS`
+(static-base `0xb0`) era `mov r0,#100`: um valor constante. Um game loop deriva
+`dt` desse relógio, e com `dt=0` a decisão correta do jogo é não animar nada.
+Substituído por um hook no host que avança 33 ms (~30 fps) por leitura. O jogo
+**lê** o relógio (uma vez por tick, 100 → 430 ms), mas o frame continua
+idêntico. O relógio parado era um bug real do harness e foi corrigido, porém
+**não** é o que prende o frame.
+
+> Cuidado metodológico: ao trocar o stub, a contagem caiu de 1587 para 1586
+> apenas porque o stub passou de 2 para 1 instrução. Repor o `nop` devolveu
+> 1587. A diferença era artefato da medição, não efeito do relógio.
+
+**2. Slot de desenho não implementado — refutada.** Toda entrada vazia da
+vtable de `IDisplay` foi preenchida com um stub-sonda que registra o offset
+chamado (entrada vazia devolveria 0 e o jogo seguiria como se tivesse
+funcionado — falha silenciosa). Resultado: **nenhum** slot sem stub é chamado.
+Os slots em uso são exatamente os cinco já instalados: `0x10`, `0x14`
+(`DrawRect`), `0x1c` (`Update`), `0x28` (`SetColor`), `0x48` (`SetClipRect`).
+
+**Conclusão honesta.** O jogo não está pedindo para desenhar mais nada. Ele não
+está num loop de gameplay que só carece de pixels; está num estado anterior e
+estável, que a cada tick pinta o fundo e chama `Update`. A presença de
+`strlen`/`strtowstr` no caminho sugere tela de texto (splash/menu), não
+gameplay. O próximo passo não é implementar mais slots de desenho — é descobrir
+que transição de estado o jogo espera e não recebe. Candidatos a investigar:
+eventos de input (`EVT_KEY`) nunca entregues, e `data.ggz`/`sound.ggz`
+inacessíveis por falta de `IFileMgr`.
+
 ### Resultado
 
 307200/307200 pixels pintados, cor única `0xffffff` (branco), uma chamada por
