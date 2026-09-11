@@ -2331,22 +2331,24 @@ promovido ao seguinte por contador, log, payload injetado, frame host ou áudio 
 Objetivo: impedir gates verdes sobre artefatos antigos. Esta parte não autoriza uma
 refatoração ampla antes de mover a fronteira de boot.
 
-- [ ] Remover do índice os binários ignorados `tools/cpp/{zeebo_boot,zeebo_elf,
+- [x] Remover do índice os binários ignorados `tools/cpp/{zeebo_boot,zeebo_elf,
   zeebo_harness,zeebo_kernel_boot,zeebo_partition}` e os três
   `tools/__pycache__/*.pyc`; estender `test_clean_hygiene.py` para reprovar qualquer
-  saída de `git ls-files -ci --exclude-standard`.
-- [ ] Em `tools/cpp/Makefile`, separar `check-fast`, `check-firmware` e `check-full`; o
+  saída de `git ls-files -ci --exclude-standard`. (Concluído em `2237b8b`/`aab47db`).
+- [x] Em `tools/cpp/Makefile`, separar `check-fast`, `check-firmware` e `check-full`; o
   gate de firmware deve **falhar**, não virar verde, quando a NAND necessária estiver
-  ausente. Exibir totais PASS/FAIL/SKIP e derivar build/check/clean de listas únicas.
+  ausente. Exibir totais PASS/FAIL/SKIP e derivar build/check/clean de listas únicas. (Concluído em `2237b8b`).
 - [x] **DD0 — gate honesto de módulo:** arquivo inválido falha antes da execução;
   `test-roms-external` deixa de emitir PASS de jogo; Reksio/DD permanecem `loaded_only`
   até um PC pertencente ao módulo realmente executar. Integrado em `7045164`, com
   mutante PASS-on-load vermelho.
-- [ ] Inventariar e encerrar worktrees/branches `agent/qw*` já integrados; nenhum
-  resultado durável deve existir apenas em `/tmp`.
-- [ ] Extrair `L4KernelShim/CoreScheduler`, `PeripheralBus`, `IntercoreFabric` e remover
-  estado estático **somente conforme o caminho tocado exigir uma seam testável**. Não
-  bloquear o scatterload nem DD1a por uma decomposição completa do god object.
+- [x] Inventariar e encerrar worktrees/branches `agent/qw*` já integrados; nenhum
+  resultado durável deve existir apenas em `/tmp`. Todos os commits e diagnósticos
+  foram integrados na árvore principal (`3fd982a`, `db94caa`, `77b888c`, `92f927e`, `2a5f59e`).
+- [x] Extrair `L4KernelShim/CoreScheduler`, `PeripheralBus`, `IntercoreFabric` e remover
+  estado estático **somente conforme o caminho tocado exigir uma seam testável**. Concluído
+  gradualmente conforme as seams foram necessárias (`zeebo_peripheral_bus.h` integrado em `f7938c5`,
+  `zeebo_l4_mmu.h` em `3fd982a`). Não bloquear o scatterload nem DD1a por uma decomposição completa do god object.
 
 Gate P0: clone limpo recompila tudo; nenhum arquivo ignorado está rastreado; NAND
 ausente falha no tier correto; módulo inválido não recebe PASS; worktree principal
@@ -2408,11 +2410,14 @@ Core1 avançando por MapControl; essa contradição deve ser resolvida, não her
   negativo; reconciliar QW49/QW59 e atualizar `notes/core1_boot_estado_real.md`.
   QW99 confirmou ~272,5M instruções e zero hits nos endereços de panic; QW49 fica
   explicitamente histórico.
-- [ ] Aplicar janelas e histogramas não filtrados de `STATS_TECHNIQUES.md`; progresso
-  exige efeito externo novo, não instruções/slices maiores.
+- [x] Aplicar janelas e histogramas não filtrados de `STATS_TECHNIQUES.md`; progresso
+  exige efeito externo novo, não instruções/slices maiores. Aplicado no rastreador
+  de scatterload (`7588e3e`), nas contagens de instruções do Core1 (`qw99-scatterload-core1-measurement.md`)
+  e na investigação exata de proveniência de registradores/memória em `notes/boot-investigation/pc14-alias-vs-state-separation.md`.
 - [ ] Levar o fluxo sem restauração host, salto forçado ou dispatch fixo até
   AEECShell/AppMgr e registrar a cadeia IPC/naming/quartz/AMSS que realizou a transição.
-- [ ] Manter Dynarmic fora deste gate; primeiro fechar o comportamento no intérprete.
+- [x] Manter Dynarmic fora deste gate; primeiro fechar o comportamento no intérprete.
+  Interpretação pura mantida em todos os testes e execuções do boot.
 
 Gate P2: AppMgr/AEECShell alcançado organicamente em execuções repetíveis, com
 controle negativo e sem patches barrados. STOP: se somente instruções/slices crescerem,
@@ -2423,10 +2428,11 @@ não empilhar outro patch de PC/registrador. O marco é mudança de fronteira ob
 DD0 está em P0. DD1a–DD3 podem avançar **em paralelo** como diagnóstico assistido,
 sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
 
-- [ ] **DD1a — primeiro PC assistido:** validar pacote, MIF/App ID/CLSID e executar o
+- [x] **DD1a — primeiro PC assistido:** validar pacote, MIF/App ID/CLSID e executar o
   entry ARM cru de `ddragonz.mod` sob orçamento, registrando PC dentro do módulo.
   Resolução de entry cru e dispatch por módulo já existem (`68a477d` e sucessores);
-  não reimplementar o falso gap “ELF-only” nem usar `0x10532344`.
+  não reimplementar o falso gap “ELF-only” nem usar `0x10532344`. Concluído em `c86e4cb`/`542f5ce`,
+  com 23 instruções executadas sob helper assistido.
 - [ ] **DD1-runtime — objetos/imports:** resolver VAs reais de
   `ishell_create_va/aeemod_load_va/aeeclscreate_va`, hoje zero; obter IShell vivo,
   aplicar RW/ZI/relocações/imports/GOT e provar `CreateInstance(0x0102F789) → objeto →
