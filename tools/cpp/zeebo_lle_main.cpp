@@ -878,6 +878,30 @@ public:
             printf("[EFS2/Applet] Sem payload extraível para '%s'.\n", path_or_name.c_str());
             return false;
         }
+        // Instrumento env-gated: mostra o que REALMENTE será injetado (o payload
+        // do EFS2), com hexdump curto e as primeiras strings ASCII. Existe porque
+        // uma reconstrução manual da cadeia de clusters deu conteúdo de modem —
+        // ou seja, o encoding da tabela não é "índice * 512" — então verificar o
+        // payload tem de ser feito sobre o que o código monta, não por fora.
+        if (std::getenv("ZEEBO_EFS2_DUMP")) {
+            printf("[EFS2/Dump] '%s': %zu bytes; 32 primeiros:", path_or_name.c_str(), payload.size());
+            for (size_t i = 0; i < 32 && i < payload.size(); ++i) printf(" %02x", payload[i]);
+            printf("\n[EFS2/Dump] strings ASCII (>=6):");
+            size_t shown = 0;
+            for (size_t i = 0; i + 6 <= payload.size() && shown < 10; ) {
+                size_t j = i;
+                while (j < payload.size() && payload[j] >= 0x20 && payload[j] < 0x7f) ++j;
+                if (j - i >= 6) {
+                    printf(" '%.*s'", (int)std::min<size_t>(j - i, 40), (const char*)payload.data() + i);
+                    ++shown;
+                }
+                i = (j > i) ? j : i + 1;
+            }
+            printf("\n");
+            u32 w0 = 0; if (payload.size() >= 4) std::memcpy(&w0, payload.data(), 4);
+            printf("[EFS2/Dump] primeira palavra=0x%08x branch=%s\n", w0,
+                   ((w0 >> 28) == 0xa || (w0 >> 28) == 0xb) ? "SIM" : "nao");
+        }
         if (!brew_) {
             printf("[EFS2/Applet] BrewLoader indisponível (init incompleto).\n");
             return false;
