@@ -77,3 +77,6 @@ tools/cpp/test_jit_lockstep
 
 # TRMs convertidos por markitdown: derivados de PDFs de terceiros (ARM), uso local
 docs/remote/md/
+
+# Binário compilado de terceiro em refs/
+refs/okl4-arm-build/arm-kernel.elf
