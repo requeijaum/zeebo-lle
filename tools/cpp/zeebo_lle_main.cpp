@@ -1150,6 +1150,29 @@ public:
             printf("[Zeetris/Loop] ciclo de vida não armado — pulando loop interativo.\n");
             return;
         }
+        // Roteiro de teclas headless, env-gated (ver membro scripted_keys_).
+        scripted_keys_.clear();
+        if (const char* spec = std::getenv("ZEEBO_ZEETRIS_KEYS")) {
+            std::string s(spec), tok;
+            std::stringstream ss(s);
+            while (std::getline(ss, tok, ',')) {
+                auto colon = tok.find(':');
+                if (colon == std::string::npos) continue;
+                u64 fr = (u64)std::strtoull(tok.substr(0, colon).c_str(), nullptr, 10);
+                u32 avk = (u32)std::strtoul(tok.substr(colon + 1).c_str(), nullptr, 16);
+                scripted_keys_.emplace_back(fr, avk);
+            }
+            printf("[Zeetris/Loop] roteiro de teclas: %zu entradas\n", scripted_keys_.size());
+        }
+        // Liga a vtable IGL do guest ao rasterizador real: sem isto os comandos
+        // GL do jogo caem no stub contador e nada é desenhado.
+        if (igl_hook_ && rast_) {
+            zeetris_ctx_.igl_dispatcher = [this](int slot, zeebo::gpu::GuestMachine& gm) {
+                return igl_hook_->dispatch_igl(slot, gm);
+            };
+            rast_->begin_frame();
+        }
+
         printf("[Zeetris/Loop] iniciando gameloop contínuo%s%s (headless=%d)\n",
                max_seconds > 0.0 ? " por tempo" : "",
                (!headless) ? " interativo" : "",
@@ -1205,6 +1228,24 @@ public:
                 }
             }
 
+            // Instrumento env-gated: roteiro de teclas para rodadas headless.
+            // ZEEBO_ZEETRIS_KEYS="frame:AVK,frame:AVK,..." (ex.: "10:E035,60:E032").
+            // Permite provar se um evento de tecla destrava o jogo, sem SDL.
+            if (!scripted_keys_.empty()) {
+                for (const auto& ka : scripted_keys_) {
+                    if ((u64)frames == ka.first) {
+                        bool ok_press = zeebo::zeetris::ZeetrisRunner::dispatch_key(
+                            core0_.uc, zeetris_ctx_, ka.second, true);
+                        bool ok_rel = zeebo::zeetris::ZeetrisRunner::dispatch_key(
+                            core0_.uc, zeetris_ctx_, ka.second, false);
+                        if (ok_press && ok_rel) key_dispatches++;
+                        printf("[Zeetris/Keys] frame=%llu AVK=0x%08x press=%d release=%d\n",
+                               (unsigned long long)frames, ka.second,
+                               (int)ok_press, (int)ok_rel);
+                    }
+                }
+            }
+
             // Executa 1 frame real do gameloop do Zeetris (0x1200ac5c)
             bool frame_ok = zeebo::zeetris::ZeetrisRunner::step_frame(core0_.uc, zeetris_ctx_);
             if (!frame_ok) {
@@ -1212,9 +1253,14 @@ public:
                 break;
             }
 
-            // Conecta o framebuffer do Zeetris (IDisplay::DrawRect / BitBlt) ao sink de vídeo
-            const u16* fb_zeetris = zeetris_ctx_.framebuffer.empty() ? nullptr : zeetris_ctx_.framebuffer.data();
-            const u16* fb = fb_zeetris ? fb_zeetris : (rast_ ? rast_->framebuffer_rgb565() : nullptr);
+            // Apresenta o frame do rasterizador (o jogo desenha via IGL/GL ES).
+            // NOTA: zeetris_ctx_.framebuffer era o alvo da antiga HLE de IDisplay,
+            // que se provou errada — o alvo real é o rasterizador.
+            if (rast_) {
+                rast_->end_frame();
+                fb = rast_->framebuffer_rgb565();
+                rast_->begin_frame();
+            }
             if (fb && sink_) sink_->update_frame(fb);
             frames++;
 
@@ -1243,6 +1289,19 @@ public:
 
         printf("[Zeetris/Loop] loop encerrado: frames=%llu, teclas consumidas=%llu.\n",
                (unsigned long long)frames, (unsigned long long)key_dispatches);
+        // Prova de integração no binário real: os comandos GL do guest foram
+        // despachados ao IglHook (handled>0), não só contados pelo stub.
+        printf("[Zeetris/Loop] IGL: %u chamadas, %u aceitas pelo hook, %zu slots\n",
+               zeetris_ctx_.igl_calls, zeetris_ctx_.igl_handled,
+               zeetris_ctx_.igl_slot_calls.size());
+        if (rast_) {
+            const u16* p = rast_->framebuffer_rgb565();
+            u16 c0 = p ? p[0] : 0; size_t diff = 0;
+            const size_t n = (size_t)zeebo::gpu::kFbWidth * zeebo::gpu::kFbHeight;
+            for (size_t i = 0; p && i < n; ++i) if (p[i] != c0) diff++;
+            printf("[Zeetris/Loop] rasterizador: pixel0=0x%04x, pixels diferentes=%zu/%zu\n",
+                   c0, diff, n);
+        }
     }
 
     // ── Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) ──
@@ -5214,6 +5273,8 @@ private:
     bool zwheel_life_armed_ = false;
     bool zeetris_life_armed_ = false;
     zeebo::zeetris::ZeetrisContext zeetris_ctx_{};
+    // Roteiro de teclas headless (env ZEEBO_ZEETRIS_KEYS), par (frame, AVK).
+    std::vector<std::pair<u64, u32>> scripted_keys_;
     zeebo::brew::BrewTimerQueue brew_timers_;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <set>
+#include <cstdlib>
 #include <vector>
 #include <unicorn/unicorn.h>
 #include "zeebo_zeetris_runner.h"
@@ -91,6 +92,27 @@ int main(int argc, char** argv) {
     const size_t fb_n = (size_t)zeebo::gpu::kFbWidth * zeebo::gpu::kFbHeight;
     std::printf("[test] sentinela vermelha no framebuffer: %zu/%zu px\n", red_before, fb_n);
     assert(red_before > fb_n / 2);   // o instrumento funciona
+
+    // EXPERIMENTO DIAGNÓSTICO (env-gated, OFF por padrão): o jogo nunca chama
+    // glEnableClientState (slot 29), então `assemble()` no IglHook monta vértices
+    // zerados. Sintetizamos o enable para responder à pergunta: "os dados de
+    // vértice do jogo bastam para aparecer geometria?". Se aparecer, o único
+    // bloqueio é o flag de enable; se não aparecer, faltam textura/matriz.
+    if (std::getenv("ZEEBO_ZEETRIS_FORCE_ARRAYS")) {
+        auto mk = [](u32 cap) {
+            zeebo::gpu::GuestMachine m;
+            m.arg = [cap](int) -> u32 { return cap; };
+            m.set_ret = [](u32) {};
+            m.read = [](u32, void*, u32) { return false; };
+            return m;
+        };
+        auto gm_v = mk(0x8074u);  // GL_VERTEX_ARRAY
+        auto gm_t = mk(0x8088u);  // GL_TEXTURE_COORD_ARRAY
+        bool a = igl_hook.dispatch_igl(29, gm_v);
+        bool b = igl_hook.dispatch_igl(29, gm_t);
+        std::printf("[diag] glEnableClientState sintetizado: VERTEX_ARRAY=%d TEXCOORD=%d\n",
+                    (int)a, (int)b);
+    }
 
     // Testa avanço de múltiplos frames no gameloop (60 frames)
     for (int i = 0; i < 60; ++i) {
