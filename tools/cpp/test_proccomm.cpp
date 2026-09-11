@@ -27,7 +27,34 @@ static int failures = 0;
                            else { printf("ok: %s\n", msg); } } while (0)
 
 int main(int argc, char** argv) {
-    bool buggy = (argc > 1 && std::string(argv[1]) == "buggy");
+    std::string mode = (argc > 1) ? std::string(argv[1]) : std::string();
+    bool buggy = (mode == "buggy");
+    bool derived = (mode == "derived");
+
+    // --- Mutation/control: pending derived ONLY from APP_COMMAND. ---
+    // This reproduces the QW99 Bug 6 collision directly: PCOM_CMD_RESET_MODEM
+    // (0x1) == PCOM_CMD_DONE (0x1). A model that decides "pending" from the
+    // APP_COMMAND word treats a freshly-issued RESET_MODEM as already done and
+    // never services it. This branch MUST fail so the build's negative control
+    // catches any regression back to APP_COMMAND-derived state.
+    if (derived) {
+        std::vector<uint8_t> s(0x1000, 0);
+        ProcComm app;  app.bind(s.data(), s.size());
+        ProcComm modem; modem.bind(s.data(), s.size());
+        app.core0_issue(PCOM_CMD_RESET_MODEM);
+        // Emulate the buggy derivation instead of the shared shadow.
+        auto derived_pending = [&]() {
+            pc_u32 cmd = app.rd(PCOM_OFF_APP_COMMAND);
+            if (cmd == PCOM_CMD_IDLE || cmd == PCOM_CMD_DONE) return false;
+            return app.rd(PCOM_OFF_APP_STATUS) == PCOM_STATUS_UNSET;
+        };
+        CHECK(derived_pending(),
+              "derived-from-APP_COMMAND sees RESET_MODEM as pending (it does NOT)");
+        (void)modem;
+        if (failures) { printf("\n%d CHECK(s) FAILED\n", failures); return 1; }
+        printf("\nALL PASS (derived-negative)\n");
+        return 0;
+    }
 
     // Shared SMEM backing that BOTH cores see (single buffer == shared memory).
     std::vector<uint8_t> smem(0x1000, 0);
@@ -79,6 +106,34 @@ int main(int argc, char** argv) {
 
         // Servicing with nothing pending returns false (no spurious completion).
         CHECK(!modem.core1_service(), "no pending command -> nothing serviced");
+
+        // --- Case 3 (QW99 Bug 6): RESET_MODEM id == PCOM_CMD_DONE value (0x1). ---
+        // Regression for the command-1/DONE collision: when Core0 issues
+        // RESET_MODEM (id 0x1), the handshake MUST NOT confuse the pending
+        // command with a completed one. pending state derives from an honest
+        // shadow, NOT from APP_COMMAND == 0x1 (which also means DONE). A model
+        // that reads pending only from APP_COMMAND treats RESET_MODEM as already
+        // done and never services it.
+        std::fill(smem.begin(), smem.begin()+0x10, 0);
+        app.wr(PCOM_OFF_APP_STATUS, PCOM_STATUS_UNSET);
+
+        app.core0_issue(PCOM_CMD_RESET_MODEM, /*data1=*/0x1234, /*data2=*/0);
+        CHECK(modem.rd(PCOM_OFF_APP_COMMAND) == PCOM_CMD_RESET_MODEM,
+              "RESET_MODEM (0x1) visible via shared SMEM to Core1");
+        CHECK(!app.completed(),
+              "RESET_MODEM: no fake completion at issue (0x1 != DONE here)");
+        CHECK(app.command_pending(),
+              "RESET_MODEM is pending awaiting modem (not confused with DONE)");
+
+        bool s3 = modem.core1_service();
+        CHECK(s3, "Core1 serviced the pending RESET_MODEM command");
+        CHECK(app.completed(), "RESET_MODEM completion visible to Core0 after modem step");
+        CHECK(app.status() == PCOM_CMD_SUCCESS,
+              "supported RESET_MODEM -> honest SUCCESS (guest-visible handshake)");
+        // After completion APP_COMMAND reads DONE(0x1); a fresh spurious service
+        // must not fire again.
+        CHECK(!modem.core1_service(),
+              "RESET_MODEM: completed handshake is not re-serviced");
     }
 
     if (failures) { printf("\n%d CHECK(s) FAILED\n", failures); return 1; }
