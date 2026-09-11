@@ -597,6 +597,32 @@ public:
         return false;
     }
 
+    // Effective region set a space sees: its OWN regions plus regions shared
+    // from its base PD chain (OKL4 base<-extension map window). The extension's
+    // own region shadows the base's at the same VA (extension wins). Shared,
+    // used by both the unmap (prior space) and map (target space) passes so no
+    // stale base mapping is left behind and none is missing.
+    std::vector<Region> effective_regions(u32 sid) const {
+        auto it = spaces_.find(sid);
+        std::vector<Region> eff = (it != spaces_.end()) ? it->second
+                                                        : std::vector<Region>{};
+        auto has_va = [&](u64 va){
+            for (const auto& r : eff) if (r.va == va) return true;
+            return false;
+        };
+        u32 cur = base_of(sid);
+        for (int hops = 0; hops < 8 && cur != 0; ++hops) {
+            auto bit = spaces_.find(cur);
+            if (bit != spaces_.end())
+                for (const auto& br : bit->second)
+                    if (!has_va(br.va)) eff.push_back(br);
+            u32 nxt = base_of(cur);
+            if (nxt == cur) break;
+            cur = nxt;
+        }
+        return eff;
+    }
+
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
     // Comuta o address space REAL do Unicorn para `sid`. Idempotente: reativar
     // o SID já ativo é no-op. DEVE ser chamado FORA de qualquer hook.
@@ -606,42 +632,27 @@ public:
         if (it == spaces_.end()) return UC_ERR_ARG;
         if (sid == active_sid_ && activated_once_) return UC_ERR_OK;
 
-        const std::vector<Region>& target = it->second;
+        std::vector<Region> eff = effective_regions(sid);
 
-        // Effective region set the space sees: its own regions PLUS regions
-        // shared from its base PD chain (OKL4 base<-extension map window). The
-        // extension's own region shadows the base's at the same VA.
-        std::vector<Region> eff = target;
-        {
-            auto has_va = [&](u64 va){
-                for (const auto& r : eff) if (r.va == va) return true;
-                return false;
-            };
-            u32 cur = base_of(sid);
-            for (int hops = 0; hops < 8 && cur != 0; ++hops) {
-                auto bit = spaces_.find(cur);
-                if (bit != spaces_.end())
-                    for (const auto& br : bit->second)
-                        if (!has_va(br.va)) eff.push_back(br);
-                u32 nxt = base_of(cur);
-                if (nxt == cur) break;
-                cur = nxt;
-            }
-        }
-
-        // 1) Desmapear regiões do espaço ativo que não coincidem (VA+backing)
-        //    com nenhuma região do alvo. Só toca regiões que ESTE manager criou.
+        // 1) Desmapear regiões do espaço ativo (own + base-chain) que não
+        //    coincidem (VA+size+backing) com nenhuma região efetiva do alvo. Só
+        //    toca regiões que ESTE manager criou. Ao remover uma região que
+        //    havíamos religado por cima de um mapeamento estático/plano NÃO
+        //    gerenciado, RESTAURA a presença desse mapeamento (mesma extensão e
+        //    proteção) para nunca deixar um buraco permanente no address space.
         if (activated_once_) {
-            auto prev = spaces_.find(active_sid_);
-            if (prev != spaces_.end()) {
-                for (const auto& pr : prev->second) {
-                    bool keep = false;
-                    for (const auto& tr : eff) {
-                        if (tr.va == pr.va && tr.size == pr.size && tr.host == pr.host) {
-                            keep = true; break;
-                        }
+            std::vector<Region> prev_eff = effective_regions(active_sid_);
+            for (const auto& pr : prev_eff) {
+                bool keep = false;
+                for (const auto& tr : eff) {
+                    if (tr.va == pr.va && tr.size == pr.size && tr.host == pr.host) {
+                        keep = true; break;
                     }
-                    if (!keep) uc_mem_unmap(uc, pr.va, (size_t)pr.size);
+                }
+                if (!keep) {
+                    uc_mem_unmap(uc, pr.va, (size_t)pr.size);
+                    mapped_host_.erase(pr.va);
+                    restore_shadow(uc, pr.va);
                 }
             }
         }
@@ -651,14 +662,31 @@ public:
         uc_err first_err = UC_ERR_OK;
         for (const auto& tr : eff) {
             int prot = tr.prot ? tr.prot : UC_PROT_READ;
+
+            // Já temos ESTA VA mapeada com ESTE host (região preservada do
+            // espaço anterior): só reafirma a proteção, sem unmap/rebind.
+            auto mh = mapped_host_.find(tr.va);
+            if (mh != mapped_host_.end() && mh->second == tr.host) {
+                uc_err e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
+                if (e != UC_ERR_OK && first_err == UC_ERR_OK) first_err = e;
+                continue;
+            }
+
             uc_err e = uc_mem_map_ptr(uc, tr.va, (size_t)tr.size, prot, tr.host);
             if (e == UC_ERR_MAP) {
-                // VA já mapeada. Se temos um backing de host próprio para esta
-                // região (ex.: página compartilhada do espaço base OKL4), a VA
-                // pode estar coberta por um mapeamento estático/plano com o
-                // backing ERRADO; reprotect sozinho não religa o ponteiro. Force
-                // o religamento: unmap + map_ptr. Se falhar, volte ao reprotect.
+                // VA já mapeada por algo que NÃO é nossa região idêntica. Se
+                // temos um backing próprio (ex.: página compartilhada do espaço
+                // base OKL4), a VA pode estar coberta por um mapeamento
+                // estático/plano com o backing ERRADO; reprotect sozinho não
+                // religa o ponteiro. Force o religamento: unmap + map_ptr.
                 if (tr.host) {
+                    // Se o mapeamento pré-existente NÃO é gerenciado por este
+                    // SpaceManager (estático/plano criado externamente),
+                    // registra a extensão/proteção dele para poder RECRIAR sua
+                    // presença ao sairmos deste espaço — nunca o destruímos
+                    // permanentemente.
+                    if (mapped_host_.find(tr.va) == mapped_host_.end())
+                        record_shadow(uc, tr.va, tr.size, prot);
                     uc_err ue = uc_mem_unmap(uc, tr.va, (size_t)tr.size);
                     if (ue == UC_ERR_OK)
                         e = uc_mem_map_ptr(uc, tr.va, (size_t)tr.size, prot, tr.host);
@@ -668,6 +696,7 @@ public:
                     e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
                 }
             }
+            if (e == UC_ERR_OK) mapped_host_[tr.va] = tr.host;
             if (e != UC_ERR_OK && first_err == UC_ERR_OK) first_err = e;
         }
 
@@ -677,11 +706,56 @@ public:
     }
 #endif
 
-    void clear() { spaces_.clear(); base_of_.clear(); active_sid_ = 0; activated_once_ = false; }
+    void clear() {
+        spaces_.clear(); base_of_.clear();
+#ifdef ZEEBO_L4_MMU_WITH_UNICORN
+        mapped_host_.clear(); shadowed_.clear();
+#endif
+        active_sid_ = 0; activated_once_ = false;
+    }
 
 private:
+#ifdef ZEEBO_L4_MMU_WITH_UNICORN
+    // Descobre a proteção do mapeamento estático/plano que cobre `va` (se
+    // houver) e registra a sub-faixa [va, va+size) que estamos prestes a
+    // religar, para recriá-la depois. Não guarda conteúdo (o host pertence ao
+    // Unicorn, não a nós); guarda apenas presença + proteção.
+    void record_shadow(uc_engine* uc, u64 va, u64 size, int prot) {
+        if (shadowed_.find(va) != shadowed_.end()) return; // preserva o 1º
+        int found_prot = prot;
+        uc_mem_region* regions = nullptr; uint32_t count = 0;
+        if (uc_mem_regions(uc, &regions, &count) == UC_ERR_OK) {
+            for (uint32_t i = 0; i < count; ++i) {
+                if (va >= regions[i].begin && va <= regions[i].end) {
+                    found_prot = (int)regions[i].perms; break;
+                }
+            }
+            uc_free(regions);
+        }
+        shadowed_[va] = Region{ va, size, found_prot, nullptr };
+    }
+
+    // Recria a presença de um mapeamento estático/plano que havíamos religado,
+    // ao sair do espaço que o religou. Mapeia RAM nova própria do Unicorn com a
+    // mesma extensão/proteção: garante que a VA continue mapeada (sem buraco
+    // permanente). O conteúdo original não é preservável (era backing do
+    // Unicorn), mas a presença sim — que é o invariante de segurança.
+    void restore_shadow(uc_engine* uc, u64 va) {
+        auto sit = shadowed_.find(va);
+        if (sit == shadowed_.end()) return;
+        const Region& s = sit->second;
+        int prot = s.prot ? s.prot : UC_PROT_READ;
+        uc_mem_map(uc, s.va, (size_t)s.size, prot); // best-effort; ignora colisão
+        shadowed_.erase(sit);
+    }
+#endif
+
     std::map<u32, std::vector<Region>> spaces_;
     std::map<u32, u32> base_of_;   // extension sid -> base sid (OKL4 PD sharing)
+#ifdef ZEEBO_L4_MMU_WITH_UNICORN
+    std::map<u64, u8*>    mapped_host_; // VA -> host atualmente mapeado por nós
+    std::map<u64, Region> shadowed_;    // VA -> estático religado a restaurar
+#endif
     u32  active_sid_ = 0;
     bool activated_once_ = false;
 };
