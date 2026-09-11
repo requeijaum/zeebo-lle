@@ -1,10 +1,29 @@
-# Zeebo LLE Emulator — ROADMAP: Double Dragon jogável (revisão auditada)
+# Zeebo LLE Emulator — ROADMAP: jogo comercial jogável (revisão auditada)
 
-## Objetivo e estado real — base auditada `9c7ae29`
+## Objetivo e estado real — atualização 2026-09-11
 
-**Objetivo aberto:** no executável LLE, iniciar Double Dragon, atravessar splash/menu,
-entrar numa fase, controlar o personagem e ouvir música/efeitos produzidos pelo jogo.
-BREW AppMgr e Z-Wheel permanecem objetivos de boot; não substituir o emulador por Infuse.
+**Objetivo primário:** no executável LLE, bootar o Zeetris real, atravessar splash/menu,
+entrar em partida, controlar o jogo, renderizar vídeo derivado do guest e ouvir música/efeitos
+derivados do guest. Double Dragon continua como vertical de regressão, não substituto do Zeetris.
+BREW AppMgr e Z-Wheel permanecem gates de boot; não substituir o emulador por Infuse.
+
+### Atualização de direção e evidência — 2026-09-11
+
+- AppMgr: handoff real para AMSS/BREW e `AEECShell dispatch @0x10c874f4` foram observados;
+  isso é progresso de boot, não shell visível nem jogo executado.
+- Zeetris: o `.mod` foi injetado em `0x12000000` e seu `AEEMod_Load @0x12000048` executou.
+  O dispatcher ainda o chama incorretamente como `IApplet::HandleEvent`; a próxima fronteira é
+  `AEEMod_Load → IModule::CreateInstance(CLSID estrutural do .mif) → IApplet::HandleEvent`.
+- Vídeo: `b568d97` adicionou, com TDD, o consumidor de lista MDDI RGB565 (`PRI_PTR`) usando
+  memória guest via callback. O teste cobre duas regiões e controles negativos, mas o runtime
+  principal ainda precisa conectar esse sink à apresentação e medir um `PRI_PTR` real do AppMgr.
+- QDSP5 e GPU: Rafael liberou desenvolvimento em ambos. A regra anterior de freeze foi removida.
+  O primeiro alvo QDSP5 é roteamento AUDPLAY medido; Zeetris usa MP3, portanto ACK, WAV sintético
+  ou PCM inventado não são áudio do jogo. O primeiro alvo GPU é scanout MDDI real e, depois,
+  fronteiras IDisplay/IGL vivas.
+- Gate de jogo jogável: PC no módulo e instância BREW real; frame não uniforme originado pelo
+  guest; input real consumido e alterando estado observável; PCM não silencioso derivado de buffer
+  guest e uma sessão controlável de cinco minutos. Cada um exige controle negativo.
 
 **Correção explícita dos relatos anteriores:** os commits `d530d4c`, `7c146f6` e
 `9c7ae29` NÃO provam jogos executando com som e imagem. `--applet=` copia bytes;
@@ -148,9 +167,13 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
    - *Current status:* Concluído em `tools/cpp/zeebo_nand_relocator.cpp`.
    - *Verified:* Leitura direta da cópia da NAND (`1.1.2.bin` bloco 0x12) via descritores DMA do hardware DMOV (`DMOVModel` / `NandController`), decodificação do cabeçalho ELF (`0x464c457f`), extração do entrypoint `0x00a00000` e mapeamento das 18 seções `PT_LOAD` em tempo de execução sem arquivos ELF pré-extraídos.
 
-4. **Adreno 130 3D / 2D Display Engine & MDDI Bridge [PROTOTIPADO E VALIDADO]:**
-   - *Current status:* Concluído em `tools/cpp/zeebo_mddi_display.cpp`.
-   - *Verified:* Controlador virtual de interface serial MDDI em `0xAA600000` via `uc_mmio_map`, com respostas fiéis de versão do núcleo (`0x00000102`), comandos de inicialização de enlace (`CMD_POWER_UP`), status de link ativo (`STAT_LINK_ACTIVE`), e processamento de listas primárias de DMA (`MDDI_PRI_PTR`) para transferência de quadros de vídeo RGB565 em resolução nativa de 640x480.
+4. **Adreno 130 3D / 2D Display Engine & MDDI Bridge [PARCIAL, COM SCANOUT UNITÁRIO]:**
+   - *Current status:* MMIO MDDI/Adreno e sink SDL2 existem; `b568d97` implementa o consumo de
+     lista ligada `MDDI_PRI_PTR` RGB565 em `zeebo_video_mmio.h`, com leitor de memória guest
+     injetado e testes positivo/negativos. A ligação desse buffer ao loop principal e a observação
+     de uma lista real escrita pelo AppMgr permanecem pendentes.
+   - *Verified:* versão MDDI (`0x00000102`), POWER_UP/link ativo e o DMA unitário de spans RGB565
+     640×480. Nenhuma dessas provas, isoladamente, afirma ícones da shell ou frame de jogo.
 
 ---
 
@@ -211,6 +234,9 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] Quick wins GL QW4/QW5/QW7 (`e078422`, `9dfdc9e`): alpha-test; culling com defaults GLES CCW/`GL_BACK`; `glTexParameterx` por textura (NEAREST/LINEAR, REPEAT/CLAMP); oito depth funcs e fatores usuais de blend. Gate `gl_quickwins_smoke`: 13/13 pixels/comportamentos PASS. `glFrontFace` não foi inventado porque nenhum slot vivo foi observado; MIN_FILTER permanece estado-only até existir LOD/minificação.
 - [x] ATITC clean-room em `glCompressedTexImage2D` slot 15 (QW9, `94a449c`): RGB methods 0/1, alpha explícito/interpolado e crop 6×6; oracle independente e gate 15/15 por pixels/FNV.
 - [x] Compatibilidade restante: clipping homogêneo do near-plane e interpolação perspectiva (QW10/QW11 em `gl_clip_smoke.cpp`, testado no gate GPU), além de `GL_OES_draw_texture`.
+- [ ] Scanout MDDI integrado: ligar `UnifiedMDDI::attach_scanout` ao leitor Core0 e ao
+  `UnifiedDisplaySink`, e apresentar somente depois de `PRI_PTR` válido. Gate: AppMgr real deve
+  escrever `0xaa600008` e gerar PPM com mais de uma cor; lista nula/não-vídeo não pode apresentar.
 - [ ] Caminhos guest reais: observar o retorno do `eglGetProcAddress` do firmware e registrar apenas o VA vivo; resolver `IEGLSurfaceManip` somente após QueryInterface/objeto vivo. Não usar trampolim, string ou vtable sintética do Zeebx.
 
 ### Fase 10: Subsistema QDSP5 (Áudio e Multimídia) — acoplamento ONCRPC e streaming
@@ -219,8 +245,14 @@ To achieve the ultimate goal — booting the real firmware end-to-end to launch 
 - [x] **Acoplamento oficial do `Qdsp5Dispatcher` ao `UnifiedSMDBridge`**: IDs oficiais `prog::AUDMGR` (`0x30000013`) e `prog::ADSPRTOSATOM` (`0x3000000a`) substituindo o ID provisório `0x30000060`.
 - [x] **Hook de consumo e retorno RPC**: captura em `0x16e8cb96`/`0x16e8cba0` alimenta `qdsp_disp_->feed_raw` com memória guest Core 0 (`guest.read`). Conclusão aciona respostas nos canais de retorno `0x31000013` (`AUDMGR_CB`) e `0x3000000b` (`ADSPRTOSMTOA`) via `on_completion`.
 - [x] Backend SDL de saída implementado em `UnifiedHostAudio` (`d530d4c`); abertura com dummy comprovada.
-- [ ] Streaming de PCM originado pelo jogo, sincronização e encerramento seguros: ainda sem prova de som de DD/AppMgr/Z-Wheel. QDSP5 permanece congelado; auditar integração host sem expandir engines.
-- [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — expansão pós-áudio funcional.
+- [ ] Zeetris/AUDPLAY: capturar no dispatcher um pacote real da sessão Zeetris (programa, proc,
+  payload, TCB e buffer), roteá-lo ao engine AUDPLAY com parser limitado e controles negativos.
+  Primeiro marco não produz PCM: prova somente classificação/encaminhamento de pacote válido e
+  rejeição de pacote malformado. Não introduzir decodificador MP3 antes desse contrato.
+- [ ] Streaming de PCM originado pelo jogo, sincronização e encerramento seguros: para Zeetris,
+  implementar AUDPLAY+MP3 a partir de bitstream e completion reais, depois provar PCM não-silencioso
+  derivado do guest por WAV e escuta. ACK, SDL aberto, WAV sintético ou tom host não contam.
+- [ ] Q2/Q3/Q4: JPEG (libjpeg-turbo), VFE, VOICE — expansão posterior ao áudio Zeetris funcional.
 
 ### Fase 11: Execução Guest Real e Resolução dos 5 Gargalos Estruturais
 - [x] **Eliminação de saltos artificiais**: remoção de `core0_.entry = 0x1013a000` hardcoded; avanço autêntico por `uc_emu_start` nos dois núcleos.
@@ -1313,7 +1345,8 @@ Assertion r != 0 failed in file pistachio/arch/arm/src/init.cc, line 130
 - Checkpoint completo, scheduler e GDB RSP: têm alto valor, mas são mudanças transversais; executar como P1 com gates próprios, não vendê-los como correções pequenas.
 - `libco`/corrotinas, árvore dinâmica completa do ares, BML/icarus, GUI debugger do higan e dependência integral de nall: rejeitados para a arquitetura fixa baseada em Unicorn.
 - Código Ymir/higan: GPL; transferir somente arquitetura/comportamento documentado e reimplementar. ares é permissivo no núcleo, mas dependências exigem auditoria/atribuição antes de cópia literal.
-- Áudio/JPEG/VFE/QDSP5: aguardar liberação explícita do QDSP5.
+- Áudio/JPEG/VFE/QDSP5: autorizados. Prioridade atual é AUDPLAY/MP3 do Zeetris, a partir de
+  pacote real capturado e com gate de PCM de origem guest; JPEG/VFE/VOICE ficam depois.
 - Backend GL host/ubershader: otimização posterior; primeiro fechar correção do backend software e boot guest.
 
 ---
@@ -1330,11 +1363,13 @@ Assertion r != 0 failed in file pistachio/arch/arm/src/init.cc, line 130
 
 - **Concluído:** QW2–QW7, QW9, QW12, QW14–QW17, QW18 (análise), QW19, QW20, QW21 (análise) e QW22; todos integrados com TDD, mutações load-bearing e revisão independente (spec + quality). QW1/QW8 permanecem parciais honestos.
 - **Frente A — cadeia crítica (Passo 13/14):** QW40 concluído (ativação real de thread por HALTFLAG, sem DELIVER), QW41 (preservação de T-bit), QW42 (`e67e3b4`: cópia local ARM do ExchangeRegisters), QW43 (underflow RLE = bug da simulação Python, não do firmware), QW44 (`9ca92a6`: guard T-bit generalizado). O boot real avança, renderiza 14 frames/32 draws do Adreno, mas o frame é PRETO. Próximos: QW45 (conectar draws ao framebuffer) e QW46 (scheduler real na ordem OKL4).
-- **Frente de hardening curto:** QW14/QW15/QW16/QW20 concluídos; `--strict-unmapped` permanece opt-in e QDSP5 não foi alterado.
-- **Depois do Passo 13:** Passo 14 e P1 na ordem checkpoint → tempo híbrido → JSON-RPC → GDB; só promover objetos, extensões e applets alcançados pelo boot real.
-- **QDSP5:** congelado até liberação explícita; executar seus testes, mas não editar `tools/cpp/qdsp5/`.
+- **Frente de hardening curto:** QW14/QW15/QW16/QW20 concluídos; `--strict-unmapped` permanece opt-in.
+- **GPU/MDDI:** `b568d97` fecha o consumidor unitário de lista RGB565; a prioridade é conectá-lo
+  ao loop real e medir `PRI_PTR` do AppMgr/Zeetris antes de expandir rasterização.
+- **QDSP5:** desenvolvimento autorizado. Prioridade é auditoria/captura e roteamento testável de
+  AUDPLAY real do Zeetris; não promover ACK ou PCM sintético a áudio funcional.
 
-Gate de toda frente: alvo afetado RED→GREEN, `make check`, `test-bootinfo-real` quando houver afirmação sobre BootInfo, QDSP5 sem alterações, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
+Gate de toda frente: alvo afetado RED→GREEN, `make check`, `test-bootinfo-real` quando houver afirmação sobre BootInfo, `run_lle_cputests.sh` 12/12, `git diff --check` e clone limpo compilável.
 
 
 **QW43 — sessão de análise estática (2026-09-09, sem execução de binários) — 3 achados confirmados por disassembly+simulação Python, hipóteses (a)/(b) documentadas**
@@ -2514,18 +2549,20 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   PRÓXIMO ALVO indicado pelo dado: static-base `+0xc0` (**138 call-sites**, maior
   consumidor isolado do binário) e `+0x6c` (32 sites) — juntos 71% dos sites de
   static-base, ambos ainda não alcançados porque o tick retorna antes.
-- [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
-- [ ] **DD6 — áudio e jogabilidade:** bloqueado até liberação explícita do freeze de
-  `tools/cpp/qdsp5/`. Depois, provar PCM originado pelo guest e sessão de cinco minutos
-  com imagem, input e som. ACK QDSP5, SDL aberto ou tom sintético não contam.
+- [ ] **ZEETRIS-L — lifecycle/boot:** executar `AEEMod_Load → IModule::CreateInstance →
+  IApplet::HandleEvent` com o CLSID estrutural de `zeetris.mif`, sem handler Z-Wheel emprestado.
+  Gate: PC no módulo, objeto/applet retornado e evento tratado por handler pertencente ao módulo;
+  arquivo inválido e CLSID incompatível devem falhar.
+- [ ] **ZEETRIS-V — vídeo e controles:** MDDI/IDisplay/IGL deve gerar frame não uniforme de origem
+  guest; eventos SDL→Z-Pad→AVK devem ser consumidos pelo applet Zeetris e alterar pixels/estado.
+- [ ] **ZEETRIS-A — áudio e jogabilidade:** capturar AUDPLAY real, decodificar MP3 com completion
+  correlacionada e provar PCM guest-originado; então sessão de cinco minutos com imagem, input e som.
+  ACK QDSP5, SDL aberto ou tom sintético não contam.
 
 Gate final: evidência encadeada `guest → modelo → efeito no boot/jogo`, com origem do
 frame e do PCM identificada. Marcos B (boot orgânico), L (loaded/instanced) e I
 (primeiro PC) são independentes; resultado assistido pode fechar diagnóstico, nunca B.
-Não priorizar outros jogos, expansão do rasterizador, Dynarmic ou QDSP5 especulativo
-antes de DD1a–DD3.
-
-**Ordem corrigida:** higiene P0 mínima; medir scatterload/Core1 imediatamente; bugs 5/6
-e DD1a–DD3 em paralelo. Convergir depois em boot orgânico/DD1b, frame/input e, somente
-após o stop/go do freeze QDSP5, áudio. Refatoração estrutural ocorre conforme necessária
-para testes, não como frente infinita.
+Prioridade: ZEETRIS-L → ZEETRIS-V → ZEETRIS-A, mantendo Double Dragon somente como regressão.
+Não priorizar outros jogos ou Dynarmic antes de ZEETRIS-L; expansão do rasterizador e QDSP5
+só avançam quando o pacote/objeto vivo seguinte for medido. Refatoração estrutural ocorre
+conforme necessária para testes, não como frente infinita.
