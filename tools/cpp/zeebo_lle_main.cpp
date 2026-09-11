@@ -50,6 +50,7 @@
 #include "zeebo_brew_loader.h"
 #include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
 #include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
+#include "zeebo_module_gate.h"      // DD0: gate honesto de módulo — sem PASS por carga isolada
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
 #define ZEEBO_VIC_WITH_UNICORN
@@ -883,6 +884,23 @@ public:
     // test-zwheel. Retorna true se o manipulador tratou EVT_APP_START (r0==1).
     static ZeeboLLESystem* s_zwheel_hook_sys_;   // ctx p/ o hook transitório do stub
     static uint32_t        s_zwheel_stub_va_;
+    // DD0: contexto do hook de PC do módulo — o hook marca `s_module_pc_seen_`
+    // quando um PC executado cai na faixa [s_module_lo_, s_module_hi_). Só então
+    // o gate honesto pode promover o jogo a EXECUTED (nunca por carga isolada).
+    static ZeeboLLESystem* s_module_hook_sys_;
+    static uint32_t        s_module_lo_;
+    static uint32_t        s_module_hi_;
+    static bool            s_module_pc_seen_;
+    // DD0 PC-hook: observa cada bloco/instrução executada em Core0 e registra se
+    // algum PC pertence à faixa do módulo. Estático porque o Unicorn exige uma
+    // função C; o contexto vem do `s_module_*` armado por dispatch_module_app_start.
+    static void module_pc_hook(uc_engine*, uint64_t address, uint32_t, void*) {
+        const uint32_t pc = static_cast<uint32_t>(address);
+        if (zeebo::module_gate::pc_in_module_range(
+                s_module_lo_, s_module_hi_ - s_module_lo_, pc)) {
+            s_module_pc_seen_ = true;
+        }
+    }
     bool dispatch_zwheel_app_start() {
         static constexpr u32 ZWHEEL_HANDLER_VA = 0x10532344; // manipulador Thumb do ZeeboApp
         static constexpr u32 EVT_APP_START     = 0x1f96;     // K(0x1f92)+4
@@ -1027,16 +1045,56 @@ public:
         uc_mem_map(core0_.uc, SB, SS, UC_PROT_ALL); // ok se já mapeado
         std::vector<u8> zeros(SS, 0);
         uc_mem_write(core0_.uc, SB, zeros.data(), zeros.size());
+
+        // DD0: constrói a identidade honesta do módulo a partir do BrewLoader e
+        // rejeita ANTES de executar qualquer arquivo inválido/externo (não
+        // injetado, vazio, ou sem entry AEEMod_Load resolvido). Preserva os
+        // identificadores de proveniência (base/size/entry/kind), inclusive RAW MOD.
+        namespace mg = zeebo::module_gate;
+        mg::ModuleIdentity ident{};
+        if (brew_->has_module()) {
+            const auto& m = brew_->module();
+            ident = mg::ModuleIdentity{ m.injected, m.load_va, m.size,
+                                        m.entry_va, m.entry_kind };
+        }
+        if (!mg::module_is_valid(ident)) {
+            printf("[BREW/Applet] '%s': GATE DD0 → INVALID: módulo inválido/externo "
+                   "(injetado=%d size=%u entry=0x%08x kind=%u) — falha ANTES de executar, sem PASS.\n",
+                   app_name.c_str(), ident.injected, ident.size, ident.entry_va, ident.entry_kind);
+            return false;
+        }
+
+        // DD0: arma o hook de PC do módulo. O jogo só recebe PASS se um PC
+        // REALMENTE executado cair na faixa [load_va, load_va+size). Carga
+        // (loaded_only) não basta; o handler fixo 0x10532344 está fora da faixa.
+        s_module_hook_sys_ = this;
+        s_module_lo_ = ident.load_va;
+        s_module_hi_ = ident.load_va + ident.size;
+        s_module_pc_seen_ = false;
+        uc_hook h_mod = 0;
+        uc_hook_add(core0_.uc, &h_mod, UC_HOOK_CODE, (void*)module_pc_hook, this,
+                    ident.load_va, static_cast<uint64_t>(ident.load_va) + ident.size - 1);
+
         printf("[BREW/Applet] '%s': despachando EVT_APP_START(0x%04x) → HandleEvent@0x%08x "
-               "(manipulador REAL do módulo)\n", app_name.c_str(), EVT_APP_START, handler_va);
+               "(manipulador REAL do módulo) [faixa DD0 0x%08x..0x%08x)\n",
+               app_name.c_str(), EVT_APP_START, handler_va, s_module_lo_, s_module_hi_);
         bool clean = false;
         u32 r0 = brew_->dispatch_event(handler_va, APPLET, EVT_APP_START,
                                        /*keycode=*/0, STACKTP, RETMAG, /*dwparam=*/0, &clean);
-        bool ok = clean && r0 == 1;
-        printf("[BREW/Applet] '%s': EVT_APP_START → r0=%u (uc=%s) → %s\n",
+        uc_hook_del(core0_.uc, h_mod);
+        s_module_hook_sys_ = nullptr;
+
+        const bool consumed = clean && r0 == 1;
+        // DD0: PASS honesto exige módulo válido + dispatch limpo/consumido + PC
+        // observado dentro da faixa do módulo. Qualquer falta → loaded_only.
+        mg::GameState state = mg::classify(ident, consumed, s_module_pc_seen_);
+        bool ok = state == mg::GAME_EXECUTED;
+        printf("[BREW/Applet] '%s': EVT_APP_START → r0=%u (uc=%s) | PC_no_módulo=%s → estado=%s → %s\n",
                app_name.c_str(), r0, clean ? "clean" : "abortado",
-               ok ? "applet consumiu o evento (execução real)"
-                  : "loaded_only (manipulador não consumiu — sem PASS)");
+               s_module_pc_seen_ ? "sim" : "não",
+               mg::game_state_label(state),
+               ok ? "applet EXECUTOU de fato (PASS honesto)"
+                  : "loaded_only (sem PC executado no módulo — sem PASS)");
         return ok;
     }
 
@@ -4397,6 +4455,10 @@ public:
 
 // Definições dos membros estáticos do hook transitório do ciclo de vida Z-Wheel.
 ZeeboLLESystem* ZeeboLLESystem::s_zwheel_hook_sys_ = nullptr;
+ZeeboLLESystem* ZeeboLLESystem::s_module_hook_sys_ = nullptr;
+uint32_t        ZeeboLLESystem::s_module_lo_ = 0;
+uint32_t        ZeeboLLESystem::s_module_hi_ = 0;
+bool            ZeeboLLESystem::s_module_pc_seen_ = false;
 uint32_t        ZeeboLLESystem::s_zwheel_stub_va_  = 0;
 
 static void print_usage(const char* prog) {

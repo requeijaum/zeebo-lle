@@ -163,6 +163,24 @@ test_applet_dispatch: test_applet_dispatch.cpp zeebo_applet_dispatch.h
 	$(CXX) $(CXXFLAGS) -o $@ test_applet_dispatch.cpp
 	./test_applet_dispatch
 
+# DD0 (QW99 Parte 1): gate honesto de módulo — sem PASS por carga isolada.
+# GREEN roda o teste unitário puro. A mutação negativa reintroduz o falso PASS
+# loaded-only (PASS_ON_LOAD=1) e DEVE ficar vermelha.
+test_module_gate: test_module_gate.cpp zeebo_module_gate.h
+	$(CXX) $(CXXFLAGS) -o $@ test_module_gate.cpp
+	./test_module_gate
+
+test-module-gate: test_module_gate
+	./test_module_gate
+	@# Controle mutacional: um gate que dá PASS por carga (ignora o PC no módulo
+	@# e trata entry não resolvido como válido) DEVE reprovar os negativos.
+	@$(CXX) $(CXXFLAGS) -DZEEBO_DD0_MUTANT_PASS_ON_LOAD=1 -o test_module_gate_mutant test_module_gate.cpp
+	@if ./test_module_gate_mutant >/dev/null 2>&1; then \
+	  echo "FAIL: mutante PASS-on-load passou inesperadamente (gate não é honesto)"; \
+	  rm -f test_module_gate_mutant; exit 1; \
+	else echo "OK: mutante PASS-on-load fica vermelho (RED reproduzido)"; \
+	  rm -f test_module_gate_mutant; fi
+
 # Bug 4 (gap fechado): prova REAL, sob Unicorn, de que o gate exige permissão de
 # EXECUÇÃO do guest (UC_PROT_EXEC via uc_mem_regions), não apenas legibilidade de
 # host. Página RO/RW/não-mapeada/parcial → REJECT; RX/RWX → ACEITA. Mutante que
@@ -368,19 +386,24 @@ test-efs2-game-reksio: zeebo_lle_main
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
 
-# QW-ROMS1: valida o carregamento de .mod externos (host filesystem, SEM
-# montagem de NAND) via --applet=<caminho> para o catálogo real de ROMs de
-# Zeebo (mídia física do usuário, fora do repo — ver ROADMAP para o path).
-# Cada jogo deve completar EVT_APP_START (r0=1) e o dispatch de ciclo de vida
-# (PASS), provando que o injetor BrewLoader funciona como VFS mínimo: qualquer
-# .mod válido pode ser injetado diretamente em 0x12000000 sem precisar estar
-# catalogado na NAND 1.1.2 (EFS2). Uso: make test-roms-external ROM=<path.mod>
+# QW-ROMS1 / DD0: valida o carregamento de .mod externos (host filesystem, SEM
+# montagem de NAND) via --applet=<caminho>. Gate HONESTO (QW99 Parte 1): um jogo
+# externo só recebe PASS quando o módulo é VÁLIDO e um PC pertencente à sua faixa
+# [load_va,load_va+size) REALMENTE executa — carregar (loaded_only) NÃO basta e
+# módulo inválido falha ANTES de executar. A linha "PASS honesto" é emitida só
+# pelo gate DD0; "loaded_only", "GATE DD0 → INVALID" ou exit!=0 são FAIL de jogo.
+# Uso: make test-roms-external ROM=<path.mod>
 test-roms-external: zeebo_lle_main
 	@test -n "$(ROM)" || (echo "Uso: make test-roms-external ROM=<caminho.mod>"; exit 1)
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --applet="$(ROM)" --seconds=1 \
-	  | grep -q "BREW/Applet] PASS" \
-	  && echo "PASS: --applet=$(ROM) executou via injeção externa (sem NAND)." \
-	  || (echo "FAIL: applet externo $(ROM) não completou o ciclo de vida"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --applet="$(ROM)" --seconds=1 2>&1); \
+	 rc=$$?; \
+	 if echo "$$out" | grep -q "PASS honesto" && [ $$rc -eq 0 ]; then \
+	   echo "PASS: --applet=$(ROM) EXECUTOU de fato (PC no módulo) via injeção externa."; \
+	 elif echo "$$out" | grep -q "GATE DD0 → INVALID"; then \
+	   echo "FAIL(esperado p/ inválido): $(ROM) rejeitado ANTES de executar (módulo inválido)."; exit 1; \
+	 else \
+	   echo "FAIL: applet externo $(ROM) permaneceu loaded_only (sem PC executado no módulo) — sem PASS de jogo."; exit 1; \
+	 fi
 
 # QW6 + QW15 transactional conformance: locally authored ARM/Thumb vectors run
 # under the Unicorn txn probe and diffed against golden traces (ordered
@@ -491,9 +514,10 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm
 	./test_applet_dispatch
 	./test_applet_exec_perm
+	./test_module_gate
 	./test_brew_timer
 	./test_audio_sink
 	./test_audio_lifetime
@@ -554,7 +578,7 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_vic_irq test_gpt_timer test_proccomm *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
