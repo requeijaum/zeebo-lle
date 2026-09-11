@@ -2446,6 +2446,9 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   Desmontagem de `IModule_CreateInstance` (`0x12002078`) revelou o handler interno
   em `0x120006b0`, que valida diretamente a classe do jogo (`0x0102f789` no literal `0x12000738`),
   rejeitando outras classes e despachando para o construtor do applet em `0x12000490`.
+  Execução assistida em `test_dd1a_diag` comprovou a rejeição com r0=1 para classes divergentes
+  e a entrada com 96 instruções para `0x0102f789`, alcançando o primeiro pedido de serviço
+  do shell em `0x1200058c: bx r3` (slot 2 de `pIShell->vtable` = `IShell::CreateInstance`).
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.

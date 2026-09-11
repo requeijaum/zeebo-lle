@@ -373,6 +373,36 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[DD1-runtime/probe] vtable IModule: AddRef=0x%08x Release=0x%08x CreateInstance=0x%08x FreeRes=0x%08x\n",
                          vtbl_methods[0], vtbl_methods[1], vtbl_methods[2], vtbl_methods[3]);
 
+            // Testar CreateInstance com CLSID incompatível (deve retornar erro r0 != 0)
+            u32 ppApplet = SCRATCH + 0x400;
+            uc_mem_write(uc2, ppApplet, "\0\0\0\0", 4);
+            // IModule_CreateInstance(this=ALLOC_BUF, pIShell=SCRATCH, clsid=0x12345678, ppApplet)
+            FirstPcResult r_mismatch = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
+                                                    ALLOC_BUF, SCRATCH, 0x12345678, ppApplet);
+            assert(r_mismatch.ran && r_mismatch.entered_module);
+            u32 r0_mismatch = 0;
+            uc_reg_read(uc2, UC_ARM_REG_R0, &r0_mismatch);
+            assert(r0_mismatch != 0); // CLSID desconhecido -> falha (EFAILED/EBADCLASS)
+            std::fprintf(stderr, "[DD1-runtime/probe] CreateInstance mismatch (0x12345678): r0=0x%08x (rejeitado corretamente)\n", r0_mismatch);
+
+            // Testar CreateInstance com CLSID correto do jogo (0x0102f789)
+            // Deve entrar no construtor do applet em 0x12000490!
+            uc_mem_write(uc2, ppApplet, "\0\0\0\0", 4);
+            FirstPcResult r_match = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
+                                                 ALLOC_BUF, SCRATCH, DD_CLSID, ppApplet);
+            std::fprintf(stderr, "[DD1-runtime/probe] CreateInstance match (0x%08x): ran=%s entered=%s "
+                         "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x\n",
+                         DD_CLSID, r_match.ran ? "SIM" : "nao", r_match.entered_module ? "SIM" : "nao",
+                         r_match.first_pc, r_match.last_pc, (unsigned long long)r_match.instructions,
+                         fault_label(r_match.fault), r_match.fault_va);
+            // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
+            // avança através do construtor de applet e atinge 96 instruções executadas,
+            // parando em 0x1200058c (bx r3 = IShell::CreateInstance slot 2) onde busca o primeiro serviço do shell!
+            assert(r_match.ran && r_match.entered_module);
+            assert(r_match.instructions == 96);
+            assert(r_match.last_pc == 0x1200058c);
+            assert(r_match.fault == FAULT_FETCH_UNMAPPED);
+
             uc_close(uc2);
         }
     }
