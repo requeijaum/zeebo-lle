@@ -359,19 +359,16 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, LB - 4, &STATIC_BASE, 4);
 
             // Em AEEMod_Load para alocar a estrutura AEEStaticMod:
-            // Para manter a fidelidade e contagem estrita de 73 instruções do contrato
-            // de AEEMod_Load, o stub MALLOC de 2 instruções (ldr r0, [pc]; bx lr) pode
-            // continuar com 2 instruções! Basta fazer o mock devolver ALLOC_BUF1 na primeira
-            // vez (chamada de AEEMod_Load) e ALLOC_BUF2 na segunda vez (chamada de CreateInstance).
-            // Stub de 2 instruções em SCRATCH + 0x2000 que lê o ponteiro atual em SCRATCH + 0x2008,
-            // e uma instrução avançando o ponteiro:
-            //   ldr r0, [pc, #0]  (em 0x00 -> lê em 0x08)
-            //   bx lr
-            //   ALLOC_BUF
-            // No teste, após AEEMod_Load concluir, atualizamos a palavra em SCRATCH + 0x2008 para ALLOC_BUF2!
+            // O mock original de 2 instruções (ldr r0, [pc]; bx lr) mantém a contagem
+            // estrita de 73 instruções durante AEEMod_Load.
+            // Para as alocações subsequentes (CreateInstance e game loop), um stub que
+            // avança o bump pointer ou um array de buffers pré-alocados funciona perfeitamente.
+            // Usamos um stub de 2 instruções onde AEEMod_Load consome exatamente 2 instruções,
+            // e mantemos um bump pointer atualizado pelo host entre as etapas ou com retorno sequencial.
             const u32 MALLOC_STUB = SCRATCH + 0x2000;
             const u32 ALLOC_BUF1 = SCRATCH + 0x3000;
             const u32 ALLOC_BUF2 = SCRATCH + 0x4000;
+            const u32 ALLOC_BUF3 = SCRATCH + 0x5000;
             u32 stub_code[3] = {
                 0xe59f0000, // ldr r0, [pc, #0]
                 0xe12fff1e, // bx lr
@@ -443,8 +440,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[DD1-runtime/probe] vtable IModule: AddRef=0x%08x Release=0x%08x CreateInstance=0x%08x FreeRes=0x%08x\n",
                          vtbl_methods[0], vtbl_methods[1], vtbl_methods[2], vtbl_methods[3]);
 
-            // Atualizar o ponteiro retornado pelo mock MALLOC para ALLOC_BUF2 para a criação do applet
-            // evitando que o applet seja alocado sobre a vtable do módulo!
+            // Atualiza o stub MALLOC para devolver ALLOC_BUF2 na chamada de CreateInstance
             uc_mem_write(uc2, MALLOC_STUB + 8, &ALLOC_BUF2, 4);
 
             // Testar CreateInstance com CLSID incompatível (deve retornar erro r0 != 0)
@@ -511,6 +507,22 @@ int main(int argc, char** argv) {
             assert(r_match.fault_va == 0x00000000);
             assert(r_r0 == 0); // AEE_SUCCESS
 
+            // Em 0x1200c6ec:
+            //   ldr r0, [r4, #0xc]  (lê r0 = applet->w[3] = pIShell = SCRATCH)
+            //   ldr r1, [r0]        (lê r1 = vtable = *SCRATCH = SCRATCH_VTBL)
+            //   ldr ip, [r1, #0x2c] (lê ip = vtable[11] = ISHELL_SetTimer)
+            // No teste, SCRATCH é o objeto, e a vtable é colocada em SCRATCH_VTBL (SCRATCH + 0x100)!
+            // Escrevemos o ponteiro de vtable em SCRATCH[0] e o método em SCRATCH_VTBL + 0x2c:
+            const u32 SCRATCH_VTBL = SCRATCH + 0x100;
+            const u32 SETTIMER_STUB = SCRATCH + 0x2400;
+            u32 settimer_code[2] = {
+                0xe3a00000, // mov r0, #0
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, SETTIMER_STUB, settimer_code, sizeof(settimer_code));
+            uc_mem_write(uc2, SCRATCH_VTBL + 0x2c, &SETTIMER_STUB, 4);
+            uc_mem_write(uc2, SCRATCH, &SCRATCH_VTBL, 4);
+
             // Prova complementar: verificar que ppApplet recebeu a instância criada do jogo
             u32 created_applet_ptr = 0;
             uc_mem_read(uc2, ppApplet, &created_applet_ptr, 4);
@@ -538,7 +550,8 @@ int main(int argc, char** argv) {
             assert(applet_words[5] == DISPLAY_OBJ);
             assert(applet_words[6] == 0x1200c5e0);
 
-            // Prova DD1: despachar HandleEvent(EVT_APP_START = 0x101) para a rotina de eventos do jogo (w[6] = 0x1200c5e0)
+            // Prova DD1: despachar HandleEvent(EVT_APP_START = 0) para a rotina de eventos do jogo (w[6] = 0x1200c5e0)
+            // Em AEEEvent.h do BREW SDK: EVT_APP_START = 0.
             // boolean HandleEvent(IApplet* pi, AEEEvent eCode, uint16 wParam, uint32 dwParam)
             const u32 handle_event_fn = applet_words[6];
             FirstPcResult r_evt = run_first_pc(uc2, handle_event_fn,
@@ -548,12 +561,12 @@ int main(int argc, char** argv) {
                                                10000,
                                                false,
                                                created_applet_ptr, // r0: this
-                                               0x0101,             // r1: EVT_APP_START
+                                               0,                  // r1: EVT_APP_START (0)
                                                0,                  // r2: wParam
                                                0);                 // r3: dwParam
             u32 r_evt_r0 = 0;
             uc_reg_read(uc2, UC_ARM_REG_R0, &r_evt_r0);
-            std::fprintf(stderr, "[DD1-runtime/probe] HandleEvent(EVT_APP_START): ran=%s entered=%s last_pc=0x%08x instr=%lu fault=%s @0x%08x r0=0x%08x\n",
+            std::fprintf(stderr, "[DD1-runtime/probe] HandleEvent(EVT_APP_START=0): ran=%s entered=%s last_pc=0x%08x instr=%lu fault=%s @0x%08x r0=0x%08x\n",
                          r_evt.ran ? "SIM" : "nao",
                          r_evt.entered_module ? "SIM" : "nao",
                          r_evt.last_pc,
@@ -563,14 +576,65 @@ int main(int argc, char** argv) {
                          r_evt_r0);
 
             // Prova observável de DD1-runtime completa (ROADMAP Parte 4: CreateInstance -> objeto -> HandleEvent):
-            // O applet trata EVT_APP_START com sucesso, executa 46 instruções reais do jogo
-            // e retorna limpo no sentinela em 0x1200c6a4 com r0 = 1 (TRUE, evento consumido pelo Double Dragon)!
+            // O applet trata EVT_APP_START (0) armando o timer principal do game-loop
+            // via ISHELL_SetTimer(r1 = 33ms [0x21], callback = 0x120239dc, pUser = applet),
+            // executa 37 instruções reais (incluindo o stub do timer e o retorno)
+            // e retorna limpo no sentinela em 0x1200c718 com r0 = 1 (TRUE)!
             assert(r_evt.ran && r_evt.entered_module);
-            assert(r_evt.instructions == 46);
-            assert(r_evt.last_pc == 0x1200c6a4);
+            assert(r_evt.instructions == 37);
+            assert(r_evt.last_pc == 0x1200c718);
             assert(r_evt.fault == FAULT_NONE);
             assert(r_evt.fault_va == 0x00000000);
             assert(r_evt_r0 == 1); // Retorno booleano TRUE: evento consumido pelo applet!
+
+            // Mock de aee_GetUpTimeMS (slot 0xb0 em AEEHelperFuncs / static-base):
+            // Retorna o tempo em milissegundos em r0 e faz bx lr.
+            const u32 GETUPTIMEMS_STUB = SCRATCH + 0x2500;
+            u32 getuptimems_code[2] = {
+                0xe3a00064, // mov r0, #100 (100 ms)
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, GETUPTIMEMS_STUB, getuptimems_code, sizeof(getuptimems_code));
+            uc_mem_write(uc2, STATIC_BASE + 0xb0, &GETUPTIMEMS_STUB, 4);
+
+            // Mock de memset (slot 0x04 em AEEHelperFuncs / static-base):
+            // r0 = dest, r1 = val, r2 = len. Retorna r0 e faz bx lr.
+            const u32 MEMSET_STUB = SCRATCH + 0x2600;
+            u32 memset_code[2] = {
+                0xe1a00000, // nop (ou mov r0, r0)
+                0xe12fff1e  // bx lr
+            };
+            uc_mem_write(uc2, MEMSET_STUB, memset_code, sizeof(memset_code));
+            uc_mem_write(uc2, STATIC_BASE + 0x04, &MEMSET_STUB, 4);
+
+            // Atualiza o stub MALLOC para devolver ALLOC_BUF3 para alocações do loop
+            uc_mem_write(uc2, MALLOC_STUB + 8, &ALLOC_BUF3, 4);
+
+            // ── DD3 Game Loop: disparar o callback do timer (0x120239dc) ──
+            // O timer callback registrado pelo applet é uma função C que recebe pUser (applet) em r0:
+            // void (*PFNNOTIFY)(void *pUser)
+            const u32 timer_cb_fn = 0x120239dc;
+            FirstPcResult r_tick = run_first_pc(uc2, timer_cb_fn,
+                                                0x12000000,
+                                                mod.size(),
+                                                0x00200000,
+                                                10000,
+                                                false,
+                                                created_applet_ptr, // r0: pUser (applet)
+                                                0, 0, 0);
+            std::fprintf(stderr, "[DD1-runtime/probe] TimerCallback(0x%08x): ran=%s entered=%s last_pc=0x%08x instr=%lu fault=%s @0x%08x\n",
+                         timer_cb_fn,
+                         r_tick.ran ? "SIM" : "nao",
+                         r_tick.entered_module ? "SIM" : "nao",
+                         r_tick.last_pc,
+                         (unsigned long)r_tick.instructions,
+                         fault_label(r_tick.fault),
+                         r_tick.fault_va);
+            assert(r_tick.ran && r_tick.entered_module);
+            assert(r_tick.instructions == 150);
+            assert(r_tick.last_pc == 0x12023a28);
+            assert(r_tick.fault == FAULT_READ_UNMAPPED);
+            assert(r_tick.fault_va == 0x00000014);
 
             uc_close(uc2);
         }

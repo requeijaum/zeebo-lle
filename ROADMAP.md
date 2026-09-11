@@ -2467,7 +2467,10 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   `open/read/seek/stat/close`, caminhos e overlay de saves. Provar leitura byte-exata de
   `data.ggz`/`sound.ggz`; retirar asset deve causar falha identificável.
 - [ ] **DD3 — loop:** implementar entrega BREW `ISHELL_SetTimer`/callbacks/eventos,
-  distinta do GPT/L4; o game loop avança sem retorno forçado.
+  distinta do GPT/L4; o game loop avança sem retorno forçado. Em `test_dd1a_diag`, comprovado
+  o registro de `ISHELL_SetTimer` em `EVT_APP_START` (33ms, callback em `0x120239dc`), e a execução
+  do primeiro frame/tick do game-loop até 150 instruções reais, executando `aee_GetUpTimeMS`,
+  `memset` e alcançando a primeira dependência de viewport em `0x12023a28`.
 - [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear azul,
   padrão sintético, soma de pixels ou harness Z-Wheel não contam.
 - [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
