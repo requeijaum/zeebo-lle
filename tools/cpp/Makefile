@@ -421,11 +421,18 @@ test-zeetris-live-shell: test_zeetris_live_shell zeebo_lle_main
 test_zeetris_shell_semantics: test_zeetris_shell_semantics.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_semantics.cpp
 
+# Gate com controles: mede que o dispatch AEECShell r0=0xb0d02000 e' NON_SEMANTIC
+# (env_base Iguana, nao IShell vivo) e reprova a inferencia antiga (exit 1). Mutante
+# que aceita NON_SEMANTIC como prova de shell vivo DEVE falhar. Sem NAND -> SKIP (77).
 test-zeetris-shell-semantics: test_zeetris_shell_semantics zeebo_lle_main
-	./test_zeetris_shell_semantics || [ $$? -eq 77 ]
+	@./test_zeetris_shell_semantics; rc=$$?; \
+	if [ $$rc -eq 1 ]; then echo "test-zeetris-shell-semantics: OK (non-semantic provado; inferencia antiga REFUTADA)"; \
+	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-semantics: SKIP (exit 77)"; \
+	elif [ $$rc -eq 0 ]; then echo "test-zeetris-shell-semantics: PASS (live IShell medido)"; \
+	else echo "test-zeetris-shell-semantics: FAIL (exit $$rc)"; exit 1; fi
 	@if ./test_zeetris_shell_semantics buggy >/dev/null 2>&1; then \
 	  echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
-	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao prova shell vivo)"; fi
+	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao e' shell vivo)"; fi
 
 # CALL-PROVENANCE gate: prova ESTATICAMENTE (bytes reais do APPS.bin) que o
 # anchor 0x10c874f4 rotulado "AEECShell_dispatch" e' na verdade um instalador de
@@ -439,10 +446,16 @@ APPS_BIN := ../../nand/1.1.2_APPS.bin
 test_zeetris_shell_provenance: test_zeetris_shell_provenance.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_provenance.cpp
 
+# CALL-PROVENANCE gate: mede que 0x10c874f4 e' bootstrap AMSS (retorna exit 1)
+# e que a premissa de que era um dispatch BREW e' REFUTADA. Mutante afirma que
+# e' dispatch BREW e DEVE falhar.
 test-zeetris-shell-provenance: test_zeetris_shell_provenance
 	@if [ ! -s "$(APPS_BIN)" ]; then \
 	  echo "OK: APPS.bin real ausente ($(APPS_BIN)) — SKIP (77) esperado"; fi
-	./test_zeetris_shell_provenance || [ $$? -eq 77 ]
+	@./test_zeetris_shell_provenance; rc=$$?; \
+	if [ $$rc -eq 1 ]; then echo "test-zeetris-shell-provenance: OK (provenance confirmada: AMSS_BOOTSTRAP; premissa BREW refutada)"; \
+	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-provenance: SKIP (exit 77)"; \
+	else echo "test-zeetris-shell-provenance: FAIL (exit $$rc)"; exit 1; fi
 	@if ./test_zeetris_shell_provenance buggy >/dev/null 2>&1; then \
 	  echo "FAIL: mutante (AMSS_BOOTSTRAP tratado como dispatch BREW) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (bootstrap nao e' dispatch BREW)"; fi
@@ -850,7 +863,7 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics *.o
 	rm -rf testkit/build
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
