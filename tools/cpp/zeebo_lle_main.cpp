@@ -56,6 +56,7 @@
 #define ZEEBO_VIC_WITH_UNICORN
 #include "zeebo_vic_irq.h"
 #include "zeebo_gpt_timer.h"
+#include "zeebo_peripheral_bus.h"
 #include "zeebo_proccomm.h"
 #include "zeebo_cli_paths.h"
 #include "zeebo_dynarmic_core.h"
@@ -472,6 +473,12 @@ class ZeeboLLESystem {
 public:
     ZeeboLLESystem() {
         core1_state_ = nullptr;
+        // Bug 5: place the shared decoder's GPT at the firmware-resolved base
+        // (0xC5000000), NOT the header's 0xC0100000 which collides with the
+        // MSM_CSR doorbell/ProcComm window. VIC keeps its primary-source base.
+        pbus_.vic_base = MSM_VIC_BASE;      // 0xc0000000
+        pbus_.gpt_base = GPT_TIMER_BASE;    // 0xc5000000 (firmware-resolved)
+        pbus_.gpt_line = GPT_VIC_LINE;
     }
     ~ZeeboLLESystem() {
         // DD-QW5: a callback do SDL roda em outra thread e usa qdsp_disp_ por
@@ -1758,31 +1765,32 @@ public:
             }
             c++;
 
-            // --- Bug 5: GPT advance from emulated progress + real IRQ delivery.
-            // Runs BETWEEN uc_emu_start slices (engine quiescent) so mutating the
-            // banked IRQ context is safe. The GPT counter advances by how many
-            // instructions the cores actually executed this cycle (emulated
-            // progress), NOT by any register read. A MATCH crossing raises the
-            // GPT VIC line; then, for the interpreter path, an unmasked pending
-            // line is delivered as a genuine ARM IRQ exception.
+            // --- Bug 5: deterministic GPT advance + real IRQ delivery through
+            // the SHARED production decoder (zeebo::PeripheralBus), the exact
+            // same code path test_peripheral_bus exercises. Runs BETWEEN
+            // uc_emu_start slices (engine quiescent) so mutating the banked IRQ
+            // context is safe. Virtual time advances by a FIXED quantum per
+            // scheduler slice via pbus_.tick_slice() — NOT by how many
+            // instructions the cores happened to retire (which was
+            // non-deterministic: branchy code, NOP-slides and hook-driven PC
+            // edits all perturbed d0+d1). A MATCH crossing raises the GPT VIC
+            // line inside pbus_.vic; the same crossing is mirrored onto the
+            // Core1/ARM9 latch. Then an unmasked pending line is delivered as a
+            // genuine, non-reentrant ARM IRQ exception.
             {
-                uint64_t d0 = core0_.insns - last_c0_insns_slice_;
-                uint64_t d1 = core1_.insns - last_c1_insns_slice_;
-                last_c0_insns_slice_ = core0_.insns;
-                last_c1_insns_slice_ = core1_.insns;
-                uint32_t ticks = (uint32_t)((d0 + d1) & 0xffffffffu);
-                if (gpt_.advance(ticks)) {
-                    vic_c0_.raise_line(GPT_VIC_LINE);
+                if (pbus_.tick_slice()) {
+                    // MATCH fired this slice: mirror the timer line onto Core1.
                     vic_c1_.raise_line(GPT_VIC_LINE);
                 }
                 // Deliver only on the interpreter (Unicorn) path and only when the
                 // core is not halted. The JIT path is left untouched (its context
-                // is not safe to mutate from here).
+                // is not safe to mutate from here). deliver_irq() is non-reentrant:
+                // a line already in service is not redelivered before EOI.
                 if (!core0_.halted && core0_.backend == CoreBackend::Unicorn &&
-                    core0_.uc && vic_c0_.irq_asserted()) {
+                    core0_.uc && pbus_.vic.irq_asserted()) {
                     // Sync the post-slice PC into the engine before delivery.
                     uc_reg_write(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
-                    if (zeebo::vic_deliver_irq(core0_.uc, vic_c0_, c0_vector_base_)) {
+                    if (pbus_.deliver_irq(core0_.uc, c0_vector_base_)) {
                         uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
                     }
                 }
@@ -3857,6 +3865,8 @@ private:
     }
 
     static bool is_core0_peripheral(uint32_t addr) {
+        if (addr >= MSM_VIC_BASE && addr < MSM_VIC_BASE + (uint32_t)zeebo::PB_VIC_SIZE) return true;   // VIC (bug 5)
+        if (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_SIZE) return true; // GPT (bug 5)
         if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) return true; // Doorbell
         if (addr == SMEM_BASE + 0x00 || addr == SMEM_BASE + 0x04) return true;          // ProcComm
         if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) return true;     // MDDI
@@ -3869,6 +3879,10 @@ private:
     }
 
     void handle_peripheral_write(uint32_t addr, int /*size*/, uint32_t value) {
+        // Bug 5: guest MMIO to the VIC/GPT windows flows through the SHARED
+        // production decoder so writes mutate the models (enable/match/ack/EOI)
+        // instead of landing in flat RAM. Same code the test exercises.
+        if (pbus_.mmio_write(addr, value)) return;
         // Inter-core doorbell A2M
         if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) {
             u32 int_num = (addr - (MSM_CSR_BASE + 0x400)) / 4;
@@ -3954,6 +3968,12 @@ private:
 
     uint32_t handle_peripheral_read(uint32_t addr, int size) {
         if (size != 4 && size != 2 && size != 1) return 0;
+        // Bug 5: VIC/GPT reads reflect the SHARED decoder's model state
+        // (masked-pending, counter, vector-and-ack) — not flat RAM.
+        {
+            uint32_t pv = 0;
+            if (pbus_.mmio_read(addr, &pv)) return pv;
+        }
         const bool is_uart = (addr >= UART1_BASE && addr < UART3_BASE + UART_SIZE);
         if (is_uart) {
             const u32 base = (addr >= UART1_BASE && addr < UART1_BASE + UART_SIZE) ? UART1_BASE
@@ -4000,11 +4020,14 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         if (size != 4 && size != 2 && size != 1) return;
 
-        // Janelas de video: injeta o valor do modelo antes de o Unicorn
-        // devolver a RAM de fundo. Sem isto UnifiedMDDI::read/UnifiedAdreno130::read
-        // nunca eram chamados em leitura (apenas escritas eram roteadas).
+        // Janelas de video / VIC / GPT (bug 5): injeta o valor do modelo antes
+        // de o Unicorn devolver a RAM de fundo. Sem isto os registradores
+        // MODELADOS liam sempre o conteudo plano (zero) em vez do modelo
+        // (MDDI/Adreno CHIP_ID, VIC_IRQ_STATUS0, GPT COUNT).
         if ((addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) ||
-            (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE)) {
+            (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) ||
+            (addr >= MSM_VIC_BASE && addr < MSM_VIC_BASE + (uint32_t)zeebo::PB_VIC_SIZE) ||
+            (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_SIZE)) {
             const u32 v = sys->handle_peripheral_read((u32)addr, size);
             uc_mem_write(uc, addr, &v, (size_t)size);
             return;
@@ -4357,12 +4380,7 @@ private:
                 for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
             }
         }
-        if (addr == 0xc5000108 && type == UC_MEM_READ) {
-            static u32 ticker = 100000;
-            ticker += 5000;
-            uc_mem_write(uc, 0xc5000108, &ticker, 4);
-        }
-        else if (addr == SMEM_BASE + 0x10 && type == UC_MEM_WRITE) { // MDM_COMMAND
+        if (addr == SMEM_BASE + 0x10 && type == UC_MEM_WRITE) { // MDM_COMMAND
             u32 cmd = (u32)value;
             printf("[ProcComm] Core 1 (Modem) acked/issued command 0x%x\n", cmd);
         }
@@ -4405,13 +4423,16 @@ private:
     zeebo_l4::SpaceManager space_manager_;
     std::vector<uint8_t> smem_mem_;      // único backing físico, visível aos dois cores
     // Bug 5/6: real device models bound to the shared/interpreter path.
-    zeebo::VicState  vic_c0_;            // VIC pending/enable latch (Core0 / ARM11)
+    // The GPT + Core0 VIC live inside the SHARED production decoder
+    // (zeebo::PeripheralBus) — the exact same mmio_read/mmio_write/tick_slice/
+    // deliver_irq code that test_peripheral_bus exercises. Guest MMIO to the
+    // VIC (0xC0000000) and GPT (firmware-resolved 0xC5000000) windows is routed
+    // through pbus_ so writes mutate the models instead of landing in flat RAM.
+    // vic_c1_ remains a separate latch for the Core1/ARM9 doorbell + GPT line.
+    zeebo::PeripheralBus pbus_;          // shared decoder: GPT + Core0 VIC
     zeebo::VicState  vic_c1_;            // VIC pending/enable latch (Core1 / ARM9)
-    zeebo::GptTimer  gpt_;               // GPT counter advanced from emulated progress
     zeebo::ProcComm  proccomm_;          // inter-core ProcComm over shared SMEM
     static constexpr unsigned GPT_VIC_LINE = 8; // INT_GP_TIMER (model)
-    uint64_t last_c0_insns_slice_ = 0;   // per-cycle insn delta baselines (GPT)
-    uint64_t last_c1_insns_slice_ = 0;
     // Vector bases for IRQ delivery: Core0/ARM11 low vectors, Core1/ARM9 high
     // vectors (CP15 c1 V=1, table at 0xffff0000 per the AMSS mapping).
     uint32_t c0_vector_base_ = 0x00000000u;
