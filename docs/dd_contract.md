@@ -219,6 +219,30 @@ tela branca parada é consequência esperada de um jogo que não carregou nada.
 `data.ggz`/`sound.ggz` (em `~/.Tuxality/Infuse/brew/mod/274754`, fora da EFS2),
 e `CUnzipStream` para descomprimir. Só então `BitBlt` terá `pbmSource`.
 
+### Medição: `FILEMGR` nunca chega a ser pedido
+
+Instrumentando `ISHELL_CreateInstance` para registrar cada CLSID pedido, a
+sequência real de `CreateInstance` é:
+
+| CLSID | atendido | nota |
+|---|---|---|
+| `0x01001001` | OK | `AEECLSID_DISPLAY` |
+| `0x01001002` | ERR | `AEECLSID_HEAP` — opcional, jogo segue |
+| `0x0102f679` | ERR | classe própria do jogo |
+| `0x01030852` | ERR | classe própria do jogo |
+| `0x0102f681` | ERR | classe própria do jogo |
+| `0x01002001` | ERR | classe do BREW |
+
+`0x01001003` (`FILEMGR`) **não aparece na lista**. Servir `FILEMGR` e
+`CUnzipStream` mudou o caminho (530 → 500 instruções) mas não o desfecho,
+porque o jogo falha **antes** de chegar à cadeia de assets: uma das quatro
+classes não atendidas aborta a inicialização primeiro.
+
+Consequência prática: implementar `IFileMgr`/`IFile` agora seria prematuro —
+seria código que o guest ainda não alcança. O próximo passo correto é
+identificar qual das classes próprias (`0x0102f679`, `0x01030852`,
+`0x0102f681`) é obrigatória, e o que o jogo espera dela.
+
 ## Input: o jogo responde, e revela o caminho de BitBlt
 
 `EVT_KEY_PRESS` (`0x101`, `AEEEvent.h:49`) despachado no `HandleEvent` com

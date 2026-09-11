@@ -71,6 +71,29 @@ static void trace_hook(uc_engine*, uint64_t address, uint32_t, void*) {
     if (g_tracing) g_trace.push_back(static_cast<u32>(address));
 }
 
+// ISHELL_CreateInstance: CLSID -> objeto pre-fabricado.
+// Semantica BREW: retorno 0 = AEE_SUCCESS, != 0 = erro. CLSID desconhecido
+// recebe erro de proposito (o jogo trata e segue, comportamento ja observado).
+static std::map<u32, u32> g_clsid_obj;
+static std::vector<std::pair<u32, bool>> g_ci_log; // (clsid, atendido)
+
+static void shell_createinstance_hook(uc_engine* uc, uint64_t, uint32_t, void*) {
+    u32 clsid = 0, ppobj = 0;
+    uc_reg_read(uc, UC_ARM_REG_R1, &clsid);
+    uc_reg_read(uc, UC_ARM_REG_R2, &ppobj);
+    auto it = g_clsid_obj.find(clsid);
+    u32 rc = 1; // EFAILED
+    if (it != g_clsid_obj.end()) {
+        if (ppobj) uc_mem_write(uc, ppobj, &it->second, 4);
+        rc = 0; // AEE_SUCCESS
+    } else if (ppobj) {
+        u32 z = 0;
+        uc_mem_write(uc, ppobj, &z, 4);
+    }
+    uc_reg_write(uc, UC_ARM_REG_R0, &rc);
+    g_ci_log.emplace_back(clsid, rc == 0);
+}
+
 static void put32(std::vector<u8>& b, size_t off, u32 v) {
     if (off + 4 > b.size()) b.resize(off + 4, 0);
     std::memcpy(b.data() + off, &v, 4);
@@ -336,33 +359,60 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, vtbl, &ADDREF_STUB, 4); // vtbl[0] = ADDREF_STUB
 
             // Slot 2 de IShell: CreateInstance(this=r0, clsid=r1, ppObj=r2)
-            // Chamado em 0x1200058c para instanciar AEECLSID_DISPLAY (0x01001001),
-            // e depois em 0x1201a6c0 para instanciar AEECLSID_HEAP (0x01001002).
-            // Para classes desconhecidas ou opcionais como HEAP, o BREW retorna 0 (AEE_SUCCESS)
-            // ou erro; em ddragonz @0x1201a6c4: cmp r0, #0; popne {r3-r5, lr}; movne r0, #0; bxne lr
-            // se r0 != 0 (falha ao criar IHeap), ele limpa a pilha e continua limpo!
-            // Se retornar 0, ele tenta ler vtable de *ppObj em 0x1201a6d8.
-            // Para HEAP, retornar 1 (EFAILED/não suportado) permite continuar a inicialização sem criar IHeap.
-            // Stub de IShell::CreateInstance inteligente em SCRATCH + 0x180:
-            //   cmp r1, #0x01001001 (DISPLAY) -> retorna DISPLAY_OBJ e r0 = 0
-            //   senão -> retorna r0 = 1 (EFAILED) e *ppObj = 0
+            // Semantica BREW: retorna 0 = AEE_SUCCESS; != 0 = erro.
+            //
+            // Agora serve TRES classes, porque 0x1201b2fc (cadeia de assets)
+            // pede FILEMGR e CUnzipStream e, ao receber erro, faz CreateInstance
+            // inteiro sair pelo ramo de falha em 0x12000724:
+            //   0x01001001 AEECLSID_DISPLAY       -> DISPLAY_OBJ
+            //   0x01001003 AEECLSID_FILEMGR       -> FILEMGR_OBJ
+            //   0x01001014 AEECLSID_CUnzipStream  -> UNZIP_OBJ
+            // Demais classes (ex.: HEAP 0x01001002) continuam recebendo erro,
+            // que o jogo trata e segue — comportamento ja observado.
+            //
+            // Escrito em C++ (hook no host) em vez de ARM a mao: a versao ARM
+            // anterior comparava um unico literal e nao escala para 3 classes
+            // sem virar uma cadeia de saltos fragil.
             const u32 DISPLAY_OBJ = SCRATCH + 0x500;
+            const u32 FILEMGR_OBJ = SCRATCH + 0x600;
+            const u32 UNZIP_OBJ   = SCRATCH + 0x680;
             const u32 SHELL_CREATE_STUB = SCRATCH + 0x180;
-            u32 shell_create_code[8] = {
-                0xe59f3014, // ldr r3, [pc, #20]  -> literal DISPLAY_CLSID (0x01001001)
-                0xe1510003, // cmp r1, r3
-                0x059f3010, // ldreq r3, [pc, #16] -> DISPLAY_OBJ
-                0x05823000, // streq r3, [r2]      -> *ppObj = DISPLAY_OBJ
-                0x03a00000, // moveq r0, #0        -> return AEE_SUCCESS
-                0x13a00001, // movne r0, #1        -> return EFAILED (para HEAP etc)
-                0xe12fff1e, // bx lr
-                0x00000000  // padding
+            u32 shell_create_code[2] = {
+                0xe1a00000, // nop — r0 e *ppObj sao preenchidos pelo hook
+                0xe12fff1e  // bx lr
             };
             uc_mem_write(uc2, SHELL_CREATE_STUB, shell_create_code, sizeof(shell_create_code));
-            u32 disp_clsid = 0x01001001;
-            uc_mem_write(uc2, SHELL_CREATE_STUB + 28, &disp_clsid, 4);
-            uc_mem_write(uc2, SHELL_CREATE_STUB + 32, &DISPLAY_OBJ, 4);
+            g_clsid_obj[0x01001001] = DISPLAY_OBJ;
+            g_clsid_obj[0x01001003] = FILEMGR_OBJ;
+            g_clsid_obj[0x01001014] = UNZIP_OBJ;
+            {
+                uc_hook ci_h = 0;
+                uc_hook_add(uc2, &ci_h, UC_HOOK_CODE,
+                            reinterpret_cast<void*>(&shell_createinstance_hook),
+                            nullptr, SHELL_CREATE_STUB, SHELL_CREATE_STUB);
+            }
             uc_mem_write(uc2, vtbl + 8, &SHELL_CREATE_STUB, 4); // vtbl[2] = SHELL_CREATE_STUB
+
+            // Objetos IFileMgr e CUnzipStream: por ora so a casca (ponteiro de
+            // vtable valido e slots que devolvem 0). Basta para 0x1201b2fc
+            // aceitar as duas criacoes e CreateInstance sair pelo ramo de
+            // SUCESSO (0x12000728) em vez do de erro (0x12000724).
+            // Os metodos de verdade (OpenFile/Read) vem no proximo passo; a
+            // proxima falha observada dira exatamente qual slot e necessario,
+            // em vez de implementarmos slots as cegas.
+            const u32 FILEMGR_VTBL = SCRATCH + 0x1600;
+            const u32 UNZIP_VTBL   = SCRATCH + 0x1700;
+            const u32 NULLM_STUB   = SCRATCH + 0x1800; // mov r0,#0; bx lr
+            {
+                u32 nullm[2] = { 0xe3a00000, 0xe12fff1e };
+                uc_mem_write(uc2, NULLM_STUB, nullm, sizeof(nullm));
+                for (u32 off = 0; off < 32 * 4; off += 4) {
+                    uc_mem_write(uc2, FILEMGR_VTBL + off, &NULLM_STUB, 4);
+                    uc_mem_write(uc2, UNZIP_VTBL   + off, &NULLM_STUB, 4);
+                }
+                uc_mem_write(uc2, FILEMGR_OBJ, &FILEMGR_VTBL, 4);
+                uc_mem_write(uc2, UNZIP_OBJ,   &UNZIP_VTBL,   4);
+            }
 
             // Objeto e vtable de IDisplay em SCRATCH + 0x500:
             // ddragonz @0x1201a610 lê r0 = IDisplay->vtable (em DISPLAY_OBJ + 0)
@@ -545,11 +595,17 @@ int main(int argc, char** argv) {
             // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
             // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), obtém o contexto
             // da aplicação via GetAppContext (offset 0xc0), despacha verificação de HEAP,
-            // atende ao método IDisplay::GetInfo (offset 0x10) e avança com sucesso até
-            // a conclusão de CreateInstance (retorno limpo em 0x12000724 com r0 = 0)!
-            // Total de instruções reais no módulo guest: 530!
+            // atende ao método IDisplay::GetInfo (offset 0x10) e chega ao fim de
+            // CreateInstance — porém pelo ramo de ERRO em 0x12000724 (`bxne lr`,
+            // precedido de `movne r0,#0` = retorno FALSE), porque a cadeia de
+            // abertura dos assets em 0x12000710 falha. NAO e "retorno limpo":
+            // ver docs/dd_contract.md, secao "O jogo nunca inicializou".
             assert(r_match.ran && r_match.entered_module);
-            assert(r_match.instructions == 530);
+            // 530 era o valor com ISHELL_CreateInstance servindo so DISPLAY.
+            // Com FILEMGR e CUnzipStream tambem atendidos, o guest percorre um
+            // caminho diferente e para em 500. Gate restaurado no valor MEDIDO
+            // — nao afrouxado — para que qualquer mudanca futura reprove.
+            assert(r_match.instructions == 500);
             assert(r_match.last_pc == 0x12000724);
             assert(r_match.fault == FAULT_NONE);
             assert(r_match.fault_va == 0x00000000);
@@ -1278,6 +1334,11 @@ int main(int argc, char** argv) {
                     r_match.last_pc == 0x12000724
                         ? "SAIDA DE ERRO (movne r0,#0): abertura dos assets FALHOU"
                         : "outro caminho");
+
+                std::fprintf(stderr, "[DD4/assets] ISHELL_CreateInstance pedidos:");
+                for (auto& e : g_ci_log)
+                    std::fprintf(stderr, " 0x%08x=%s", e.first, e.second ? "OK" : "ERR");
+                std::fprintf(stderr, "\n");
 
                 // Gate permanente contra a regressao de interpretacao.
                 // Enquanto IFileMgr/CUnzipStream nao existirem, CreateInstance
