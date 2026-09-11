@@ -251,14 +251,26 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
     // Assinatura real: gl{Vertex,TexCoord}Pointer(size,type,stride,ptr);
     //                  glColorPointer(size,type,stride,ptr) idem;
     //                  glNormalPointer(type,stride,ptr) — SEM size (sempre 3).
+    //
+    // DESVIO DE CONTRATO DA ZEEBO (evidência, não suposição): no Zeebo o
+    // wrapper GL do firmware BINDA o array ao receber o ponteiro — não é preciso
+    // glEnableClientState. Prova, medida nos dois lados:
+    //  (1) O .mod do Zeetris gera thunk de vtable para os slots 4..79, mas NÃO
+    //      para 25 (glDisableClientState), 28 (glEnable) nem 29 (glEnableClientState):
+    //      o RVCT só emite thunk de slot referenciado, logo o jogo NUNCA chama
+    //      esses três. Ainda assim ele renderiza no console.
+    //  (2) Forçando o enable por fora (ZEEBO_ZEETRIS_FORCE_ARRAYS=1), os vértices
+    //      do próprio jogo viram um quad branco de 77120 px (25,1% da tela);
+    //      sem o enable, 0 px. Ou seja, os dados sempre estiveram válidos.
+    // Sem este desvio, todo título que dependa do bind implícito desenha nada.
     if(slot==glVertexPointer){
-        vtx_={vtx_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        vtx_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glColorPointer){
-        col_={col_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        col_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glTexCoordPointer){
-        tex_={tex_.enabled, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
+        tex_={true, gm.arg(3), int(gm.arg(0)), gm.arg(1), int(gm.arg(2))}; return true; }
     if(slot==glNormalPointer){
-        nrm_={nrm_.enabled, gm.arg(2), 3, gm.arg(0), int(gm.arg(1))}; return true; }
+        nrm_={true, gm.arg(2), 3, gm.arg(0), int(gm.arg(1))}; return true; }
     // --- glEnable/DisableClientState(array): liga/desliga o array correspondente. ---
     if(slot==glEnableClientState || slot==glDisableClientState){
         bool on = (slot==glEnableClientState);

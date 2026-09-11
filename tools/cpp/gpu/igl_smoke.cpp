@@ -141,14 +141,31 @@ int main(){
     const bool current_color_ok=color_call&&center==0xf800;
     printf("[igl color ] center=0x%04X expect=0xF800 %s\n",center,current_color_ok?"PASS":"FAIL");
 
-    IglHook strict_hook(*rast);
-    regs={0,0,0,FX(1)}; strict_hook.dispatch_igl(igl_slot::glClearColorx,gm);
-    regs={0x4000}; strict_hook.dispatch_igl(igl_slot::glClear,gm);
-    regs={2,glenum::FIXED,0,VTX_VA}; strict_hook.dispatch_igl(igl_slot::glVertexPointer,gm);
-    regs={glenum::TRIANGLES,0,3}; strict_hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    // DESVIO DE CONTRATO DA ZEEBO, agora coberto nas DUAS direções.
+    // No console, gl*Pointer BINDA o array (não é preciso glEnableClientState).
+    // Evidência medida: o .mod do Zeetris gera thunk de vtable para os slots
+    // 4..79, mas para nenhum de 25/28/29 — o RVCT só emite thunk de slot
+    // referenciado, logo o jogo nunca chama Enable/DisableClientState; e mesmo
+    // assim ele renderiza no console. Forçar o enable por fora faz os vértices
+    // do próprio jogo virarem um quad de 77120 px (25,1% da tela); sem ele, 0 px.
+    IglHook bind_hook(*rast);
+    regs={0,0,0,FX(1)}; bind_hook.dispatch_igl(igl_slot::glClearColorx,gm);
+    regs={0x4000}; bind_hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={2,glenum::FIXED,0,VTX_VA}; bind_hook.dispatch_igl(igl_slot::glVertexPointer,gm);
+    regs={glenum::TRIANGLES,0,3}; bind_hook.dispatch_igl(igl_slot::glDrawArrays,gm);
     center=rast->framebuffer_rgb565()[240*640+320];
-    const bool pointer_state_ok=center==0;
-    printf("[igl arrays] pointer sem Enable não desenha: %s\n",pointer_state_ok?"PASS":"FAIL");
+    const bool bind_on_pointer_ok = center!=0;
+    printf("[igl arrays] ponteiro BINDA o array (desvio Zeebo): center=0x%04X expect!=0 %s\n",
+           center,bind_on_pointer_ok?"PASS":"FAIL");
+
+    // Direção oposta: o Disable explícito continua desligando o array.
+    regs={glenum::VERTEX_ARRAY}; bind_hook.dispatch_igl(igl_slot::glDisableClientState,gm);
+    regs={0x4000}; bind_hook.dispatch_igl(igl_slot::glClear,gm);
+    regs={glenum::TRIANGLES,0,3}; bind_hook.dispatch_igl(igl_slot::glDrawArrays,gm);
+    center=rast->framebuffer_rgb565()[240*640+320];
+    const bool disable_still_ok = center==0;
+    printf("[igl arrays] glDisableClientState volta a desligar: center=0x%04X expect=0 %s\n",
+           center,disable_still_ok?"PASS":"FAIL");
 
     IglHook sparse_hook(*rast);
     regs={2,glenum::FIXED,0,VTX_VA}; sparse_hook.dispatch_igl(igl_slot::glVertexPointer,gm);
@@ -161,6 +178,7 @@ int main(){
 
     printf("DONE\n");
     return (draw_ok && fixed_ok && red_ok && texture_ok && texture565_ok && swap_ok &&
-            depth_state_ok && blend_state_ok && current_color_ok && pointer_state_ok &&
+            depth_state_ok && blend_state_ok && current_color_ok &&
+            bind_on_pointer_ok && disable_still_ok &&
             sparse_index_ok) ? 0 : 1;
 }

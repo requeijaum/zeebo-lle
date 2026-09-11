@@ -159,12 +159,12 @@ int main(int argc, char** argv) {
                     "vermelho restante=%zu px\n", hist.size(), top_col, top_px, red_after);
         for (const auto& [c, cnt] : hist)
             if (c != top_col) std::printf("      cor 0x%04x -> %zu px\n", c, cnt);
-        // NOTA HONESTA: ainda NÃO há geometria. Nos 60 frames o jogo emite
-        // glClear/glBindTexture/glEnable/gl*Pointer/glDrawArrays mas nunca
-        // glEnableClientState(29) nem glMatrixMode(51)/glLoadIdentity(46) ->
-        // arrays de vértice desabilitados e sem projeção. Próximo passo.
-        assert(red_after < n / 10);            // o glClear do guest sobrescreveu a sentinela
-        assert(top_col != 0xF800u);            // e o dominante não é mais o vermelho
+        // O glClear do guest sobrescreveu a sentinela, e agora o desenho do
+        // PRÓPRIO jogo tem de aparecer: geometria além da cor de clear.
+        assert(red_after < n / 10);
+        assert(top_col != 0xF800u);
+        assert(hist.size() >= 2);          // há mais de uma cor
+        assert(n - top_px > n / 50);       // >2% da tela é geometria do jogo
     }
 
     // Validação de áudio / IMedia (0x0106e415)
