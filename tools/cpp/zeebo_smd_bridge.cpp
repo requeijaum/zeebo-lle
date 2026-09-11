@@ -106,7 +106,29 @@ public:
         printf("[SMD Bridge] Apps SMSM state set to 0x%08x (SMSM_SMDINIT | SMSM_RPCINIT active)\n", apps_smsm_state_);
     }
 
-    void inject_oncrpc_packet(u32 procedure_id, const std::vector<u8>& payload) {
+    // Bounded packet slot layout (bug 9 fix):
+    //   [+0x000 .. +0x080)  ONCRPC header
+    //   [+0x080 .. +0x400)  payload region  (max PAYLOAD_MAX bytes)
+    //   [+0x400 .. )        queue node
+    // A payload larger than PAYLOAD_MAX would spill past +0x400 and clobber the
+    // queue node. Reject such packets BEFORE any partial write so the shared
+    // memory and queue remain consistent.
+    static constexpr u32 PAYLOAD_OFFSET = 0x80;
+    static constexpr u32 NODE_OFFSET    = 0x400;
+    static constexpr u32 PAYLOAD_MAX    = NODE_OFFSET - PAYLOAD_OFFSET; // 0x380
+
+    // Returns true if the packet was injected, false if it was rejected
+    // (e.g. oversize payload). On false, NOTHING is written.
+    bool inject_oncrpc_packet(u32 procedure_id, const std::vector<u8>& payload) {
+        // Bug 9: reject oversize payload before any write to avoid clobbering
+        // the queue node that lives at slot + NODE_OFFSET.
+        if (payload.size() > PAYLOAD_MAX) {
+            printf("[SMD Bridge] REJECT: payload %zu bytes exceeds bounded max %u "
+                   "(would overlap queue node at slot+0x%x); no data written.\n",
+                   payload.size(), PAYLOAD_MAX, NODE_OFFSET);
+            return false;
+        }
+
         // Build ONCRPC CALL packet
         oncrpc_packet_header hdr{};
         hdr.xid = 0x12345678 + packets_injected_;
@@ -121,9 +143,9 @@ public:
         // Write packet header
         uc_mem_write(uc_, packet_target, &hdr, sizeof(hdr));
 
-        // Write payload at +0x80
+        // Write payload at +PAYLOAD_OFFSET (bounded to < NODE_OFFSET)
         if (!payload.empty()) {
-            uc_mem_write(uc_, packet_target + 0x80, payload.data(), payload.size());
+            uc_mem_write(uc_, packet_target + PAYLOAD_OFFSET, payload.data(), payload.size());
         }
 
         // Build queue node
@@ -134,7 +156,7 @@ public:
         node.packet_len = sizeof(hdr) + 0x80 + payload.size();
         node.status = 1;
 
-        u32 node_target = packet_target + 0x400;
+        u32 node_target = packet_target + NODE_OFFSET;
         uc_mem_write(uc_, node_target, &node, sizeof(node));
 
         // Link into queue head at 0x17571748
@@ -171,6 +193,7 @@ public:
         packets_injected_++;
         printf("[SMD Bridge] Injected ONCRPC packet #%u (Proc 0x%x, len %u) -> Queue Head 0x%08x (Total: %u)\n",
                packets_injected_, procedure_id, (u32)payload.size(), AMSS_RPC_QUEUE_HEAD, count);
+        return true;
     }
 
     u32 packets_injected() const { return packets_injected_; }
@@ -182,6 +205,7 @@ private:
     u32 packets_injected_;
 };
 
+#ifndef ZEEBO_SMD_BRIDGE_NO_MAIN
 int main(int argc, char** argv) {
     printf("===================================================================\n");
     printf("  ZEEBO SMD/SMSM BRIDGE: Synthetic ONCRPC Ingestion Test          \n");
@@ -236,3 +260,4 @@ int main(int argc, char** argv) {
     uc_close(uc);
     return 0;
 }
+#endif // ZEEBO_SMD_BRIDGE_NO_MAIN
