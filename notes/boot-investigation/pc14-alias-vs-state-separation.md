@@ -74,3 +74,71 @@ Apenas instrumentação read-only env-gated (`ZEEBO_PC14_ALIAS`) + esta
 nota foram commitadas. Ponteiro/PC/memória do guest **não** patcheados.
 O gancho medido para a próxima iteração é a procedência de `r4` e da escrita do valor
 `5`, não o SID já corrigido nem a memória do Unicorn.
+
+## PC14W — procedência de `r4` (do spill de pilha ao dispatch de objeto)
+Gate: `ZEEBO_PC14_WRITER=1` (read-only, no-op sem a env var). Rastreador
+causal da ÚLTIMA escrita em `0xb0046fa8` no `c0_mem_hook`, com controle
+positivo (VA alvo) e negativo (`0xb0055000`), + dump de código dos sítios
+produtor/caller/consumer/consumer_pre. Interpretador puro, run bounded
+`--seconds<=25`, exit 0.
+
+### Escrita única de `5` (produtor confirmado)
+```
+[PC14W] TGT va=0xb0046fa8 value=0x00000005 pc=0xb000c3d4 lr=0xb0006c18
+        sp=0xb0046fc4 r0=b0400000 r5=b0e00008     (controle negativo: 0 hits)
+```
+Produtor `@0xb000c3d4` = `push {r0-r8,sb,sl,fp,ip}` seguido de
+`ldr lr,[pc,#..]; str lr,[ip]; str sp,[ip,#4]; stmdb sp!,{ip}` — um
+**salvamento de contexto estilo setjmp**. `0xb0046fa8 = sp-0x1c` = o slot
+do **r6 spillado** (um inteiro pequeno transitório), não um campo de struct.
+Logo `5` é um registrador salvo legítimo, não storage de objeto.
+
+### Consumidor: `r4` é tratado como ponteiro de objeto
+```
+consumer_pre @b0400180: str r6,[r4,#0x10]; str r7,[r4,#0xc];
+                        ldr r1,[r4]; mov r0,r4; blx r1
+consumer     @b04001c8: str r6,[r4,#0x10]; str r0,[r5,#4]; str r7,[r4,#0xc];
+                        ldr r1,[r4]; mov r0,r4; pop {r4-r8,lr}; bx r1
+```
+`r4` é o `this`: escreve campos em `[r4+0x10]`/`[r4+0xc]` e chama slot-0
+`[r4]` como ponteiro de função. `r4` é restaurado do frame via
+`pop {r4-r8,lr}` — origem = pilha do frame de contexto.
+
+### Fronteira do `ldr r1,[r4]` (ALIAS, duas passagens)
+```
+passagem 1: r4=0xb0041268  -> *r4=0xb000c3fc (ponteiro de código VÁLIDO)  tid=0x0
+passagem 2: r4=0xb0046fa8  -> *r4=0x00000005 (inteiro pequeno, slot de spill) tid=0x8000c001
+```
+Entre as duas passagens há **troca de contexto do escalonador**
+(`tid 0x0 → 0x8000c001`, dois `[ALIAS/activate]` remapeando páginas). Na
+segunda passagem `r4` passou a apontar para **dentro da pilha** (região
+`0xb0046fxx`, o próprio slot de spill do produtor setjmp), em vez de um
+objeto de heap.
+
+### Veredito da procedência
+1. **Não é bug de memória/alias do Unicorn** — guest `r1(arch)` ==
+   `uc_mem_read` byte-idêntico em ambas as passagens (já refutado acima;
+   reconfirmado com o valor `5`/`0xb000c3fc`).
+2. **`5` tem produtor único e legítimo**: r6 spillado no context-save
+   `@b000c3d4`. Nenhum outro escritor toca o slot (controle negativo limpo).
+3. **`r4=0xb0046fa8` é um ENDEREÇO DE PILHA** restaurado via `pop{r4-...}`
+   após a troca de contexto do escalonador — não um ponteiro de objeto. O
+   consumidor então faz `bx *(stack_slot)` = `bx 5`.
+4. O sintoma é consistente com **restauração de contexto/registradores
+   errada na retomada da thread `0x8000c001`**: o frame de onde `r4` é
+   restaurado é o frame do salvamento de contexto (setjmp) do produtor, e
+   `r4` recebe um endereço de pilha em vez do `this` esperado.
+
+### Consequência de protocolo (não-fix)
+O par restaurar-contexto/`bx` é **fielmente executado** pelo interpretador:
+a memória guest==host e o `5` é um valor de registrador legítimo. Não foi
+isolado, com controle positivo/negativo na fronteira do restore, um defeito
+específico do emulador (SP/frame vs. contexto de registradores) distinguível
+da própria semântica de retomada esperada pelo guest — provar isso exigiria
+lockstep contra referência, fora do escopo bounded interpretador-only. Por
+protocolo, **sem bug de emulador provado → nenhum teste RED nem fix**; apenas
+o rastreador read-only env-gated (`ZEEBO_PC14_WRITER`) + esta nota. Nada de
+PC/registrador/memória do guest foi patcheado. O gancho para a próxima
+iteração é a **fronteira do restore de contexto da thread `0x8000c001`**:
+capturar `r4`/`SP`/frame arquiteturais no salvamento vs. na retomada, com
+controle, para separar SP/frame errado de contexto de registradores errado.
