@@ -2453,8 +2453,10 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   applet avançou até 174 instruções, obtendo em seguida a estrutura de contexto da aplicação
   via `GetAppContext` (offset `0xc0` em static-base), despachando a verificação de heap
   (`AEECLSID_HEAP = 0x01001002`), consultando o método de informações do display (`IDisplay::GetInfo`
-  no slot 4 / offset `0x10` com parâmetros de resolução e profundidade) e registrando a fronteira
-  estrita em 265 instruções executadas no guest.
+  no slot 4 / offset `0x10` com parâmetros de resolução e profundidade) e concluindo
+  com sucesso a execução completa do construtor e de `CreateInstance` com 530 instruções
+  reais executadas no guest, retornando limpo em `0x12000724: bx lr` com `r0=0` e gravando
+  a instância criada do applet em `*ppApplet`.
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.

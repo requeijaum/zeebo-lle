@@ -347,6 +347,8 @@ int main(int argc, char** argv) {
             };
             uc_mem_write(uc2, DISP_GETINFO_STUB, disp_getinfo_code, sizeof(disp_getinfo_code));
             uc_mem_write(uc2, DISP_VTBL + 0x10, &DISP_GETINFO_STUB, 4); // vtbl[4] = DISP_GETINFO_STUB
+            // Também mapear vtbl + 0x10 (caso o objeto seja o próprio pIShell/SCRATCH)
+            uc_mem_write(uc2, vtbl + 0x10, &DISP_GETINFO_STUB, 4);
 
             u32 ppObj = SCRATCH + 0x200;
 
@@ -485,13 +487,27 @@ int main(int argc, char** argv) {
 
             // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
             // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), obtém o contexto
-            // da aplicação via GetAppContext (offset 0xc0), despacha verificação de HEAP e avança
-            // até 265 instruções no módulo guest, parando na chamada do método de display!
+            // da aplicação via GetAppContext (offset 0xc0), despacha verificação de HEAP,
+            // atende ao método IDisplay::GetInfo (offset 0x10) e avança com sucesso até
+            // a conclusão de CreateInstance (retorno limpo em 0x12000724 com r0 = 0)!
+            // Total de instruções reais no módulo guest: 530!
             assert(r_match.ran && r_match.entered_module);
-            assert(r_match.instructions == 265);
-            assert(r_match.last_pc == 0x1201a620);
-            assert(r_match.fault == FAULT_FETCH_UNMAPPED);
+            assert(r_match.instructions == 530);
+            assert(r_match.last_pc == 0x12000724);
+            assert(r_match.fault == FAULT_NONE);
             assert(r_match.fault_va == 0x00000000);
+            assert(r_r0 == 0); // AEE_SUCCESS
+
+            // Prova complementar: verificar que ppApplet recebeu a instância criada do jogo
+            u32 created_applet_ptr = 0;
+            uc_mem_read(uc2, ppApplet, &created_applet_ptr, 4);
+            u32 applet_vtbl_ptr = 0;
+            if (created_applet_ptr) {
+                uc_mem_read(uc2, created_applet_ptr, &applet_vtbl_ptr, 4);
+            }
+            std::fprintf(stderr, "[DD1-runtime/probe] *ppApplet=0x%08x (applet[0]=0x%08x)\\n",
+                         created_applet_ptr, applet_vtbl_ptr);
+            assert(created_applet_ptr != 0);
 
             uc_close(uc2);
         }
