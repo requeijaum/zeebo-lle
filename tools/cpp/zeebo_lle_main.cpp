@@ -49,6 +49,7 @@
 #include "gpu/igl_guest_bridge.h"
 #include "zeebo_brew_loader.h"
 #include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
+#include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
 #include "zeebo_cli_paths.h"
@@ -977,8 +978,12 @@ public:
         u32 mod_handler = (brew_ && brew_->has_module()) ? brew_->module().entry_va : 0u;
         bool mapped = false;
         if (mod_handler && core0_.uc) {
-            u8 probe[2] = {0};
-            mapped = (uc_mem_read(core0_.uc, mod_handler & ~1u, probe, 2) == UC_ERR_OK);
+            // Bug 4 (gap fechado): prova REAL de permissão de EXECUÇÃO do guest
+            // via uc_mem_regions/UC_PROT_EXEC. A checagem antiga (uc_mem_read)
+            // só provava legibilidade de host — uma página READ-only/non-exec
+            // furava a proteção (fake-PASS). Agora exige UC_PROT_EXEC no VA.
+            mapped = zeebo::applet::uc_range_is_executable(
+                core0_.uc, mod_handler & ~1u, 2);
         }
         DispatchDecision dec = select_lifecycle_handler(is_zwheel, mod_handler, mapped);
         printf("[BREW/Applet] '%s': seleção de manipulador → %s (handler@0x%08x) [%s]\n",
