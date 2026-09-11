@@ -243,7 +243,9 @@ inline bool mem_hook(uc_engine* uc, uc_mem_type type, uint64_t address,
 // falhou — os testes exigem que essa mutação torne o controle negativo VERMELHO.
 inline FirstPcResult run_first_pc(uc_engine* uc, u32 entry_va, u32 mod_begin,
                                   u32 mod_size, u32 stack_top, u64 budget,
-                                  bool force_success = false) {
+                                  bool force_success = false,
+                                  u32 init_r0 = 0, u32 init_r1 = 0,
+                                  u32 init_r2 = 0, u32 init_r3 = 0) {
     FirstPcResult r;
     r.load_va  = mod_begin;
     r.entry_va = entry_va;
@@ -261,13 +263,12 @@ inline FirstPcResult run_first_pc(uc_engine* uc, u32 entry_va, u32 mod_begin,
     uc_hook_add(uc, &hm, UC_HOOK_MEM_UNMAPPED | UC_HOOK_MEM_PROT,
                 (void*)detail::mem_hook, &st, 1, 0);
 
-    // Estado inicial mínimo: SP na pilha de scratch, LR no sentinela (para o
-    // interpretador parar se o módulo retornar), r0..r3 zerados.
-    u32 zero = 0;
-    uc_reg_write(uc, UC_ARM_REG_R0, &zero);
-    uc_reg_write(uc, UC_ARM_REG_R1, &zero);
-    uc_reg_write(uc, UC_ARM_REG_R2, &zero);
-    uc_reg_write(uc, UC_ARM_REG_R3, &zero);
+    // Estado inicial: SP na pilha de scratch, LR no sentinela (para o
+    // interpretador parar se o módulo retornar), r0..r3 configurados.
+    uc_reg_write(uc, UC_ARM_REG_R0, &init_r0);
+    uc_reg_write(uc, UC_ARM_REG_R1, &init_r1);
+    uc_reg_write(uc, UC_ARM_REG_R2, &init_r2);
+    uc_reg_write(uc, UC_ARM_REG_R3, &init_r3);
     uc_reg_write(uc, UC_ARM_REG_SP, &stack_top);
     uc_reg_write(uc, UC_ARM_REG_LR, &sentinel);
 

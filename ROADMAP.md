@@ -2435,9 +2435,12 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   com 23 instruções executadas sob helper assistido. Integrado no Makefile sob target
   `test-dd1a` com mutação negativa que reprova fabricação de entrada.
 - [ ] **DD1-runtime — objetos/imports:** resolver VAs reais de
-  `ishell_create_va/aeemod_load_va/aeeclscreate_va`, hoje zero; obter IShell vivo,
-  aplicar RW/ZI/relocações/imports/GOT e provar `CreateInstance(0x0102F789) → objeto →
-  HandleEvent`. Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
+  `ishell_create_va/aeemod_load_va/aeeclscreate_va` (VAs de referência de segmento 11 do APPS
+  localizadas: ISHELL_CreateInstance @ `0x105c7fb4`, AEEAppletNew @ `0x105322f2`);
+  obter IShell vivo, aplicar RW/ZI/relocações/imports/GOT e provar
+  `CreateInstance(0x0102F789) → objeto → HandleEvent`. Probe assistido em `test_dd1a_diag`
+  avançou para 35 instruções até a 1ª chamada vtable (`ldr r1, [r0, #0x68]` @ `0x1200218c`).
+  Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
 - [ ] **DD2 — VFS:** primeiro identificar o limite guest `IFileMgr/OEMFS`; então oferecer

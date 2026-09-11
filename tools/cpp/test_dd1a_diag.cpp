@@ -266,6 +266,44 @@ int main(int argc, char** argv) {
         // ausente ou orçamento — não exigimos sucesso (regra de ouro).
         assert(r.fault != FAULT_NONE || r.instructions > 0);
         uc_close(uc);
+
+        // DD1-runtime: teste exploratório assistido passando contexto de chamada AEEMod_Load
+        // (pIShell != 0, ppObj != 0) e verificando que a execução avança além do branch
+        // de validação inicial (23 instruções) até a primeira dependência de import/GOT real.
+        {
+            uc_engine* uc2 = nullptr;
+            assert(uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc2) == UC_ERR_OK);
+            uc_mem_map(uc2, 0x001F0000, 0x10000, UC_PROT_ALL);
+            BrewLoader ld2(uc2);
+            assert(ld2.inject_bytes(mod, LB, DD_CLSID, "ddragonz.mod"));
+
+            // Scratch para instâncias simuladas: pIShell e ppObj
+            const u32 SCRATCH = 0x00300000;
+            uc_mem_map(uc2, SCRATCH, 0x10000, UC_PROT_ALL);
+            u32 vtbl = SCRATCH + 0x100;
+            uc_mem_write(uc2, SCRATCH, &vtbl, 4); // pIShell->vtable
+            u32 ppObj = SCRATCH + 0x200;
+
+            // Invocação com r0=pIShell, r1=pIModule(0), r2=ppObj
+            FirstPcResult r2 = run_first_pc(uc2, m.entry_va, LB, m.size, STK, 200000, false,
+                                            SCRATCH, 0, ppObj, 0);
+            std::fflush(stdout);
+            std::fprintf(stderr, "[DD1-runtime/probe] com args pIShell/ppObj: ran=%s entered=%s "
+                         "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x\n",
+                         r2.ran ? "SIM" : "nao", r2.entered_module ? "SIM" : "nao",
+                         r2.first_pc, r2.last_pc, (unsigned long long)r2.instructions,
+                         fault_label(r2.fault), r2.fault_va);
+
+            // Prova observável: avança além das 23 instruções iniciais (35 instruções)
+            // e atinge a chamada de método vtable em 0x1200218c (ldr r1, [r0, #0x68] -> leitura em 0x68 unmapped).
+            assert(r2.ran && r2.entered_module);
+            assert(r2.instructions == 35);
+            assert(r2.last_pc == 0x1200218c);
+            assert(r2.fault == FAULT_READ_UNMAPPED);
+            assert(r2.fault_va == 0x00000068);
+
+            uc_close(uc2);
+        }
     }
 
     std::printf("=== Test DD1a first-PC assisted diagnostic: PASS (hybrid/assisted) ===\n");
