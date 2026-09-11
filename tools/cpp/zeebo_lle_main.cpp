@@ -4659,7 +4659,11 @@ int main(int argc, char** argv) {
             // Loop interativo/contínuo quando há tempo requerido (--seconds=N, N>0),
             // GUI, ou um cliente de controle esperando comandos (senão o processo
             // encerraria antes de responder).
-            if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+            if (control_port > 0 && !life_ok) {
+                // loaded_only ainda é uma sessão depurável: segue o boot normal
+                // sem fabricar o ciclo de vida ou um frame do applet.
+                sys.run_interleaved(cycles, slice_insns, max_seconds, show_fps, dump_frames_dir);
+            } else if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }
             return life_ok ? 0 : 1;
@@ -4676,7 +4680,11 @@ int main(int argc, char** argv) {
             // um applet externo NÃO é a Z-Wheel — usa seleção honesta do próprio
             // manipulador; arquivo inválido/sem entry permanece loaded_only.
             bool life_ok = sys.dispatch_applet_start(applet_path, /*is_zwheel=*/false);
-            if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+            if (control_port > 0 && !life_ok) {
+                // loaded_only ainda é uma sessão depurável: segue o boot normal
+                // sem fabricar o ciclo de vida ou um frame do applet.
+                sys.run_interleaved(cycles, slice_insns, max_seconds, show_fps, dump_frames_dir);
+            } else if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
             }
             return life_ok ? 0 : 1;
