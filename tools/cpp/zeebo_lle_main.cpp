@@ -2874,24 +2874,43 @@ private:
                     if (nxt && nxt->ip) {
                         zeebo_l4::ThreadInfo* cur = sys->thread_table_.get_thread_mut(cur_tid);
                         if (cur) {
-                            // Reutiliza pc/sp_val já lidos no topo do hook (linhas
-                            // ~2180-2182): evita uc_reg_read redundantes no handoff.
+                            // Bug 2: salva o CONTEXTO DE CPU COMPLETO da thread que
+                            // bloqueou no IPC (não só ip/sp). Mesmo helper central do
+                            // ThreadSwitch — antes o IPC preservava apenas PC/SP.
+                            if (cur_tid) {
+                                zeebo_l4::CpuContext cctx{};
+                                zeebo_l4::cpu_context_read(uc, &cctx);
+                                sys->thread_table_.save_context(cur_tid, cctx);
+                            }
                             cur->ip = pc;
                             cur->sp = sp_val;
                         }
                         sys->thread_table_.set_current_tid(next_tid);
-                        u32 target_ip = nxt->ip;
-                        u32 target_sp = nxt->sp;
-                        // QW41: o entry point AMSS/BREW (0x10137000) só é válido
-                        // como Thumb (bytes ARM decodificam lixo). O firmware não
-                        // marca o LSB do endereço (convenção BX) neste ExchangeRegisters,
-                        // então o T-bit precisa ser inferido: qualquer thread cujo IP
-                        // caia no range AMSS/BREW arranca em modo Thumb (ABI real do
-                        // shell BREW nesse firmware, confirmado por disassembly).
-                        // NOTA: escrever CPSR diretamente (bit 5) NAO e confiavel no
-                        // Unicorn para trocar o modo de decodificacao; a unica forma
-                        // deterministica e escrever o PC com o bit 0 setado (convencao
-                        // BX real de hardware), que o Unicorn interpreta corretamente.
+
+                        // Bug 1: comuta o ADDRESS SPACE real para o SID da próxima
+                        // thread ENTRE fatias (fora de hook — handler de escalonamento).
+                        {
+                            u32 nsid = sys->thread_table_.thread_space(next_tid);
+                            if (nsid && sys->space_manager_.has_space(nsid))
+                                sys->space_manager_.activate(uc, nsid);
+                        }
+
+                        // Bug 2: restaura o CONTEXTO COMPLETO da próxima thread se
+                        // houver; caso contrário usa ip/sp iniciais (primeira ativação).
+                        zeebo_l4::CpuContext nctx{};
+                        bool have_ctx = sys->thread_table_.load_context(next_tid, &nctx);
+                        u32 target_ip = have_ctx ? nctx.pc : nxt->ip;
+                        u32 target_sp = have_ctx ? nctx.sp : nxt->sp;
+                        if (have_ctx) {
+                            zeebo_l4::cpu_context_write(uc, nctx);
+                            did_handoff = true;
+                            if (sys->service_registry_.is_amss_thread(next_tid)) {
+                                printf("[L4/IPC] Handoff(full-ctx) para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                                       next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
+                            }
+                            break;
+                        }
+                        // QW41: T-bit inferido na primeira ativação (LSB do PC).
                         bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
                         u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
                         uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
@@ -2915,43 +2934,47 @@ private:
                     if (nxt && nxt->ip) {
                         // Bug 2: salva o CONTEXTO DE CPU COMPLETO da thread atual
                         // (r0..r12, sp, lr, pc, cpsr — inclui o bit T = modo Thumb),
-                        // não só ip/sp. Sem isso a thread retomada perdia todos os
-                        // registradores e o modo de instrução.
+                        // não só ip/sp. Usa o helper CENTRALIZADO cpu_context_read,
+                        // compartilhado com o caminho de IPC handoff.
                         if (cur_tid) {
                             zeebo_l4::CpuContext cctx{};
-                            static const int regids[13] = {
-                                UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
-                                UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,
-                                UC_ARM_REG_R8,UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,
-                                UC_ARM_REG_R12 };
-                            for (int i=0;i<13;i++) uc_reg_read(uc, regids[i], &cctx.r[i]);
-                            cctx.pc = pc; cctx.sp = sp_val;
-                            uc_reg_read(uc, UC_ARM_REG_LR,   &cctx.lr);
-                            uc_reg_read(uc, UC_ARM_REG_CPSR, &cctx.cpsr);
+                            zeebo_l4::cpu_context_read(uc, &cctx);
                             sys->thread_table_.save_context(cur_tid, cctx);
                         }
                         sys->thread_table_.set_current_tid(next_tid);
 
+                        // Bug 1: comuta o ADDRESS SPACE real para o SID da próxima
+                        // thread ENTRE fatias (fora de qualquer hook — este handler
+                        // roda no laço de escalonamento). Se o SID não tem regiões
+                        // registradas, mantém a view atual (boot plano).
+                        {
+                            u32 nsid = sys->thread_table_.thread_space(next_tid);
+                            if (nsid && sys->space_manager_.has_space(nsid))
+                                sys->space_manager_.activate(uc, nsid);
+                        }
+
                         // Bug 2: se a próxima thread tem contexto salvo, restaura o
-                        // CONTEXTO COMPLETO; caso contrário usa o ip/sp inicial.
+                        // CONTEXTO COMPLETO via helper centralizado; caso contrário
+                        // usa o ip/sp inicial do ExchangeRegisters.
                         zeebo_l4::CpuContext nctx{};
                         bool have_ctx = sys->thread_table_.load_context(next_tid, &nctx);
                         u32 target_ip = have_ctx ? nctx.pc : nxt->ip;
                         u32 target_sp = have_ctx ? nctx.sp : nxt->sp;
                         if (have_ctx) {
-                            static const int regids[13] = {
-                                UC_ARM_REG_R0,UC_ARM_REG_R1,UC_ARM_REG_R2,UC_ARM_REG_R3,
-                                UC_ARM_REG_R4,UC_ARM_REG_R5,UC_ARM_REG_R6,UC_ARM_REG_R7,
-                                UC_ARM_REG_R8,UC_ARM_REG_R9,UC_ARM_REG_R10,UC_ARM_REG_R11,
-                                UC_ARM_REG_R12 };
-                            for (int i=0;i<13;i++) uc_reg_write(uc, regids[i], &nctx.r[i]);
-                            uc_reg_write(uc, UC_ARM_REG_LR, &nctx.lr);
+                            // Restauração completa e ABI-correta (r0..r12,SP,LR,CPSR,PC
+                            // com T-bit via LSB do PC). cpu_context_write escreve CPSR
+                            // antes de SP/LR (banked por modo).
+                            zeebo_l4::cpu_context_write(uc, nctx);
+                            did_handoff = true;
+                            if (sys->service_registry_.is_amss_thread(next_tid)) {
+                                printf("[L4/ThreadSwitch] Handoff(full-ctx) para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                                       next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
+                            }
+                            break;
                         }
-                        // QW41: mesmo ajuste de T-bit do case 0x00 (ver comentário lá) —
-                        // escrita direta de PC com bit0, não CPSR (não confiável no Unicorn).
-                        // Modo preservado do CPSR salvo (bit T) quando há contexto.
-                        bool want_thumb = have_ctx ? ((nctx.cpsr>>5)&1u)
-                                        : ((target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid));
+                        // Sem contexto salvo: primeira ativação — usa ip/sp iniciais.
+                        // QW41: T-bit inferido (escrita direta de PC com bit0).
+                        bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
                         u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
                         uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
                         if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
@@ -2967,7 +2990,19 @@ private:
             // L4_ThreadControl / L4_SpaceControl: retornam r0=1 (sucesso da ABI L4). O
             // contrato esperado pelos callers do Iguana é "thread/space criado com
             // sucesso"; retornar 1 mantém o boot avançando sem abortar o chamador.
-            case 0x08: res_r0 = 1; break;                    // L4_ThreadControl
+            case 0x08: {                                     // L4_ThreadControl
+                // ABI ARM OKL4 2.1.1 (threadcontrol.spp): r0=dest,
+                // r1=SpaceSpecifier(SID), r2=Scheduler, r3=Pager. O SID de uma
+                // thread vem DAQUI (SpaceSpecifier), não do r5 do ExchangeRegisters.
+                u32 tc_dest=0, tc_space=0, tc_sched=0, tc_pager=0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &tc_dest);
+                uc_reg_read(uc, UC_ARM_REG_R1, &tc_space);
+                uc_reg_read(uc, UC_ARM_REG_R2, &tc_sched);
+                uc_reg_read(uc, UC_ARM_REG_R3, &tc_pager);
+                sys->thread_table_.on_thread_control(tc_dest, tc_space, tc_sched, tc_pager);
+                res_r0 = 1;
+                break;
+            }
             case 0x0c: {                                     // L4_ExchangeRegisters
                 u32 dest = 0, control = 0, new_sp = 0, new_ip = 0, flags = 0;
                 uc_reg_read(uc, UC_ARM_REG_R0, &dest);
@@ -2981,14 +3016,21 @@ private:
                             dest, control, new_sp, new_ip, flags, (control & zeebo_l4::EXREGS_CTRL_DELIVER) ? 1 : 0);
                 }
                 sys->thread_table_.on_exchange_registers(dest, control, new_sp, new_ip, flags);
-                // Bug 1/2: preserva o space_id (SID) da thread. O r5 do UTCB do
-                // ExchangeRegisters do Iguana carrega o SpaceId alvo; na ausência
-                // de um valor explícito, herda o SID da thread corrente (mesmo AS).
+                // Bug 2: r5 do ExchangeRegisters é UserDefHandle, NÃO o SID.
+                // (ABI ARM OKL4 2.1.1 exchangeregisters.spp: [sp#40]=r5=UserDefHandle;
+                //  o SID vem do SpaceSpecifier/r1 do ThreadControl, tratado no case 0x08).
+                // Antes o SID era lido erroneamente de r5, associando o espaço de
+                // uma thread ao seu handle de usuário. Aqui só guardamos o handle e,
+                // se a thread ainda não tem SID, herdamos o da thread corrente
+                // (mesmo AS — comportamento correto para clones no mesmo espaço).
                 {
-                    u32 sid_arg = 0;
-                    uc_reg_read(uc, UC_ARM_REG_R5, &sid_arg);
-                    u32 inherit = sys->thread_table_.thread_space(sys->thread_table_.current_tid());
-                    sys->thread_table_.set_thread_space(dest, sid_arg ? sid_arg : inherit);
+                    u32 udh = 0;
+                    uc_reg_read(uc, UC_ARM_REG_R5, &udh);
+                    sys->thread_table_.set_user_def_handle(dest, udh);
+                    if (sys->thread_table_.thread_space(dest) == 0) {
+                        u32 inherit = sys->thread_table_.thread_space(sys->thread_table_.current_tid());
+                        if (inherit) sys->thread_table_.set_thread_space(dest, inherit);
+                    }
                 }
                 if (new_ip >= 0xb0100000 && new_ip < 0xb0120000) {
                     sys->service_registry_.register_service("ig_naming", dest, 1, 0xb0100000, 0x20000);
@@ -3020,10 +3062,28 @@ private:
                 // Bug 1: registra o mapeamento na VTLB do space_id (SpaceMap) além
                 // da view ativa vtlb_. Assim consultas por SID veem só o que aquele
                 // espaço mapeou, sem fundir tasks distintas no mesmo VA.
+                std::vector<zeebo_l4::MapItem> mc_items;
                 res_r0 = zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control,
-                             /*out_items=*/nullptr,
+                             /*out_items=*/&mc_items,
                              sys->apps_pool_.host ? &sys->apps_pool_ : nullptr,
                              sys->apps_pool_.host ? &sys->space_map_ : (zeebo_l4::SpaceMap*)nullptr);
+                // Bug 1 (runtime): registra as regiões deste SID no SpaceManager
+                // para permitir a comutação REAL de address space (activate) entre
+                // fatias. Só regiões com backing físico na pool (host_of != null)
+                // podem ser re-mapeadas por ponteiro; as demais permanecem na view
+                // plana e são ignoradas aqui (não há host_ptr para aliasar).
+                if (sys->apps_pool_.host) {
+                    for (const auto& it : mc_items) {
+                        if (it.fpage.is_nil() || it.fpage.is_whole_space()) continue;
+                        u64 va   = it.fpage.vaddr();
+                        u64 size = it.fpage.size_bytes();
+                        u64 phys = it.phys.phys_base();
+                        u8* hp   = sys->apps_pool_.host_of(phys);
+                        if (!hp || !sys->apps_pool_.contains(phys, size)) continue;
+                        int prot = zeebo_l4::fpage_to_uc_prot(it.fpage);
+                        sys->space_manager_.record(sid, va, size, prot, hp);
+                    }
+                }
                 // Mantém a view ativa (fastmem plano) sincronizada com o espaço atual.
                 if (sys->apps_pool_.host) {
                     zeebo_l4::handle_map_control(uc, utcb_ptr, sid, control,
@@ -4113,6 +4173,10 @@ private:
     // vtlb_ acima permanece a view "ativa" (fastmem plano do boot); space_map_
     // registra o mapeamento por espaço para consultas isoladas por SID.
     zeebo_l4::SpaceMap  space_map_;
+    // Bug 1 (runtime): comuta o address space REAL do Unicorn por SID entre
+    // fatias de execução (uc_mem_unmap/map_ptr fora de hooks). space_map_ acima
+    // só registra traduções para consulta; space_manager_ efetiva a troca.
+    zeebo_l4::SpaceManager space_manager_;
     std::vector<uint8_t> smem_mem_;      // único backing físico, visível aos dois cores
     std::vector<uint8_t> apps_pool_mem_; // backing store da pool (alinhado)
 
