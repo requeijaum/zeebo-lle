@@ -326,6 +326,28 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, SHELL_CREATE_STUB + 32, &DISPLAY_OBJ, 4);
             uc_mem_write(uc2, vtbl + 8, &SHELL_CREATE_STUB, 4); // vtbl[2] = SHELL_CREATE_STUB
 
+            // Objeto e vtable de IDisplay em SCRATCH + 0x500:
+            // ddragonz @0x1201a610 lê r0 = IDisplay->vtable (em DISPLAY_OBJ + 0)
+            // e em 0x1201a618 lê r2 = vtable[4] (offset 0x10) e faz bx r2.
+            // Para que r0 seja válido, DISPLAY_OBJ precisa conter ponteiro para vtable:
+            // e [DISP_VTBL + 0x10] deve apontar para DISP_GETINFO_STUB.
+            // Além disso, [r0 + 0xc] é dereferenciado em 0x1201a608 (r0 = [r0, #0xc]).
+            // Vamos montar a vtable de IDisplay em DISP_VTBL e o sub-objeto de bitmap/device.
+            const u32 DISP_VTBL = SCRATCH + 0x700;
+            uc_mem_write(uc2, DISPLAY_OBJ, &DISP_VTBL, 4);
+
+            const u32 DISP_GETINFO_STUB = SCRATCH + 0x2200;
+            u32 disp_getinfo_code[6] = {
+                0xe59f200c, // ldr r2, [pc, #12] -> 0x01e00280 (h=480, w=640)
+                0xe5812004, // str r2, [r1, #4]  -> grava em [sp+4] do chamador
+                0xe3a00000, // mov r0, #0        -> return 0
+                0xe12fff1e, // bx lr
+                0x01e00280, // w=640 (0x0280), h=480 (0x01e0)
+                0x00000000
+            };
+            uc_mem_write(uc2, DISP_GETINFO_STUB, disp_getinfo_code, sizeof(disp_getinfo_code));
+            uc_mem_write(uc2, DISP_VTBL + 0x10, &DISP_GETINFO_STUB, 4); // vtbl[4] = DISP_GETINFO_STUB
+
             u32 ppObj = SCRATCH + 0x200;
 
             // Suprir o ponteiro de static-base (AEEHelperFuncs) em moduleBase - 4 (0x11fffffc)
@@ -337,15 +359,6 @@ int main(int argc, char** argv) {
             // Mock do helper MALLOC (offset 0x68 em AEEHelperFuncs):
             // 0x12002190: add r0, r5, #0x10 -> r0 é o tamanho a alocar
             // 0x12002194: bx r1 -> salta para malloc(r0)
-            // Função stub ARM em SCRATCH + 0x2000:
-            //   ldr r0, [pc, #4]  (retorna buffer pré-alocado)
-            //   bx lr
-            //   .word ALLOC_BUF
-            // Stub MALLOC deve retornar ALLOC_BUF no registrador r0
-            // Stub ARM em SCRATCH + 0x2000:
-            //   ldr r0, [pc, #0]
-            //   bx lr
-            //   .word ALLOC_BUF
             const u32 MALLOC_STUB = SCRATCH + 0x2000;
             const u32 ALLOC_BUF = SCRATCH + 0x3000;
             u32 stub_code[3] = {
@@ -377,7 +390,7 @@ int main(int argc, char** argv) {
             // (ABI do entry de ddragonz.mod @0x12000014: mov r3, r2; mov r2, r1; mov r1, r0; mov r0, #0x14; bl 0x1200212c)
             // Para que 0x1200212c receba r3 != 0, o chamador precisa passar ppObj em r2 (que vira r3) E r1 != 0 (que vira r2)!
             FirstPcResult r2 = run_first_pc(uc2, m.entry_va, LB, m.size, STK, 200000, false,
-                                            SCRATCH, 1, ppObj, 0);
+                                             SCRATCH, 1, ppObj, 0);
             std::fflush(stdout);
             std::fprintf(stderr, "[DD1-runtime/probe] com args pIShell/ppObj: ran=%s entered=%s "
                          "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x\n",
@@ -434,6 +447,29 @@ int main(int argc, char** argv) {
             // Testar CreateInstance com CLSID correto do jogo (0x0102f789)
             // Deve entrar no construtor do applet em 0x12000490!
             uc_mem_write(uc2, ppApplet, "\0\0\0\0", 4);
+            // IDisplay vive em DISPLAY_OBJ (SCRATCH + 0x500).
+            // Em 0x1201a68c, GetAppContext retornou APP_CTX em r0.
+            // 0x1201a690: ldr r4, [r0, #0xc]  (r4 = APP_CTX->pIShell)
+            // 0x1201a694: ldr r0, [r5, #-4]   (static-base)
+            // 0x1201a698: ldr r0, [r0, #0xc0] (GetAppContext)
+            // 0x1201a69c: mov lr, pc; bx r0   (chama GetAppContext de novo)
+            // 0x1201a6a4: ldr r0, [r0, #0xc]  (r0 = APP_CTX->pIShell)
+            // ... chama IShell::CreateInstance(HEAP) com r4 = pIShell ...
+            // e depois em 0x1201a608:
+            // 0x1201a608: ldr r0, [r0, #0xc]  (se r0 fosse APP_CTX, r0->pIShell! Mas ele quer pIDisplay?)
+            // Vejamos o que ddragonz faz em 0x1201a600:
+            // Ele chama uma função que retorna um objeto em r0, depois faz:
+            // 0x1201a608: ldr r0, [r0, #0xc]
+            // 0x1201a60c: add r1, sp, #4
+            // 0x1201a610: ldr r0, [r0]
+            // 0x1201a614: add lr, pc, #8
+            // 0x1201a618: ldr r2, [r0, #0x10]
+            // 0x1201a61c: mov r0, r4
+            // 0x1201a620: bx r2
+            // Então [r0 + 0xc] precisa ser um ponteiro para um objeto com vtable em [0] e método em [0x10]!
+            // Vamos configurar SCRATCH + 0x0c para apontar para DISPLAY_OBJ:
+            uc_mem_write(uc2, SCRATCH + 0x0c, &DISPLAY_OBJ, 4);
+
             FirstPcResult r_match = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
                                                  ALLOC_BUF, SCRATCH, DD_CLSID, ppApplet);
             u32 r_lr = 0, r_sp = 0, r_r0 = 0, r_r4 = 0;
@@ -450,7 +486,7 @@ int main(int argc, char** argv) {
             // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
             // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), obtém o contexto
             // da aplicação via GetAppContext (offset 0xc0), despacha verificação de HEAP e avança
-            // até 265 instruções no módulo guest!
+            // até 265 instruções no módulo guest, parando na chamada do método de display!
             assert(r_match.ran && r_match.entered_module);
             assert(r_match.instructions == 265);
             assert(r_match.last_pc == 0x1201a620);

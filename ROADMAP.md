@@ -2452,7 +2452,9 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   `AEECLSID_DISPLAY = 0x01001001`). Suprido o mock de `IShell::CreateInstance`, o construtor do
   applet avançou até 174 instruções, obtendo em seguida a estrutura de contexto da aplicação
   via `GetAppContext` (offset `0xc0` em static-base), despachando a verificação de heap
-  (`AEECLSID_HEAP = 0x01001002`) e avançando até 265 instruções executadas no guest.
+  (`AEECLSID_HEAP = 0x01001002`), consultando o método de informações do display (`IDisplay::GetInfo`
+  no slot 4 / offset `0x10` com parâmetros de resolução e profundidade) e registrando a fronteira
+  estrita em 265 instruções executadas no guest.
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
