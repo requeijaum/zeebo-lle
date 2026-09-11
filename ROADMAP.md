@@ -990,7 +990,11 @@ o disco e o build falha com `error writing to /tmp/ccXXXX.s: Não há espaço di
 
 ---
 
-## Próximos Passos Priorizados — vertical slice Double Dragon
+## Próximos Passos Priorizados — vertical slice Double Dragon **[HISTÓRICO]**
+
+> Esta lista, a tabela DD-QW1–6 e os candidatos associados foram consolidados e
+> substituídos por QW99 Parte 4. Permanecem aqui somente como registro de proveniência;
+> em caso de divergência, valem os gates DD0/DD1a/DD1b–DD6 de QW99.
 
 ### P0 — Cadeia crítica (não confundir com quick wins)
 
@@ -2314,45 +2318,46 @@ O próximo hotspot medido é a releitura de opcode por instrução no slide-dete
 Core1; deve ser tornado opt-in ou migrado para hook de bloco sem perder o controle
 positivo do detector.
 
-### QW99 — Plano crítico em quatro partes **[AUTORITATIVO; substitui o estado de QW97-QW98]**
+### QW99 — Plano crítico em quatro partes **[AUTORITATIVO; substitui QW39, QW97-QW98 e os planos DD anteriores]**
 
-Revisão do HEAD `3e3e563`, com `make check` verde. O objetivo permanece **Double
-Dragon com imagem, input e som produzidos pelo guest**. Este plano separa modelo
-unitário, integração guest-visible, efeito observado no boot e marco comercial; um
-nível não pode ser promovido ao seguinte por contador, log, payload injetado, frame
-host ou áudio sintético.
+Baseline auditada em `aa7a914` (`3e3e563` = baseline de código anterior ao plano), com
+`make -C tools/cpp check` verde. O objetivo permanece **Double Dragon com imagem, input
+e som produzidos pelo guest**. Este plano separa modelo unitário, integração
+guest-visible, efeito observado no boot e marco comercial; um nível não pode ser
+promovido ao seguinte por contador, log, payload injetado, frame host ou áudio sintético.
 
 #### Parte 1 — Base confiável e arquitetura testável (P0)
 
-Objetivo: impedir gates verdes sobre artefatos antigos e reduzir conflitos no
-orquestrador antes de ampliar a emulação.
+Objetivo: impedir gates verdes sobre artefatos antigos. Esta parte não autoriza uma
+refatoração ampla antes de mover a fronteira de boot.
 
 - [ ] Remover do índice os binários ignorados `tools/cpp/{zeebo_boot,zeebo_elf,
   zeebo_harness,zeebo_kernel_boot,zeebo_partition}` e os três
   `tools/__pycache__/*.pyc`; estender `test_clean_hygiene.py` para reprovar qualquer
   saída de `git ls-files -ci --exclude-standard`.
-- [ ] Separar `check-fast`, `check-firmware` e `check-full`; o gate de firmware deve
-  **falhar**, não virar verde, quando a NAND necessária estiver ausente. Exibir totais
-  PASS/FAIL/SKIP.
-- [ ] Derivar build/check/clean de listas únicas de testes para eliminar os conflitos
-  recorrentes no `Makefile`.
+- [ ] Em `tools/cpp/Makefile`, separar `check-fast`, `check-firmware` e `check-full`; o
+  gate de firmware deve **falhar**, não virar verde, quando a NAND necessária estiver
+  ausente. Exibir totais PASS/FAIL/SKIP e derivar build/check/clean de listas únicas.
+- [ ] **DD0 — gate honesto de módulo:** arquivo inválido falha antes da execução;
+  `test-roms-external` deixa de emitir PASS de jogo; Reksio/DD permanecem `loaded_only`
+  até um PC pertencente ao módulo realmente executar.
 - [ ] Inventariar e encerrar worktrees/branches `agent/qw*` já integrados; nenhum
   resultado durável deve existir apenas em `/tmp`.
-- [ ] Extrair gradualmente de `ZeeboLLESystem`: `L4KernelShim/CoreScheduler`,
-  `PeripheralBus` e `IntercoreFabric`. `zeebo_lle_main.cpp` fica como composição e
-  CLI; lógica nova não deve nascer dentro dos hooks se puder ser testada fora deles.
-- [ ] Tornar fila de invalidação e demais estados estáticos propriedade do core/engine,
-  evitando estado cruzado entre instâncias.
+- [ ] Extrair `L4KernelShim/CoreScheduler`, `PeripheralBus`, `IntercoreFabric` e remover
+  estado estático **somente conforme o caminho tocado exigir uma seam testável**. Não
+  bloquear o scatterload nem DD1a por uma decomposição completa do god object.
 
-Gate P0: clone limpo recompila tudo; nenhum arquivo ignorado está rastreado; testes
-não reimplementam uma lambda privada para fingir cobertura da produção; worktree
-principal contém somente mudanças deliberadas.
+Gate P0: clone limpo recompila tudo; nenhum arquivo ignorado está rastreado; NAND
+ausente falha no tier correto; módulo inválido não recebe PASS; worktree principal
+contém somente mudanças deliberadas.
 
-#### Parte 2 — Periféricos e comunicação realmente alcançáveis pelo guest (P1)
+#### Parte 2 — Periféricos e comunicação realmente alcançáveis pelo guest (P1, em paralelo)
 
-Estado dos dez bugs: 1, 2, 3, 4, 7, 8, 9 e 10 estão integrados com controles
-negativos. **5 e 6 foram reabertos pela auditoria**, pois seus modelos passam em
-isolamento, mas ainda não satisfazem o caminho real do firmware.
+Estado dos dez bugs: 1/2 (`cd7da2f`), 3 (`68a477d`), 4 (`3808767`/`b4a4d35`),
+7 (`03b29c7`), 8 (`3e3e563`), 9 (`19a1a4b8`) e 10 (`18caa09`/`350984c`) estão
+integrados com controles negativos. **5 e 6 foram reabertos pela auditoria**: modelos
+isolados não satisfazem o caminho real do firmware. Os números deste painel são os do
+backlog de dez bugs, não as subseções de `AUDIT_2026-09-10.md`.
 
 - [ ] Bug 5: ligar leituras/escritas MMIO do guest aos modelos VIC/GPT. Escritas em
   ENABLE/MATCH/INTENABLE/ACK/EOI devem alterar o modelo; RAM plana não conta.
@@ -2369,52 +2374,68 @@ isolamento, mas ainda não satisfazem o caminho real do firmware.
 
 Gate P1: além do teste unitário e do mutante vermelho, o firmware executa os acessos
 MMIO/SMEM reais e a variável defeituosa muda. Modelo não conectado = item aberto.
+VIC/GPT/ProcComm podem avançar em paralelo, mas **não são declarados bloqueadores do
+boot** até um trace vivo mostrar o guest esperando por IRQ ou leitura cross-core.
 
-#### Parte 3 — Fechar o boot orgânico e o scatterload (P2)
+#### Parte 3 — Fechar o boot orgânico e o scatterload (P2; fronteira imediata)
 
 Os fixes reais de SID/contexto (`cd7da2f`) não destravaram o boot longo: o Core0
 continua em `0xb0400064..0xb040006c`. Portanto, “um único address space” era defeito
-real, mas não explicação suficiente para o estado atual.
+real, mas não explicação suficiente para o estado atual. QW49 e
+`notes/core1_boot_estado_real.md` ainda descrevem panic de TCB, enquanto QW59 registra
+Core1 avançando por MapControl; essa contradição deve ser resolvida, não herdada.
 
-- [ ] Instrumentar em cada entrada de `0xb0400000`: TID, SID ativo, SP/LR, backing
-  físico e hash dos 252 bytes em `0xb04151a4`, antes e depois da ativação do SID.
+- [ ] Instrumentar **agora**, em cada entrada de `0xb0400000`: TID, SID ativo, SP/LR,
+  backing físico e hash dos 252 bytes em `0xb04151a4`, antes/depois da ativação do SID.
 - [ ] Provar que `SpaceManager` troca o conteúdo executado, inclusive páginas
   registradas antes de a task receber SID; não aceitar somente LUT paralela ou teste
   sintético.
+- [ ] Reestabelecer a fronteira real do Core1 com trace não filtrado e controle
+  negativo; reconciliar QW49/QW59 e atualizar `notes/core1_boot_estado_real.md`.
 - [ ] Aplicar janelas e histogramas não filtrados de `STATS_TECHNIQUES.md`; progresso
   exige efeito externo novo, não instruções/slices maiores.
 - [ ] Levar o fluxo sem restauração host, salto forçado ou dispatch fixo até
-  AEECShell/AppMgr e registrar a cadeia IPC/naming/quartz/AMSS que realizou a
-  transição.
+  AEECShell/AppMgr e registrar a cadeia IPC/naming/quartz/AMSS que realizou a transição.
 - [ ] Manter Dynarmic fora deste gate; primeiro fechar o comportamento no intérprete.
 
 Gate P2: AppMgr/AEECShell alcançado organicamente em execuções repetíveis, com
-controle negativo e sem patches barrados. O marco é mudança de fronteira observável,
-não ausência de crash.
+controle negativo e sem patches barrados. STOP: se somente instruções/slices crescerem,
+não empilhar outro patch de PC/registrador. O marco é mudança de fronteira observável.
 
 #### Parte 4 — Vertical slice do Double Dragon (P3)
 
-Executar em ordem; GPU e áudio isolados não recebem prioridade antes de um produtor
-guest real.
+DD0 está em P0. DD1a–DD3 podem avançar **em paralelo** como diagnóstico assistido,
+sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
 
-- [ ] **DD1 — primeiro PC:** localizar/validar pacote, carregar `ddragonz.mod`, executar
-  seu `AEEMod_Load`/entry real e registrar PC pertencente ao módulo.
-- [ ] **DD2 — VFS:** oferecer ao guest `open/read/seek/stat`, caminhos e overlay de
-  saves; provar leitura byte-exata de `data.ggz` e `sound.ggz`. Injeção host não conta.
-- [ ] **DD3 — loop:** timers, callbacks e eventos fazem o game loop avançar sem
-  retorno forçado.
-- [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear
-  azul, padrão sintético, soma de pixels ou harness Z-Wheel não contam.
+- [ ] **DD1a — primeiro PC assistido:** validar pacote, MIF/App ID/CLSID e executar o
+  entry ARM cru de `ddragonz.mod` sob orçamento, registrando PC dentro do módulo.
+  Resolução de entry cru e dispatch por módulo já existem (`68a477d` e sucessores);
+  não reimplementar o falso gap “ELF-only” nem usar `0x10532344`.
+- [ ] **DD1-runtime — objetos/imports:** resolver VAs reais de
+  `ishell_create_va/aeemod_load_va/aeeclscreate_va`, hoje zero; obter IShell vivo,
+  aplicar RW/ZI/relocações/imports/GOT e provar `CreateInstance(0x0102F789) → objeto →
+  HandleEvent`. Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
+- [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
+  salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
+- [ ] **DD2 — VFS:** primeiro identificar o limite guest `IFileMgr/OEMFS`; então oferecer
+  `open/read/seek/stat/close`, caminhos e overlay de saves. Provar leitura byte-exata de
+  `data.ggz`/`sound.ggz`; retirar asset deve causar falha identificável.
+- [ ] **DD3 — loop:** implementar entrega BREW `ISHELL_SetTimer`/callbacks/eventos,
+  distinta do GPT/L4; o game loop avança sem retorno forçado.
+- [ ] **DD4 — frame:** primeira imagem escrita por comandos/objetos do jogo. Clear azul,
+  padrão sintético, soma de pixels ou harness Z-Wheel não contam.
 - [ ] **DD5 — input:** evento do controle altera estado observável do jogo.
-- [ ] **DD6 — áudio e jogabilidade:** primeiro PCM originado pelo guest e sessão de
-  cinco minutos com imagem, input e som. ACK QDSP5, dispositivo SDL aberto ou tom
-  sintético não contam.
+- [ ] **DD6 — áudio e jogabilidade:** bloqueado até liberação explícita do freeze de
+  `tools/cpp/qdsp5/`. Depois, provar PCM originado pelo guest e sessão de cinco minutos
+  com imagem, input e som. ACK QDSP5, SDL aberto ou tom sintético não contam.
 
 Gate final: evidência encadeada `guest → modelo → efeito no boot/jogo`, com origem do
-frame e do PCM identificada. Não priorizar outros jogos, expansão do rasterizador,
-Dynarmic ou QDSP5 especulativo antes de DD1-DD3.
+frame e do PCM identificada. Marcos B (boot orgânico), L (loaded/instanced) e I
+(primeiro PC) são independentes; resultado assistido pode fechar diagnóstico, nunca B.
+Não priorizar outros jogos, expansão do rasterizador, Dynarmic ou QDSP5 especulativo
+antes de DD1a–DD3.
 
-**Ordem obrigatória:** Parte 1 pode avançar em paralelo apenas com a correção curta da
-Parte 2; depois Parte 3; finalmente Parte 4. Refatoração estrutural é suporte ao
-caminho crítico, não uma frente infinita nem justificativa para adiar o primeiro PC do
-Double Dragon.
+**Ordem corrigida:** higiene P0 mínima; medir scatterload/Core1 imediatamente; bugs 5/6
+e DD1a–DD3 em paralelo. Convergir depois em boot orgânico/DD1b, frame/input e, somente
+após o stop/go do freeze QDSP5, áudio. Refatoração estrutural ocorre conforme necessária
+para testes, não como frente infinita.
