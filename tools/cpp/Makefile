@@ -363,6 +363,24 @@ test-dd1a: test_dd1a_diag
 	  echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
 	else echo "OK: mutante force_success falha como esperado (RED reproduzido)"; fi
 
+# Zeetris lifecycle probe (evidence-only): deriva o CLASS ID estrutural do MIF e
+# a ABI de chamada do ENTRY (prólogo push {r0,r1,r2,r4,lr} => 3 args AAPCS, ARM)
+# dos BYTES REAIS, executa o entry cru sob Unicorn INTÉRPRETE e para HONESTAMENTE
+# na 1ª dependência ausente. NÃO alega boot, NÃO usa handler fixo 0x10532344.
+# Requer libunicorn. Sem o zeetris.mod/.mif reais → SKIP (exit 77).
+test_zeetris_lifecycle: test_zeetris_lifecycle.cpp zeebo_zeetris_lifecycle.h zeebo_brew_loader.h zeebo_brew_mif.h zeebo_dd1a_diag.h
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_lifecycle.cpp -lunicorn
+
+# Gate com controles: run principal (ROM real → exit 0, ou SKIP exit 77 sem
+# fabricar execução) + mutação (ABI Thumb da v1) que DEVE falhar (RED reproduzido).
+test-zeetris-lifecycle: test_zeetris_lifecycle
+	./test_zeetris_lifecycle || [ $$? -eq 77 ]
+	@# Mutação negativa: fingir que o entry ARM roda como Thumb (premissa da v1)
+	@# → o controle exige execução limpa que não ocorre; o gate DEVE ficar VERMELHO.
+	@if ./test_zeetris_lifecycle buggy >/dev/null 2>&1; then \
+	  echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
+	else echo "OK: mutante (ABI Thumb) falha como esperado (RED reproduzido)"; fi
+
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
 # Gate: o scanner deve prever retroativamente as 8 fronteiras que foram
 # descobertas reativamente até 0f64ffa. Exit 77 = SKIP (.mod proprietário ausente).
@@ -710,6 +728,7 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
 	$(MAKE) test-proccomm
 	$(MAKE) test-proccomm-integration
 	$(MAKE) test-proccomm-production-order
+	$(MAKE) test-zeetris-lifecycle
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
 	./test_l4_thread_table
@@ -758,11 +777,11 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_lifecycle *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
+.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
