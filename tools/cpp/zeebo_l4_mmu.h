@@ -538,6 +538,65 @@ public:
         return it != spaces_.end() ? &it->second : nullptr;
     }
 
+    // OKL4 base<-extension PD sharing. An extension space (created by
+    // ThreadControl with Pager == the base space) shares the base PD's
+    // mappings via the map window / shared domain. Record that link so lookups
+    // in `ext` fall back to `base`. General: no SID/page is hardcoded; the
+    // caller passes whatever base the kernel named as the extension's pager.
+    // A space is never its own base (ignored) and a nil base clears the link.
+    void link_base(u32 ext, u32 base) {
+        if (ext == 0 || ext == base) return;
+        if (base == 0) { base_of_.erase(ext); return; }
+        base_of_[ext] = base;
+    }
+
+    // The base space linked to `sid`, or 0 if none.
+    u32 base_of(u32 sid) const {
+        auto it = base_of_.find(sid);
+        return it != base_of_.end() ? it->second : 0;
+    }
+
+    // Resolve the host backing that `sid` sees at `va`, honouring base->ext
+    // sharing. The extension's OWN region shadows the base's at the same VA
+    // (extension wins); otherwise the base chain is consulted. Returns the
+    // Region's host pointer (may be nullptr for a flat/unbacked region) or
+    // nullptr if no space in the chain maps `va`. A short base chain is walked
+    // with cycle protection.
+    u8* resolve_host(u32 sid, u64 va) const {
+        const u64 PAGE = 0x1000;
+        u64 base_va = va & ~(PAGE - 1);
+        u32 cur = sid;
+        for (int hops = 0; hops < 8 && cur != 0; ++hops) {
+            auto it = spaces_.find(cur);
+            if (it != spaces_.end()) {
+                for (const auto& r : it->second) {
+                    if (base_va >= r.va && base_va < r.va + r.size) return r.host;
+                }
+            }
+            u32 nxt = base_of(cur);
+            if (nxt == cur) break;
+            cur = nxt;
+        }
+        return nullptr;
+    }
+
+    // True iff `sid` (or any base it shares from) maps `va`.
+    bool maps(u32 sid, u64 va) const {
+        const u64 PAGE = 0x1000;
+        u64 base_va = va & ~(PAGE - 1);
+        u32 cur = sid;
+        for (int hops = 0; hops < 8 && cur != 0; ++hops) {
+            auto it = spaces_.find(cur);
+            if (it != spaces_.end())
+                for (const auto& r : it->second)
+                    if (base_va >= r.va && base_va < r.va + r.size) return true;
+            u32 nxt = base_of(cur);
+            if (nxt == cur) break;
+            cur = nxt;
+        }
+        return false;
+    }
+
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
     // Comuta o address space REAL do Unicorn para `sid`. Idempotente: reativar
     // o SID já ativo é no-op. DEVE ser chamado FORA de qualquer hook.
@@ -549,6 +608,27 @@ public:
 
         const std::vector<Region>& target = it->second;
 
+        // Effective region set the space sees: its own regions PLUS regions
+        // shared from its base PD chain (OKL4 base<-extension map window). The
+        // extension's own region shadows the base's at the same VA.
+        std::vector<Region> eff = target;
+        {
+            auto has_va = [&](u64 va){
+                for (const auto& r : eff) if (r.va == va) return true;
+                return false;
+            };
+            u32 cur = base_of(sid);
+            for (int hops = 0; hops < 8 && cur != 0; ++hops) {
+                auto bit = spaces_.find(cur);
+                if (bit != spaces_.end())
+                    for (const auto& br : bit->second)
+                        if (!has_va(br.va)) eff.push_back(br);
+                u32 nxt = base_of(cur);
+                if (nxt == cur) break;
+                cur = nxt;
+            }
+        }
+
         // 1) Desmapear regiões do espaço ativo que não coincidem (VA+backing)
         //    com nenhuma região do alvo. Só toca regiões que ESTE manager criou.
         if (activated_once_) {
@@ -556,7 +636,7 @@ public:
             if (prev != spaces_.end()) {
                 for (const auto& pr : prev->second) {
                     bool keep = false;
-                    for (const auto& tr : target) {
+                    for (const auto& tr : eff) {
                         if (tr.va == pr.va && tr.size == pr.size && tr.host == pr.host) {
                             keep = true; break;
                         }
@@ -569,13 +649,24 @@ public:
         // 2) Mapear (ou re-proteger) as regiões do alvo apontando para o backing
         //    físico daquele espaço.
         uc_err first_err = UC_ERR_OK;
-        for (const auto& tr : target) {
+        for (const auto& tr : eff) {
             int prot = tr.prot ? tr.prot : UC_PROT_READ;
             uc_err e = uc_mem_map_ptr(uc, tr.va, (size_t)tr.size, prot, tr.host);
             if (e == UC_ERR_MAP) {
-                // VA já mapeada (região preservada do espaço anterior por ser
-                // idêntica, ou colisão com região estática): reajusta a proteção.
-                e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
+                // VA já mapeada. Se temos um backing de host próprio para esta
+                // região (ex.: página compartilhada do espaço base OKL4), a VA
+                // pode estar coberta por um mapeamento estático/plano com o
+                // backing ERRADO; reprotect sozinho não religa o ponteiro. Force
+                // o religamento: unmap + map_ptr. Se falhar, volte ao reprotect.
+                if (tr.host) {
+                    uc_err ue = uc_mem_unmap(uc, tr.va, (size_t)tr.size);
+                    if (ue == UC_ERR_OK)
+                        e = uc_mem_map_ptr(uc, tr.va, (size_t)tr.size, prot, tr.host);
+                    if (e != UC_ERR_OK)
+                        e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
+                } else {
+                    e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
+                }
             }
             if (e != UC_ERR_OK && first_err == UC_ERR_OK) first_err = e;
         }
@@ -586,10 +677,11 @@ public:
     }
 #endif
 
-    void clear() { spaces_.clear(); active_sid_ = 0; activated_once_ = false; }
+    void clear() { spaces_.clear(); base_of_.clear(); active_sid_ = 0; activated_once_ = false; }
 
 private:
     std::map<u32, std::vector<Region>> spaces_;
+    std::map<u32, u32> base_of_;   // extension sid -> base sid (OKL4 PD sharing)
     u32  active_sid_ = 0;
     bool activated_once_ = false;
 };

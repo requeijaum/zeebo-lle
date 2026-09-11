@@ -3224,7 +3224,18 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R1, &tc_space);
                 uc_reg_read(uc, UC_ARM_REG_R2, &tc_sched);
                 uc_reg_read(uc, UC_ARM_REG_R3, &tc_pager);
+                if (std::getenv("ZEEBO_QW99"))
+                    fprintf(stderr,"[QW99/TC] dest=0x%x space=0x%x sched=0x%x pager=0x%x\n",
+                            tc_dest, tc_space, tc_sched, tc_pager);
                 sys->thread_table_.on_thread_control(tc_dest, tc_space, tc_sched, tc_pager);
+                // OKL4 base<-extension PD sharing: when a thread is created in
+                // its own space (SpaceSpecifier) but with a Pager naming a
+                // DIFFERENT space, that pager is the base PD whose mappings the
+                // extension shares (map window / shared domain). Link them so
+                // the extension resolves the base's source pages. General: no
+                // SID is hardcoded; the base is whatever pager the kernel named.
+                if (tc_space != 0 && tc_pager != 0 && tc_pager != tc_space)
+                    sys->space_manager_.link_base(tc_space, tc_pager);
                 res_r0 = 1;
                 break;
             }
