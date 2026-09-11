@@ -136,6 +136,25 @@ test-gpt-timer: test_gpt_timer
 	  echo "FAIL: buggy stalled-counter timer unexpectedly passed"; exit 1; \
 	else echo "OK: buggy stalled-counter timer fails as expected (RED reproduced)"; fi
 
+# QW99 Part 2 Bug 5: guest MMIO -> PeripheralBus decoder -> VIC/GPT models ->
+# real ARM IRQ -> ACK/EOI, exercised over the PRODUCTION decode path under
+# Unicorn. Deterministic virtual time drives the timer (not retired insns).
+# Negative controls: `buggy-disconnected` (flat-RAM, model never programmed) and
+# `buggy-reentrant` (redelivery clobbers LR_irq) MUST fail.
+test_peripheral_bus: test_peripheral_bus.cpp zeebo_peripheral_bus.h zeebo_vic_irq.h zeebo_gpt_timer.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_VIC_WITH_UNICORN -o $@ test_peripheral_bus.cpp -lunicorn
+
+test-peripheral-bus: test_peripheral_bus
+	./test_peripheral_bus
+	@# Negative control A: disconnected flat-RAM decode MUST fail (RED).
+	@if ./test_peripheral_bus buggy-disconnected >/dev/null 2>&1; then \
+	  echo "FAIL: disconnected flat-RAM decode unexpectedly passed"; exit 1; \
+	else echo "OK: disconnected flat-RAM decode fails as expected (RED reproduced)"; fi
+	@# Negative control B: reentrant IRQ redelivery MUST fail (RED).
+	@if ./test_peripheral_bus buggy-reentrant >/dev/null 2>&1; then \
+	  echo "FAIL: reentrant IRQ redelivery unexpectedly passed"; exit 1; \
+	else echo "OK: reentrant IRQ redelivery fails as expected (RED reproduced)"; fi
+
 # Bug 6: inter-core ProcComm over shared SMEM — Core0 issue becomes visible,
 # only a Core1 service step completes it with an honest status. Host-only.
 # `buggy` reproduces the pre-fix RED (Core0-immediate-fabricated-success).
@@ -491,7 +510,7 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm test-peripheral-bus
 	./test_applet_dispatch
 	./test_applet_exec_perm
 	./test_brew_timer
@@ -531,6 +550,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	@echo '--- bug 5/6: VIC IRQ delivery, GPT timer, ProcComm (positivo + controle negativo) ---'
 	$(MAKE) test-vic-irq
 	$(MAKE) test-gpt-timer
+	$(MAKE) test-peripheral-bus
 	$(MAKE) test-proccomm
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
@@ -558,7 +578,7 @@ clean:
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm test-peripheral-bus
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
