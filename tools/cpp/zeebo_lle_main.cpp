@@ -3228,14 +3228,28 @@ private:
                     fprintf(stderr,"[QW99/TC] dest=0x%x space=0x%x sched=0x%x pager=0x%x\n",
                             tc_dest, tc_space, tc_sched, tc_pager);
                 sys->thread_table_.on_thread_control(tc_dest, tc_space, tc_sched, tc_pager);
-                // OKL4 base<-extension PD sharing: when a thread is created in
-                // its own space (SpaceSpecifier) but with a Pager naming a
-                // DIFFERENT space, that pager is the base PD whose mappings the
-                // extension shares (map window / shared domain). Link them so
-                // the extension resolves the base's source pages. General: no
-                // SID is hardcoded; the base is whatever pager the kernel named.
-                if (tc_space != 0 && tc_pager != 0 && tc_pager != tc_space)
-                    sys->space_manager_.link_base(tc_space, tc_pager);
+                // OKL4 base<-extension PD sharing. In ThreadControl (ABI
+                // threadcontrol.spp) r1=SpaceSpecifier is a SPACE id but
+                // r3=Pager is a THREAD id, NOT a space id. Treating the raw
+                // pager as a base SID is a semantic error. Resolve the pager
+                // thread to the SPACE it belongs to (its recorded space_id) and
+                // link the new thread's extension space to THAT base space.
+                // Only when the base resolves to a real, different space do we
+                // link — no SID is hardcoded and no raw thread id is used as a
+                // space id. Firmware-specific fallback: some Zeebo pagers are
+                // named by a value that is itself already a known space id
+                // (measured pager 0x80000100 == base sid); accept that ONLY if
+                // the value is a registered space and no thread carries it.
+                if (tc_space != 0 && tc_pager != 0) {
+                    u32 base_space = sys->thread_table_.thread_space(tc_pager);
+                    if (base_space == 0 && sys->space_manager_.has_space(tc_pager)) {
+                        // Pager value is not a known thread but IS a known
+                        // space: firmware-specific inference (documented).
+                        base_space = tc_pager;
+                    }
+                    if (base_space != 0 && base_space != tc_space)
+                        sys->space_manager_.link_base(tc_space, base_space);
+                }
                 res_r0 = 1;
                 break;
             }

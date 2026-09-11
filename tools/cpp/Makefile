@@ -288,6 +288,17 @@ test_l4_base_ext_share: test_l4_base_ext_share.cpp zeebo_l4_mmu.h
 	  echo "FAIL: unlinked (buggy) unexpectedly passed"; exit 1; \
 	else echo "OK: unlinked (buggy) fails as expected (RED reproduced)"; fi
 
+# QW99 hardening: PRODUCTION-PATH test — drives the real SpaceManager::activate()
+# on a real Unicorn across base->extension (layering + force-rebind over a static
+# flat map + switch-away restoration). Positivo PASSA; mutante (sem link_base,
+# desabilitando o layering do activate) FALHA (RED reproduzido).
+test_l4_base_ext_activate: test_l4_base_ext_activate.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_base_ext_activate.cpp -lunicorn
+	./test_l4_base_ext_activate
+	@if ./test_l4_base_ext_activate buggy >/dev/null 2>&1; then \
+	  echo "FAIL: unlinked activate (buggy) unexpectedly passed"; exit 1; \
+	else echo "OK: unlinked activate (buggy) fails as expected (RED reproduced)"; fi
+
 # Bug 1/2: SID vem do SpaceSpecifier(r1) do ThreadControl, NÃO do r5 do ExRegs
 # (UserDefHandle); + round-trip do contexto ARM completo via helper central.
 # Negativo (buggy): SID lido de r5 (UserDefHandle) FALHA.
@@ -617,7 +628,7 @@ FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs t
 
 check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
        test-cli \
-       test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
+       test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_base_ext_activate test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a
 	./test_applet_dispatch
 	./test_applet_exec_perm
@@ -706,7 +717,7 @@ check: check-full
 
 clean:
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_thread_sid_ctx \
+	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag *.o
