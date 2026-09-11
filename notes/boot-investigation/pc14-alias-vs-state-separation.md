@@ -100,9 +100,12 @@ consumer_pre @b0400180: str r6,[r4,#0x10]; str r7,[r4,#0xc];
 consumer     @b04001c8: str r6,[r4,#0x10]; str r0,[r5,#4]; str r7,[r4,#0xc];
                         ldr r1,[r4]; mov r0,r4; pop {r4-r8,lr}; bx r1
 ```
-`r4` é o `this`: escreve campos em `[r4+0x10]`/`[r4+0xc]` e chama slot-0
-`[r4]` como ponteiro de função. `r4` é restaurado do frame via
-`pop {r4-r8,lr}` — origem = pilha do frame de contexto.
+`r4` funciona como `this`: o consumidor escreve campos em `[r4+0x10]` e
+`[r4+0xc]`, depois chama `[r4]` como ponteiro de função. O
+`pop {r4-r8,lr}` ocorre **depois** de `ldr r1,[r4]` e apenas restaura o `r4` do
+chamador antes do `bx r1`; portanto ele não explica a procedência do `r4` usado
+pelo `ldr`. Essa procedência precisa ser rastreada desde a entrada da função e
+seu caller.
 
 ### Fronteira do `ldr r1,[r4]` (ALIAS, duas passagens)
 ```
@@ -121,24 +124,17 @@ objeto de heap.
    reconfirmado com o valor `5`/`0xb000c3fc`).
 2. **`5` tem produtor único e legítimo**: r6 spillado no context-save
    `@b000c3d4`. Nenhum outro escritor toca o slot (controle negativo limpo).
-3. **`r4=0xb0046fa8` é um ENDEREÇO DE PILHA** restaurado via `pop{r4-...}`
-   após a troca de contexto do escalonador — não um ponteiro de objeto. O
-   consumidor então faz `bx *(stack_slot)` = `bx 5`.
-4. O sintoma é consistente com **restauração de contexto/registradores
-   errada na retomada da thread `0x8000c001`**: o frame de onde `r4` é
-   restaurado é o frame do salvamento de contexto (setjmp) do produtor, e
-   `r4` recebe um endereço de pilha em vez do `this` esperado.
+3. **`r4=0xb0046fa8` aponta para um ENDEREÇO DE PILHA**, não para uma vtable:
+   o consumidor faz `bx *(stack_slot)` = `bx 5`.
+4. A troca de contexto entre as duas passagens é correlação temporal, não causa
+   demonstrada. Como o `pop {r4-r8,lr}` vem depois do `ldr`, esta captura ainda não
+   prova restauração incorreta de `r4`, SP ou frame pelo emulador.
 
 ### Consequência de protocolo (não-fix)
-O par restaurar-contexto/`bx` é **fielmente executado** pelo interpretador:
-a memória guest==host e o `5` é um valor de registrador legítimo. Não foi
-isolado, com controle positivo/negativo na fronteira do restore, um defeito
-específico do emulador (SP/frame vs. contexto de registradores) distinguível
-da própria semântica de retomada esperada pelo guest — provar isso exigiria
-lockstep contra referência, fora do escopo bounded interpretador-only. Por
-protocolo, **sem bug de emulador provado → nenhum teste RED nem fix**; apenas
+O `bx` é **fielmente executado** pelo interpretador: a memória guest==host e o
+`5` tem produtor conhecido. Ainda não foi isolado um defeito específico do
+emulador. Por protocolo, **sem bug provado → nenhum teste RED nem fix**; apenas
 o rastreador read-only env-gated (`ZEEBO_PC14_WRITER`) + esta nota. Nada de
-PC/registrador/memória do guest foi patcheado. O gancho para a próxima
-iteração é a **fronteira do restore de contexto da thread `0x8000c001`**:
-capturar `r4`/`SP`/frame arquiteturais no salvamento vs. na retomada, com
-controle, para separar SP/frame errado de contexto de registradores errado.
+PC/registrador/memória do guest foi patcheado. O próximo gancho é rastrear o
+`r4` usado pelo `ldr` desde a entrada de `b0400180` e seu caller; somente então,
+se a evidência apontar para save/resume, instrumentar a fronteira do scheduler.

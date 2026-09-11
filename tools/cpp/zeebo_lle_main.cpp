@@ -4182,7 +4182,7 @@ private:
                     if (hit_tgt && (u32)value == 5) {
                         auto cd = [&](const char* t, u32 base, int words){
                             fprintf(stderr, "[PC14W] code %s @0x%08x:", t, base);
-                            for (int i=0;i<words;i++){u32 w=0;uc_mem_read(uc,base+i*4u,&w,4);fprintf(stderr," %08x",w);} 
+                            for (int i=0;i<words;i++){u32 w=0;uc_mem_read(uc,base+i*4u,&w,4);fprintf(stderr," %08x",w);}
                             fprintf(stderr, "\n");
                         };
                         cd("producer", 0xb000c3c0, 12);
