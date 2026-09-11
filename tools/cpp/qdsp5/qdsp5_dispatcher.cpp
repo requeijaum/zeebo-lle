@@ -25,6 +25,32 @@ Engine classify(u32 program, u32 proc_id) {
     return Engine::Unknown;
 }
 
+// classify_queue(): VERIFIED queue->task association (assertion strings). This is
+// the honest AUDPLAY route — the destination queue, not the ONCRPC program,
+// selects the DSP task. No guessing: unmapped queues return Unknown.
+Engine classify_queue(QueueId q) {
+    switch (q) {
+        case QueueId::UpAudPlay0BitstreamCtrl:
+        case QueueId::UpAudPlay1BitstreamCtrl:
+        case QueueId::UpAudPlay2BitstreamCtrl:
+        case QueueId::UpAudPlay3BitstreamCtrl:
+        case QueueId::UpAudPlay4BitstreamCtrl: return Engine::Audplay;
+        case QueueId::UpAudPpCmd1:
+        case QueueId::UpAudPpCmd2:
+        case QueueId::UpAudPpCmd3:             return Engine::Audpp;
+        case QueueId::UpAudRecBitstream:
+        case QueueId::UpAudRecCmd:             return Engine::Audrec;
+        case QueueId::UpJpegActionCmd:
+        case QueueId::UpJpegCfgCmd:            return Engine::Jpeg;
+        case QueueId::VfeCommand:
+        case QueueId::VfeCommandScale:
+        case QueueId::VfeCommandTable:         return Engine::Vfe;
+        case QueueId::UpVocProc:               return Engine::Voice;
+        case QueueId::Unknown:
+        default:                               return Engine::Unknown;
+    }
+}
+
 Qdsp5Dispatcher::Qdsp5Dispatcher()
     : audpp_(make_audpp_engine()),
       jpeg_(make_jpeg_engine()),
@@ -69,6 +95,18 @@ Reply Qdsp5Dispatcher::feed_raw(const u8* packet, u32 len,
         cmd.payload.assign(packet + kPayloadOff, packet + len);
     }
     return dispatch(cmd, guest, caller_tcb);
+}
+
+Reply Qdsp5Dispatcher::dispatch_queue(QueueId queue, const Command& cmd,
+                                           const QdspGuest& guest, u32 caller_tcb) {
+    // Q1.2a boundary only: the queue identity must already come from a real
+    // ADSP-RTOS packet. Do not infer it from an unverified payload offset.
+    if (cmd.program != prog::ADSPRTOSATOM || cmd.payload.empty()) return Reply{};
+    const Engine engine = classify_queue(queue);
+    if (engine == Engine::Unknown) return Reply{};
+    Command routed = cmd;
+    routed.engine = engine;
+    return dispatch(routed, guest, caller_tcb);
 }
 
 Reply Qdsp5Dispatcher::dispatch(const Command& cmd, const QdspGuest& guest, u32 caller_tcb) {

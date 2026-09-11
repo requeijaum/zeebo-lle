@@ -24,6 +24,14 @@ public:
     // Variante já-decodificada (usada por testes e pelo caminho do smd_bridge).
     Reply dispatch(const Command& cmd, const QdspGuest& guest, u32 caller_tcb = 0);
 
+    // Route a command whose destination QUEUE has already been resolved (the
+    // verified queue->task association picks the engine). This is the AUDPLAY
+    // seam: AUDPLAYx bitstream queues reach the decoder task here, which AUDMGR-
+    // -program-only classify() could never do. Rejects (handled=false) when the
+    // transport program is not ADSPRTOSATOM or the payload is empty/malformed.
+    Reply dispatch_queue(QueueId queue, const Command& cmd,
+                         const QdspGuest& guest, u32 caller_tcb = 0);
+
     IQdspEngine* engine_for(Engine e);
 
     // Drena PCM mixado da engine AUDPP para o host (QW-AUD1). Silêncio se ainda

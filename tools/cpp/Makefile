@@ -467,6 +467,11 @@ gpu:
 test-gpu: gpu
 	cd gpu && ./gpu_smoke && ./igl_smoke && ./gpu_display_integration && ./igl_transform_smoke && ./igl_guest_bridge_test && ./gl_quickwins_smoke && ./gl_alpha_sampler_smoke && ./atitc_smoke && ./gl_clip_smoke
 
+# QDSP5 route gate: isolated because it has no Unicorn/SDL dependency. Q1.2a
+# is infrastructure only until Q0.1 captures a genuine firmware packet.
+test-qdsp5:
+	$(MAKE) -C qdsp5 -f Makefile.qdsp5 test
+
 # Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
 # sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em
 # [applet+0x2c] → SoftRasterizer/IglGuestBridge.
@@ -679,7 +684,7 @@ test-clean-hygiene:
 NAND_REQUIRED_BINS := ../../nand/1.1.2_AMSS.bin ../../nand/1.1.2_APPS.bin ../../nand/1.1.2.bin
 FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent
 
-check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
+check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
        test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_base_ext_activate test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
        test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
@@ -688,6 +693,8 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
 	./test_brew_timer
 	./test_audio_sink
 	./test_audio_lifetime
+	@echo "== QDSP5: rota AUDPLAY/AUDPP com contratos de recusa =="
+	$(MAKE) test-qdsp5
 	./test_elf_bounds
 	./test_nand_relocator_bounds
 	@echo "== MMIO de video: leituras chegam aos modelos =="
@@ -779,9 +786,10 @@ clean:
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_lifecycle *.o
 	rm -rf testkit/build
+	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
+.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
