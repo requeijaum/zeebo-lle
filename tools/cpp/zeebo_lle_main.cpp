@@ -3655,6 +3655,65 @@ private:
             }
         }
 
+        // [QW-ALIAS] Instrumentação read-only NO EXATO ldr/bx (b04001d4/b04001e0),
+        // para separar (A) escrita/estado/timing legítimo de (B) desacordo de
+        // mapeamento/alias do Unicorn. Gated por ZEEBO_PC14_ALIAS. NÃO patcheia
+        // ponteiro/PC/memória. Mede, na fronteira exata:
+        //   - r1 arquitetural do guest APÓS o ldr (executado antes deste hook do
+        //     PRÓXIMO PC), e o valor que o host lê agora via uc_mem_read no MESMO VA;
+        //   - uc_mem_read no VA-alvo IMEDIATAMENTE (antes de executar b04001d4 e no
+        //     ponto do bx);
+        //   - ponteiro host efetivo do SpaceManager (resolve_host) + bytes de backing;
+        //   - tradução VTLB (translate/read_u32) do MESMO VA;
+        //   - SID/TID e active_sid; controle positivo (o próprio VA) e controle
+        //     negativo (VA irrelevante 0xb0424000, mesma página, offset diferente).
+        static const bool alias_on = std::getenv("ZEEBO_PC14_ALIAS") != nullptr;
+        if (alias_on) {
+            const u32 PC_LDR = 0xb04001d4;  // ldr r1,[r4]  (r4 esperado = 0xb04241a8)
+            const u32 PC_MOV = 0xb04001d8;  // mov r0,r4     (logo APÓS o ldr)
+            const u32 PC_BX  = 0xb04001e0;  // bx  r1
+            const u32 VA_NEG = 0xb0424000;  // controle negativo: mesma página, off !=
+            static int shots = 0;
+            u32 here = (u32)ad;
+            if ((here == PC_LDR || here == PC_MOV || here == PC_BX) && shots < 12) {
+                u32 r4=0, r1=0;
+                uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                u32 va = (here == PC_LDR) ? r4 : 0xb04241a8; // no ldr o alvo é r4
+                u32 tid  = sys->thread_table_.current_tid();
+                u32 tsid = sys->thread_table_.thread_space(tid);
+                u32 asid = sys->space_manager_.active_sid();
+                // Host read no VA-alvo e no controle negativo, AGORA.
+                u32 uc_pos=0xdeadbeef, uc_neg=0xdeadbeef;
+                uc_mem_read(uc, va, &uc_pos, 4);
+                uc_mem_read(uc, VA_NEG, &uc_neg, 4);
+                // VTLB translate/read do MESMO VA (view ativa).
+                u8* vtlb_hp = sys->vtlb_.translate(va);
+                u32 vtlb_val = 0xdeadbeef; bool vtlb_ok = sys->vtlb_.read_u32(va, &vtlb_val);
+                // SpaceManager: host efetivo que o SID CORRENTE vê + bytes de backing.
+                u8* sm_hp = sys->space_manager_.resolve_host(tsid, va);
+                u32 sm_val = 0xdeadbeef;
+                if (sm_hp) memcpy(&sm_val, sm_hp, 4);
+                // Host efetivo do SID 0x80000100 (onde a fonte foi registrada, per QW99).
+                u8* sm_hp_100 = sys->space_manager_.resolve_host(0x80000100u, va);
+                u32 sm_val_100 = 0xdeadbeef;
+                if (sm_hp_100) memcpy(&sm_val_100, sm_hp_100, 4);
+                const char* tag = (here==PC_LDR)?"@LDR ":(here==PC_MOV)?"@postLDR":"@BX  ";
+                fprintf(stderr,
+                    "[ALIAS] %s pc=0x%08x va=0x%08x r1(arch)=0x%08x  uc_read=0x%08x  "
+                    "vtlb{ok=%d hp=%p val=0x%08x}  sm(tsid=0x%x){hp=%p val=0x%08x}  "
+                    "sm(0x80000100){hp=%p val=0x%08x}  neg(0x%08x)uc=0x%08x  "
+                    "tid=0x%x tsid=0x%x active_sid=0x%x\n",
+                    tag, here, va, r1, uc_pos,
+                    (int)vtlb_ok, (void*)vtlb_hp, vtlb_val,
+                    tsid, (void*)sm_hp, sm_val,
+                    (void*)sm_hp_100, sm_val_100,
+                    VA_NEG, uc_neg, tid, tsid, asid);
+                fflush(stderr);
+                shots++;
+            }
+        }
+
         // [QW99] Instrumentação read-only da entrada do scatterload em 0xb0400000.
         // Loga TID, SID ativo, SP/LR, offset físico de backing e hash de 252B em
         // 0xb04151a4, a cada entrada em 0xb0400000. Gated por ZEEBO_QW99.
