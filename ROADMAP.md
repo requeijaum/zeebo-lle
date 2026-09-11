@@ -2443,6 +2443,9 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   suprido em `LB-4`, mock de MALLOC @ `+0x68` e `pIShell->AddRef`, instanciando a vtable
   do IModule com AddRef=`0x12002064`, Release=`0x120020ac`, CreateInstance=`0x12002078`,
   FreeResources=`0x120020a8`, retornando limpo em `0x12000030: bx lr` com `r0=0`).
+  Desmontagem de `IModule_CreateInstance` (`0x12002078`) revelou o handler interno
+  em `0x120006b0`, que valida diretamente a classe do jogo (`0x0102f789` no literal `0x12000738`),
+  rejeitando outras classes e despachando para o construtor do applet em `0x12000490`.
   Primeiro PC sem sobreviver ao primeiro import é apenas DD1a.
 - [ ] **DD1b — primeiro PC orgânico:** repetir DD1a/runtime pelo boot NAND, sem restore,
   salto, handler ou retorno forçado. Exigir cadeia IPC/naming/quartz/AMSS registrada.
