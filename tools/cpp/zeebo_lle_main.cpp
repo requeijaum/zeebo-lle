@@ -478,6 +478,7 @@ public:
         // MSM_CSR doorbell/ProcComm window. VIC keeps its primary-source base.
         pbus_.vic_base = MSM_VIC_BASE;      // 0xc0000000
         pbus_.gpt_base = GPT_TIMER_BASE;    // 0xc5000000 (firmware-resolved)
+        pbus_.use_firmware_gpt_layout();    // COUNT 0xc5000108, wdog ACK 0xc500010c
         pbus_.gpt_line = GPT_VIC_LINE;
     }
     ~ZeeboLLESystem() {
@@ -3877,7 +3878,7 @@ private:
 
     static bool is_core0_peripheral(uint32_t addr) {
         if (addr >= MSM_VIC_BASE && addr < MSM_VIC_BASE + (uint32_t)zeebo::PB_VIC_SIZE) return true;   // VIC (bug 5)
-        if (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_SIZE) return true; // GPT (bug 5)
+        if (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_FW_WINDOW) return true; // GPT sub-bank (bug 5)
         if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) return true; // Doorbell
         if (addr == SMEM_BASE + 0x00 || addr == SMEM_BASE + 0x04) return true;          // ProcComm
         if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) return true;     // MDDI
@@ -4038,7 +4039,7 @@ private:
         if ((addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) ||
             (addr >= ADRENO130_BASE && addr < ADRENO130_BASE + ADRENO130_SIZE) ||
             (addr >= MSM_VIC_BASE && addr < MSM_VIC_BASE + (uint32_t)zeebo::PB_VIC_SIZE) ||
-            (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_SIZE)) {
+            (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_FW_WINDOW)) {
             const u32 v = sys->handle_peripheral_read((u32)addr, size);
             uc_mem_write(uc, addr, &v, (size_t)size);
             return;
