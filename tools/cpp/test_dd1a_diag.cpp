@@ -1254,6 +1254,45 @@ int main(int argc, char** argv) {
                 assert(calls_por_tick[0] >= 1);
             }
 
+            // ── DD4 Bloco 5: CreateInstance esta saindo pelo caminho de ERRO ──
+            // O last_pc de CreateInstance e 0x12000724, que e um `bxne lr`
+            // precedido de `movne r0,#0`. Desmontando 0x120006f0..0x12000734:
+            //   0x12000710  bl 0x1201b054   <- cadeia que abre os assets
+            //   0x12000714  cmp r0, #0
+            //   0x12000718  addne sp,sp,#0x10
+            //   0x1200071c  popne {r4,lr}
+            //   0x12000720  movne r0, #0    <- retorno FALSE
+            //   0x12000724  bxne lr         <- SAIDA DE ERRO (last_pc observado)
+            //   0x12000728  ...             <- caminho de SUCESSO (r0 = 1)
+            // Ou seja: sair em 0x12000724 com r0=0 significa que a abertura dos
+            // assets FALHOU. Ate aqui isso passou despercebido porque
+            // CreateInstance "rodou sem fault" e devolveu um applet valido.
+            // A funcao 0x1201b2fc cria AEECLSID_FILEMGR (0x01001003) e
+            // AEECLSID_CUnzipStream (0x01001014) — os .ggz sao comprimidos.
+            {
+
+
+                std::fprintf(stderr,
+                    "[DD4/assets] CreateInstance last_pc=0x%08x -> %s\n",
+                    r_match.last_pc,
+                    r_match.last_pc == 0x12000724
+                        ? "SAIDA DE ERRO (movne r0,#0): abertura dos assets FALHOU"
+                        : "outro caminho");
+
+                // Gate permanente contra a regressao de interpretacao.
+                // Enquanto IFileMgr/CUnzipStream nao existirem, CreateInstance
+                // TEM de sair em 0x12000724 (o `bxne lr` do ramo de erro). Se um
+                // dia sair em 0x12000728, os assets abriram e este assert cai —
+                // sinalizando que o marco mudou de verdade, em vez de deixar o
+                // caminho de erro passar por sucesso outra vez.
+                //
+                // Nao assertamos r0 aqui: este bloco roda depois de varias outras
+                // execucoes no mesmo uc2, entao o r0 vivo ja foi sobrescrito e
+                // nao e mais o retorno de CreateInstance. O last_pc vem do
+                // FirstPcResult daquela execucao e continua valido.
+                assert(r_match.last_pc == 0x12000724);
+            }
+
             uc_close(uc2);
         }
     }

@@ -185,6 +185,40 @@ faz o deslocamento correto. O jogo limpa a tela de **branco**, não de amarelo.
 Assertiva de regressão: `exp_xrgb == 0x00ffffff`. Mutante que volta à
 decodificação ingênua reprova com `Assertion fb.px[0] == exp_xrgb failed`.
 
+## O jogo nunca inicializou: `CreateInstance` sai pelo caminho de erro
+
+`AEECLSID_FILEMGR` (`0x01001003`) aparece **uma vez** no `.mod`, no literal
+`0x1201b394`, carregado por `0x1201b33c`. Logo em seguida, `0x1201b364` carrega
+`0x01001014` = **`AEECLSID_CUnzipStream`** — os `.ggz` são dados comprimidos.
+A função `0x1201b2fc` cria os dois objetos via `ISHELL_CreateInstance`.
+
+Subindo a cadeia de chamadores: `0x1201b2fc` ← `0x1201b054` ← `0x12000710`,
+que está dentro de `IModule::CreateInstance` — código que **já executamos**:
+
+```
+0x12000710  bl 0x1201b054   <- cadeia que abre os assets
+0x12000714  cmp r0, #0
+0x12000718  addne sp, sp, #0x10
+0x1200071c  popne {r4, lr}
+0x12000720  movne r0, #0    <- retorno FALSE
+0x12000724  bxne lr         <- SAÍDA DE ERRO
+0x12000728  ...             <- caminho de SUCESSO (r0 = 1)
+```
+
+**`0x12000724` é exatamente o `last_pc` que vínhamos registrando como marco de
+sucesso de `CreateInstance` (530 instruções).** Não era sucesso: é a saída de
+erro, com `r0=0`, porque a abertura dos assets falhou. O engano se sustentou
+porque a função "rodou sem fault" e devolveu um applet com campos plausíveis.
+
+Isto reordena a prioridade: tudo que foi medido depois (`HandleEvent`, tick,
+`DrawRect`, input) aconteceu num applet que **se sabe mal inicializado**. Os
+resultados de input continuam válidos como observação de comportamento, mas a
+tela branca parada é consequência esperada de um jogo que não carregou nada.
+
+**Próxima dependência real:** `IFileMgr` + `IFile` suficientes para abrir
+`data.ggz`/`sound.ggz` (em `~/.Tuxality/Infuse/brew/mod/274754`, fora da EFS2),
+e `CUnzipStream` para descomprimir. Só então `BitBlt` terá `pbmSource`.
+
 ## Input: o jogo responde, e revela o caminho de BitBlt
 
 `EVT_KEY_PRESS` (`0x101`, `AEEEvent.h:49`) despachado no `HandleEvent` com

@@ -2454,9 +2454,23 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   via `GetAppContext` (offset `0xc0` em static-base), despachando a verificação de heap
   (`AEECLSID_HEAP = 0x01001002`), consultando o método de informações do display (`IDisplay::GetInfo`
   no slot 4 / offset `0x10` com parâmetros de resolução e profundidade) e concluindo
-  com sucesso a execução completa do construtor e de `CreateInstance` com 530 instruções
-  reais executadas no guest, retornando limpo em `0x12000724: bx lr` com `r0=0` e gravando
+  com a execução completa do construtor e de `CreateInstance` com 530 instruções
+  reais executadas no guest, parando em `0x12000724` com `r0=0` e gravando
   a instância criada do applet em `*ppApplet`.
+
+  > **CORREÇÃO (DD4, commit desta rodada).** O texto acima descrevia
+  > `0x12000724` com `r0=0` como "retorno limpo / sucesso". **Não é.**
+  > Desmontado, `0x12000724` é o `bxne lr` do caminho de ERRO:
+  > `0x12000710 bl 0x1201b054` (cadeia que abre os assets) → `cmp r0,#0` →
+  > `movne r0,#0` → `bxne lr`. O caminho de sucesso é `0x12000728`, que retorna
+  > `r0=1`. Ou seja, `CreateInstance` está **falhando** porque a abertura de
+  > `data.ggz`/`sound.ggz` falha (a função `0x1201b2fc` cria
+  > `AEECLSID_FILEMGR = 0x01001003` e `AEECLSID_CUnzipStream = 0x01001014`,
+  > nenhum dos dois implementado). O engano se sustentou porque a função roda
+  > sem fault e devolve um applet com campos plausíveis, e porque `r0=0` foi
+  > lido como "sem erro" em vez de como o booleano FALSE que é.
+  > Detalhes em `docs/dd_contract.md`.
+
   Em seguida, o despacho do evento inicial do ciclo de vida BREW (`HandleEvent(EVT_APP_START = 0x101)`)
   foi provado através do handler do jogo em `0x1200c5e0`, consumindo o evento com 46 instruções
   adicionais e retornando limpo com `r0 = 1` (TRUE).
