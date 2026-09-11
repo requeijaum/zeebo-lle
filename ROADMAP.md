@@ -2432,7 +2432,8 @@ sempre rotulados `hybrid/assisted`; não fecham boot orgânico nem o marco B.
   entry ARM cru de `ddragonz.mod` sob orçamento, registrando PC dentro do módulo.
   Resolução de entry cru e dispatch por módulo já existem (`68a477d` e sucessores);
   não reimplementar o falso gap “ELF-only” nem usar `0x10532344`. Concluído em `c86e4cb`/`542f5ce`,
-  com 23 instruções executadas sob helper assistido.
+  com 23 instruções executadas sob helper assistido. Integrado no Makefile sob target
+  `test-dd1a` com mutação negativa que reprova fabricação de entrada.
 - [ ] **DD1-runtime — objetos/imports:** resolver VAs reais de
   `ishell_create_va/aeemod_load_va/aeeclscreate_va`, hoje zero; obter IShell vivo,
   aplicar RW/ZI/relocações/imports/GOT e provar `CreateInstance(0x0102F789) → objeto →
