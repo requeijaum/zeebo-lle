@@ -4149,6 +4149,51 @@ private:
 
     static void c0_mem_hook(uc_engine* uc, uc_mem_type type, uint64_t addr, int size, int64_t value, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        // [QW-PC14W] Rastreador causal read-only da ÚLTIMA escrita em 0xb0046fa8.
+        // Gate: ZEEBO_PC14_WRITER. Controle POSITIVO = VA alvo (0xb0046fa8);
+        // controle NEGATIVO = VA irrelevante (0xb0055000). Ring buffer das últimas
+        // N escritas no alvo com PC/LR/valor/r0-r5 + cadeia de chamada (SP walk).
+        // NÃO patcheia nada. Emite quando bx-5 é atingido (via [ALIAS]) ou no fim.
+        {
+            static const bool w_on = std::getenv("ZEEBO_PC14_WRITER") != nullptr;
+            if (w_on && type == UC_MEM_WRITE) {
+                const u32 TGT = 0xb0046fa8; // positivo
+                const u32 NEG = 0xb0055000; // negativo (mesma pool, longe do alvo)
+                u32 a = (u32)addr;
+                bool hit_tgt = (a <= TGT && TGT < a + (u32)size);
+                bool hit_neg = (a <= NEG && NEG < a + (u32)size);
+                if (hit_tgt || hit_neg) {
+                    u32 pc=0, lr=0, sp=0; u32 r[6]={0};
+                    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                    for (int i=0;i<6;i++) uc_reg_read(uc, UC_ARM_REG_R0+i, &r[i]);
+                    // stack walk raso p/ cadeia de retorno (candidatos a LR salvos)
+                    u32 stk[8]={0};
+                    for (int i=0;i<8;i++) uc_mem_read(uc, sp+i*4u, &stk[i], 4);
+                    fprintf(stderr,
+                        "[PC14W] %s va=0x%08x size=%d value=0x%08x pc=0x%08x lr=0x%08x sp=0x%08x "
+                        "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x\n",
+                        hit_tgt?"TGT":"NEG", a, size, (u32)value, pc, lr, sp,
+                        r[0],r[1],r[2],r[3],r[4],r[5]);
+                    fprintf(stderr, "[PC14W]   stack:");
+                    for (int i=0;i<8;i++) fprintf(stderr, " [sp+%d]=%08x", i*4, stk[i]);
+                    fprintf(stderr, "\n");
+                    if (hit_tgt && (u32)value == 5) {
+                        auto cd = [&](const char* t, u32 base, int words){
+                            fprintf(stderr, "[PC14W] code %s @0x%08x:", t, base);
+                            for (int i=0;i<words;i++){u32 w=0;uc_mem_read(uc,base+i*4u,&w,4);fprintf(stderr," %08x",w);} 
+                            fprintf(stderr, "\n");
+                        };
+                        cd("producer", 0xb000c3c0, 12);
+                        cd("caller",   0xb0006c00, 12);
+                        cd("consumer", 0xb04001c0, 12);
+                        cd("consumer_pre", 0xb0400180, 18);
+                    }
+                    fflush(stderr);
+                }
+            }
+        }
         if (type == UC_MEM_WRITE) {
             if (sys->watch_file_) {
                 uint32_t pc = 0;
