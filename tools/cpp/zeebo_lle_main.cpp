@@ -51,7 +51,30 @@
 #include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
 #include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
 #include "zeebo_module_gate.h"      // DD0: gate honesto de módulo — sem PASS por carga isolada
-#include "zeebo_zeetris_runner.h"   // Zeetris full lifecycle runner
+#include "zeebo_zeetris_runner.h"
+
+// Mapa medido no .mod do Zeetris: a máscara de botões que o gameloop faz poll
+// (0x1200c3dc -> [0x123c16ac+0x10]) tem 8 bits, e cada bit leva a um handler que
+// chama o dispatcher do jogo (0x1200a7bc) com um código AVK lido do pool:
+//   0x001->AVK_UP(0xE031) 0x002->AVK_DOWN(0xE032) 0x004->AVK_LEFT(0xE033)
+//   0x008->AVK_RIGHT(0xE034) 0x010->AVK_1(0xE022) 0x020->AVK_2(0xE023)
+//   0x080->0xE02E          0x200->AVK_5(0xE026)
+// Leitura direta dos literais dos handlers; nada inferido.
+static inline uint16_t avk_to_platform_bit(uint32_t avk) {
+    switch (avk) {
+        case 0xE031u: return 0x001u;
+        case 0xE032u: return 0x002u;
+        case 0xE033u: return 0x004u;
+        case 0xE034u: return 0x008u;
+        case 0xE022u: return 0x010u;
+        case 0xE023u: return 0x020u;
+        case 0xE02Eu: return 0x080u;
+        case 0xE026u: return 0x200u;
+        default: return 0;
+    }
+}
+
+   // Zeetris full lifecycle runner
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
 #define ZEEBO_VIC_WITH_UNICORN
@@ -1164,6 +1187,15 @@ public:
             }
             printf("[Zeetris/Loop] roteiro de teclas: %zu entradas\n", scripted_keys_.size());
         }
+        // Atualiza a máscara de botões da plataforma -- é o que o jogo lê de
+        // verdade (o HandleEvent consome evento mas não move a máscara).
+        auto set_btn = [this](u32 avk, bool pressed) {
+            uint16_t bit = avk_to_platform_bit(avk);
+            if (!bit) return;
+            if (pressed) zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons | bit);
+            else         zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons & ~bit);
+        };
+
         // Liga a vtable IGL do guest ao rasterizador real: sem isto os comandos
         // GL do jogo caem no stub contador e nada é desenhado.
         if (igl_hook_ && rast_) {
@@ -1204,6 +1236,7 @@ public:
                     zeebo::brew::ZpadButton b;
                     if (sdl_to_zpad(ev.key.keysym.sym, b)) {
                         u32 avk = zeebo::brew::avk_for_zpad(b);
+                        set_btn(avk, true);
                         if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, true)) {
                             key_dispatches++;
                         }
@@ -1212,6 +1245,7 @@ public:
                     zeebo::brew::ZpadButton b;
                     if (sdl_to_zpad(ev.key.keysym.sym, b)) {
                         u32 avk = zeebo::brew::avk_for_zpad(b);
+                        set_btn(avk, false);
                         if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, false)) {
                             key_dispatches++;
                         }
@@ -1221,6 +1255,7 @@ public:
                     if (pad_to_zpad(ev.cbutton.button, b)) {
                         u32 avk = zeebo::brew::avk_for_zpad(b);
                         bool pressed = (ev.type == SDL_CONTROLLERBUTTONDOWN);
+                        set_btn(avk, pressed);
                         if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, pressed)) {
                             key_dispatches++;
                         }
@@ -1234,6 +1269,9 @@ public:
             if (!scripted_keys_.empty()) {
                 for (const auto& ka : scripted_keys_) {
                     if ((u64)frames == ka.first) {
+                        set_btn(ka.second, true);
+                        zeebo::zeetris::ZeetrisRunner::step_frame(core0_.uc, zeetris_ctx_);
+                        set_btn(ka.second, false);
                         bool ok_press = zeebo::zeetris::ZeetrisRunner::dispatch_key(
                             core0_.uc, zeetris_ctx_, ka.second, true);
                         bool ok_rel = zeebo::zeetris::ZeetrisRunner::dispatch_key(
@@ -1301,6 +1339,8 @@ public:
             for (size_t i = 0; p && i < n; ++i) if (p[i] != c0) diff++;
             printf("[Zeetris/Loop] rasterizador: pixel0=0x%04x, pixels diferentes=%zu/%zu\n",
                    c0, diff, n);
+        printf("[Zeetris/Loop] mascara de botoes final=0x%04x\n",
+               (unsigned)zeetris_ctx_.platform_buttons);
         }
     }
 

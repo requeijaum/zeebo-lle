@@ -38,6 +38,16 @@ struct ZeetrisContext {
     uint32_t media_notify_user = 0;
 
     // IGL (GL ES) dispatch tracking
+    // Estado de botões que a PLATAFORMA fornece ao poll do jogo (o driver de
+    // input do firmware preenche isso; rodando só o .mod, o host faz esse papel).
+    u16 platform_buttons = 0;
+
+    // Contadores de código do caminho de input (env-gated, ver hooks).
+    uint32_t input_poll_calls = 0;    // execucoes do poll da mascara (0x1200c3dc)
+    uint32_t input_block_calls = 0;   // execucoes do bloco de input do gameloop
+    uint32_t input_store_calls = 0;   // execucoes da rotina que escreve no struct de input
+    // Quantas vezes cada handler de bit da mascara executou (8 bits do gameloop).
+    uint32_t btn_handler_calls[8] = {0,0,0,0,0,0,0,0};
     uint32_t igl_calls = 0;
     uint32_t igl_handled = 0;
     std::map<uint32_t, uint32_t> igl_slot_calls;
@@ -109,6 +119,88 @@ public:
             ctx->uptime_ms += 16;
             uc_reg_write(uc, UC_ARM_REG_R0, &ctx->uptime_ms);
         }
+    }
+
+    static void hook_poll_count(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)addr; (void)size;
+        if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->input_poll_calls++;
+    }
+    static void hook_input_block(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)addr; (void)size;
+        if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->input_block_calls++;
+    }
+
+    // Handler de bit do gameloop -> indice. Ordem dos bits 1,2,4,8,0x10,0x20,0x80,0x200.
+    static void hook_btn_handler(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)size;
+        auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data);
+        if (!ctx) return;
+        switch (static_cast<u32>(addr)) {
+            case 0x1200b0e8u: ctx->btn_handler_calls[0]++; break;
+            case 0x1200b0d4u: ctx->btn_handler_calls[1]++; break;
+            case 0x1200b0c0u: ctx->btn_handler_calls[2]++; break;
+            case 0x1200b04cu: ctx->btn_handler_calls[3]++; break;
+            case 0x1200b064u: ctx->btn_handler_calls[4]++; break;
+            case 0x1200b07cu: ctx->btn_handler_calls[5]++; break;
+            case 0x1200b094u: ctx->btn_handler_calls[6]++; break;
+            case 0x1200b0acu: ctx->btn_handler_calls[7]++; break;
+            default: break;
+        }
+    }
+
+    // Fornece o estado de botões da plataforma ao poll do jogo (R0 no retorno).
+    static void hook_poll_return(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)addr; (void)size;
+        auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data);
+        if (!ctx) return;
+        u32 v = ctx->platform_buttons;
+        uc_reg_write(uc, UC_ARM_REG_R0, &v);
+    }
+
+    // Mostra o endereço exato de onde o poll lê a máscara (R3 no ldrh).
+    static void hook_poll_addr(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)size; (void)user_data;
+        static int n = 0;
+        if (n++ >= 3) return;
+        u32 r3 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+        u32 v = 0;
+        uc_mem_read(uc, r3 + 0x10, &v, 4);
+        printf("[poll-fonte@0x%x] R3=0x%08x -> ldrh [R3+0x10]=0x%04x\n",
+               (u32)addr, r3, (u32)(v & 0xffff));
+    }
+
+    // Mostra, uma vez, o que o gameloop realmente recebe: R0 = máscara (logo após
+    // o BL do poll) e R7 = ponteiro do struct onde guarda a máscara anterior.
+    static void hook_after_poll(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)size; (void)user_data;
+        static int n = 0;
+        if (n++ >= 4) return;
+        u32 r0 = 0, r7 = 0, sb = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        uc_reg_read(uc, UC_ARM_REG_R7, &r7);
+        uc_reg_read(uc, UC_ARM_REG_SB, &sb);
+        printf("[poll@0x%x] mask(R0)=0x%08x prev_ptr(R7)=0x%08x cur(R11/sb)=0x%08x\n",
+               (u32)addr, r0, r7, sb);
+    }
+
+    static void hook_input_store(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)addr; (void)size;
+        if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->input_store_calls++;
+    }
+    static void hook_input_watch(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                                 int size, int64_t value, void* user_data) {
+        (void)user_data;
+        // Só os primeiros eventos interessam: provam se o jogo chega a LER a
+        // máscara (poll roda) e se algo a ESCREVE.
+        static int n = 0;
+        if (n >= 24) return;
+        n++;
+        u32 pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        const char* kind = (type == UC_MEM_WRITE) ? "W" : "R";
+        printf("[INPUT-%s] pc=0x%08x addr=0x%llx size=%d val=0x%llx\n",
+               kind, pc, (unsigned long long)addr, size, (unsigned long long)value);
     }
 
     static void hook_trace_gameloop(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
@@ -464,6 +556,12 @@ public:
             uc_mem_write(uc, BITMAP_VTBL_VA + i * 4u, &s, 4);
         }
 
+        // Seam de PLATAFORMA: o poll de botões do jogo recebe o estado do host.
+        // Sem isso a máscara é sempre 0 (nada no .mod a escreve) e o jogo nunca
+        // vê botão pressionado -- medido: rotina que escreve a máscara roda 0x.
+        uc_hook h_btn = 0;
+        uc_hook_add(uc, &h_btn, UC_HOOK_CODE, (void*)hook_poll_return, &ctx,
+                    0x1200c3e4u, 0x1200c3e4u);
         uc_hook h_malloc = 0, h_code = 0, h_mem = 0, h_uptime = 0;
         uc_hook_add(uc, &h_malloc, UC_HOOK_CODE, (void*)hook_malloc_stub, &ctx,
                     MALLOC_STUB_VA, MALLOC_STUB_VA);
@@ -475,6 +573,39 @@ public:
         uc_hook_add(uc, &h_trace, UC_HOOK_CODE, (void*)hook_trace_gameloop, &ctx,
                     0x12008614u, 0x12008658u);
         uc_hook_add(uc, &h_mem, UC_HOOK_MEM_UNMAPPED, (void*)mem_hook, &ctx, 1, 0);
+        // Instrumento (env-gated): quem escreve no struct de input do jogo?
+        // O gameloop lê a máscara de botões via poll em [0x123c14ac+0x10]
+        // (0x123c14bc) e nenhum store do módulo a escreve -> tem de vir de um
+        // callback. Este hook mostra o PC escritor, ou a ausência dele.
+        // CONTROLE POSITIVO: a janela inclui 0x123c14c4 (ponteiro IGL, lido a
+        // cada comando GL). Se o hook não disparar nem nele, o instrumento está
+        // morto e nenhum "negativo" pode ser reportado a partir dele.
+        if (std::getenv("ZEEBO_ZEETRIS_WATCH_INPUT")) {
+            // MEM hooks (READ/WRITE) não disparam neste build nem para o ponteiro
+            // IGL (lido a cada comando GL) -> instrumento inválido, descartado.
+            // Usamos hook de CÓDIGO, que comprovadamente funciona (h_code/h_trace):
+            // conta quantas vezes o jogo executa o "poll" da máscara (0x1200c3dc).
+            uc_hook h_poll = 0;
+            uc_err e5 = uc_hook_add(uc, &h_poll, UC_HOOK_CODE, (void*)hook_poll_count, &ctx,
+                                    0x1200c3dcu, 0x1200c3e4u);
+            uc_hook h_upd = 0;
+            uc_err e6 = uc_hook_add(uc, &h_upd, UC_HOOK_CODE, (void*)hook_input_block, &ctx,
+                                    0x1200ad08u, 0x1200ad5cu);
+            uc_hook h_st = 0;
+            uc_err e7 = uc_hook_add(uc, &h_st, UC_HOOK_CODE, (void*)hook_input_store, &ctx,
+                                    0x1200c0a0u, 0x1200c1a0u);
+            uc_hook h_bh = 0;
+            uc_hook_add(uc, &h_bh, UC_HOOK_CODE, (void*)hook_btn_handler, &ctx,
+                        0x1200b040u, 0x1200b0f0u);
+            uc_hook h_ap = 0;
+            uc_hook_add(uc, &h_ap, UC_HOOK_CODE, (void*)hook_after_poll, &ctx,
+                        0x1200ad0cu, 0x1200ad10u);
+            uc_hook h_pa = 0;
+            uc_hook_add(uc, &h_pa, UC_HOOK_CODE, (void*)hook_poll_addr, &ctx,
+                        0x1200c3deu, 0x1200c3e2u);
+            printf("[ZeetrisRunner] hooks de input: poll err=%d, bloco err=%d, stores err=%d\n",
+                   (int)e5, (int)e6, (int)e7);
+        }
 
         // ETAPA 1: AEEMod_Load
         u32 ppMod = 0x001FFFD0u;
@@ -594,6 +725,27 @@ public:
         }
         return err == UC_ERR_OK;
     }
+
+    // Seam de input da PLATAFORMA. O gameloop do jogo faz poll de uma máscara
+    // de botões de 16 bits em 0x003c14bc (espelho 0x123c14bc) e despacha por
+    // bits {1,2,4,8,0x10,0x20,0x80,0x200}. Medido: o poll roda 180x em 60
+    // frames, mas a rotina que ESCREVE a máscara roda 0x -- quem a preenche é o
+    // driver de input da plataforma, que não existe quando rodamos só o .mod.
+    // Aqui o host faz esse papel (mesma classe de seam do ponteiro IGL).
+    // Endereço MEDIDO com hook no ldrh do poll (0x1200c3e0): R3=0x123c16ac, logo
+    // a máscara é o halfword em R3+0x10 = 0x123c16bc. (Já errei uma vez supondo
+    // 0x3c14bc a partir do literal do pool: o literal certo é outro.)
+    // Injeção no RETORNO do poll (medido: 0x1200c3dc lê [0x123c16ac+0x10] e
+    // devolve em R0; escrever a memória não persiste porque o jogo a limpa).
+    // O hook em 0x1200c3e4 (bx lr) sobrescreve R0 com o estado do host, que é
+    // exatamente o que o driver de input da plataforma entregaria.
+    static void set_platform_buttons(uc_engine* uc, ZeetrisContext& ctx, u16 mask) {
+        (void)uc;
+        ctx.platform_buttons = mask;
+    }
+
+    // Endereço da máscara, para instrumentos/testes.
+    static constexpr u32 BUTTON_MASK_VA = 0x123c16bcu;
 
     static bool dispatch_key(uc_engine* uc, ZeetrisContext& ctx, u32 key_code, bool pressed) {
         if (!ctx.is_running || !uc) return false;

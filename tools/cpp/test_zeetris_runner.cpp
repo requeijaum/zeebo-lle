@@ -6,6 +6,7 @@
 #include <set>
 #include <cstdlib>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <unicorn/unicorn.h>
 #include "zeebo_zeetris_runner.h"
@@ -203,6 +204,78 @@ int main(int argc, char** argv) {
                     before == after ? "SEM reacao" : "REAGIU");
         assert(k1 && k2);                 // a tecla foi consumida pelo HandleEvent
         assert(ctx.igl_calls > 0);        // e o loop de desenho continua vivo
+    }
+
+    // Diagnóstico: a máscara de botões da plataforma move o jogo?
+    // Env-gated. Escreve a máscara no ponto que o poll lê e mede se o estado do
+    // jogo (checksum) muda -- e se surgem slots GL novos (textura/upload).
+    if (std::getenv("ZEEBO_ZEETRIS_BUTTONS")) {
+        auto cksum = [uc, &ctx]() -> uint64_t {
+            uint64_t h = 1469598103934665603ull;
+            const u32 regs[3][2] = {{0x003c141cu, 0x30}, {0x003c14acu, 0x20}, {0x30010000u, 0x400}};
+            for (auto& r : regs) {
+                std::vector<u8> buf(r[1]);
+                if (uc_mem_read(uc, r[0], buf.data(), r[1]) != UC_ERR_OK) continue;
+                for (u8 b : buf) { h ^= b; h *= 1099511628211ull; }
+            }
+            return h;
+        };
+        const u16 masks[] = {0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020,
+                             0x0080, 0x0200, 0xffff};
+        std::printf("[buttons] a máscara chega ao input do jogo? (slots GL=%zu)\n",
+                    ctx.igl_slot_calls.size());
+        (void)cksum;
+        for (u16 m : masks) {
+            for (int i = 0; i < 8; ++i) ctx.btn_handler_calls[i] = 0;
+            const size_t slots_before = ctx.igl_slot_calls.size();
+            // O gameloop despacha por BORDA DE SOLTURA (prev & ~cur): pressiona
+            // por 1 frame e solta por 3 para gerar a borda do bit.
+            ZeetrisRunner::set_platform_buttons(uc, ctx, m);
+            ZeetrisRunner::step_frame(uc, ctx);
+            ZeetrisRunner::set_platform_buttons(uc, ctx, 0);
+            for (int i = 0; i < 3; ++i) ZeetrisRunner::step_frame(uc, ctx);
+            std::string fired;
+            for (int i = 0; i < 8; ++i)
+                if (ctx.btn_handler_calls[i])
+                    fired += " bit" + std::to_string(1u << i) + "=" +
+                             std::to_string(ctx.btn_handler_calls[i]);
+            std::printf("[buttons] mask=0x%04x -> handlers:%s | slots GL %zu->%zu\n",
+                        m, fired.empty() ? " NENHUM" : fired.c_str(),
+                        slots_before, ctx.igl_slot_calls.size());
+        }
+        ZeetrisRunner::set_platform_buttons(uc, ctx, 0);
+    }
+
+    // Diagnóstico do estado interno do jogo: o gameloop testa [0x123c141c+4] antes
+    // de atualizar, e o bloco de input (que faria o poll da máscara) está morto.
+    if (std::getenv("ZEEBO_ZEETRIS_STATE")) {
+        std::printf("[state] poll da mascara executado %u vezes; bloco de input %u vezes\n",
+                    ctx.input_poll_calls, ctx.input_block_calls);
+        std::printf("[state] rotina de escrita no struct de input: %u execucoes\n",
+                    ctx.input_store_calls);
+        // Os dois espelhos: o módulo acessa seus dados por 0x003Cxxxx (absoluto)
+        // e por 0x123Cxxxx (relocado). Só um deles carrega o estado vivo.
+        const u32 bases[2] = {0x123c141cu, 0x003c141cu};
+        const char* nomes[2] = {"0x123C141C (relocado)", "0x003C141C (espelho)"};
+        for (int b = 0; b < 2; ++b) {
+            std::printf("[state] struct do gameloop em %s:\n", nomes[b]);
+            for (u32 off = 0; off <= 0x28; off += 4) {
+                u32 v = 0;
+                if (uc_mem_read(uc, bases[b] + off, &v, 4) == UC_ERR_OK)
+                    std::printf("        [+0x%02x] = 0x%08x (%u)\n", off, v, v);
+                else std::printf("        [+0x%02x] = <nao mapeado>\n", off);
+            }
+        }
+        const u32 ib[2] = {0x123c14acu, 0x003c14acu};
+        for (int b = 0; b < 2; ++b) {
+            std::printf("[state] struct de input em 0x%08x:\n", ib[b]);
+            for (u32 off = 0; off <= 0x18; off += 4) {
+                u32 v = 0;
+                if (uc_mem_read(uc, ib[b] + off, &v, 4) == UC_ERR_OK)
+                    std::printf("        [+0x%02x] = 0x%08x (%u)\n", off, v, v);
+                else std::printf("        [+0x%02x] = <nao mapeado>\n", off);
+            }
+        }
     }
 
     // Validação de áudio / IMedia (0x0106e415)
