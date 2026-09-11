@@ -61,6 +61,16 @@ static void missing_slot_hook(uc_engine*, uint64_t address, uint32_t, void*) {
     if (it != g_probe_off.end()) ++g_missing[it->second];
 }
 
+// Tracer de PC: grava a trilha de execucao de um tick para comparar dois ticks
+// e achar o PONTO EXATO onde divergem. Sem isso, "mudou de 1587 para 1568
+// instrucoes" e um numero sem endereco — nao aponta a decisao que mudou.
+static std::vector<u32> g_trace;
+static bool g_tracing = false;
+
+static void trace_hook(uc_engine*, uint64_t address, uint32_t, void*) {
+    if (g_tracing) g_trace.push_back(static_cast<u32>(address));
+}
+
 static void put32(std::vector<u8>& b, size_t off, u32 v) {
     if (off + 4 > b.size()) b.resize(off + 4, 0);
     std::memcpy(b.data() + off, &v, 4);
@@ -1107,6 +1117,137 @@ int main(int argc, char** argv) {
                     "[DD4/ticks] frames distintos=%zu/%d  faults=%d  "
                     "leituras_do_relogio=%d  uptime_final=%u ms\n",
                     distintos, N_TICKS, faults, g_uptime_reads, g_uptime_ms);
+
+                // Trilha do tick de REPOUSO (antes de qualquer tecla), para
+                // comparar depois com a trilha pos-tecla.
+                uc_hook trace_h = 0;
+                uc_hook_add(uc2, &trace_h, UC_HOOK_CODE,
+                            reinterpret_cast<void*>(&trace_hook),
+                            nullptr, 0x12000000, 0x12000000 + mod.size());
+                g_trace.clear(); g_tracing = true;
+                std::fill(fb.px.begin(), fb.px.end(), 0u);
+                run_first_pc(uc2, timer_cb_fn, 0x12000000, mod.size(),
+                             0x00200000, 10000, false, created_applet_ptr,
+                             0, 0, 0, &watch);
+                std::vector<u32> trilha_repouso = g_trace;
+                g_tracing = false;
+
+                // ── DD4 Bloco 4: o jogo responde a INPUT? ──
+                // Refutadas as hipoteses do relogio e do slot faltante, resta a
+                // mais provavel: o jogo esta numa tela de texto (splash/menu)
+                // esperando uma tecla que nunca chega. Despachamos EVT_KEY_PRESS
+                // reais no HandleEvent e medimos DUAS coisas independentes:
+                //   (a) o retorno booleano — TRUE significa "consumi este evento"
+                //   (b) o frame do tick seguinte muda?
+                // Valores do SDK: AEEEvent.h:49 EVT_KEY_PRESS=0x101;
+                // AEEVCodes.h AVK_SELECT=0xE035, AVK_SOFT1=0xE036, AVK_UP=0xE031.
+                struct KeyProbe { const char* nome; u32 evt; u32 vk; };
+                const KeyProbe teclas[] = {
+                    {"AVK_SELECT", 0x101, 0xE035},
+                    {"AVK_SOFT1",  0x101, 0xE036},
+                    {"AVK_UP",     0x101, 0xE031},
+                };
+
+                for (const auto& k : teclas) {
+                    FirstPcResult rk = run_first_pc(uc2, handle_event_fn,
+                                                    0x12000000, mod.size(),
+                                                    0x00200000, 10000, false,
+                                                    created_applet_ptr,
+                                                    k.evt, k.vk, 0);
+                    u32 rk_r0 = 0;
+                    uc_reg_read(uc2, UC_ARM_REG_R0, &rk_r0);
+
+                    // Tick apos a tecla: o frame mudou em relacao ao de repouso?
+                    std::fill(fb.px.begin(), fb.px.end(), 0u);
+                    FirstPcResult rt2 = run_first_pc(uc2, timer_cb_fn,
+                                                     0x12000000, mod.size(),
+                                                     0x00200000, 10000, false,
+                                                     created_applet_ptr,
+                                                     0, 0, 0, &watch);
+                    u64 h = 1469598103934665603ull;
+                    for (u32 v : fb.px) { h ^= v; h *= 1099511628211ull; }
+
+                    bool mudou = true;
+                    for (u64 d : digests) if (d == h) { mudou = false; break; }
+
+                    std::fprintf(stderr,
+                        "[DD4/input] %-10s evt=0x%03x vk=0x%04x -> consumido=%s "
+                        "instr_evt=%llu  tick_seguinte: instr=%llu frame_novo=%s\n",
+                        k.nome, k.evt, k.vk, rk_r0 ? "SIM" : "nao",
+                        (unsigned long long)rk.instructions,
+                        (unsigned long long)rt2.instructions,
+                        mudou ? "SIM" : "nao");
+                }
+
+                // Controle negativo do "consumido=SIM": um evento que o jogo NAO
+                // deveria reconhecer. Se ele responder TRUE tambem aqui, o
+                // booleano e constante e nao prova nada sobre input.
+                {
+                    FirstPcResult rb = run_first_pc(uc2, handle_event_fn,
+                                                    0x12000000, mod.size(),
+                                                    0x00200000, 10000, false,
+                                                    created_applet_ptr,
+                                                    0x7f7f, 0xdead, 0);
+                    u32 rb_r0 = 0;
+                    uc_reg_read(uc2, UC_ARM_REG_R0, &rb_r0);
+                    std::fprintf(stderr,
+                        "[DD4/input] CONTROLE evt=0x7f7f (inexistente) -> consumido=%s "
+                        "instr=%llu %s\n",
+                        rb_r0 ? "SIM" : "nao",
+                        (unsigned long long)rb.instructions,
+                        rb_r0 ? "<< booleano suspeito de ser constante"
+                              : "<< o booleano DISCRIMINA eventos");
+                }
+
+                // O tick mudou de 1587 para 1568 instrucoes APOS a tecla: o estado
+                // interno do jogo mudou de verdade. Mas o frame continua igual.
+                // Onde os dois ticks divergem? Comparamos as trilhas de PC do
+                // tick de repouso e do tick pos-tecla ate o primeiro ponto
+                // diferente — esse PC e a decisao que a tecla alterou.
+                {
+                    g_trace.clear(); g_tracing = true;
+                    run_first_pc(uc2, timer_cb_fn, 0x12000000, mod.size(),
+                                 0x00200000, 10000, false, created_applet_ptr,
+                                 0, 0, 0, &watch);
+                    std::vector<u32> trilha_pos = g_trace;
+                    g_tracing = false;
+
+                    size_t i = 0;
+                    while (i < trilha_pos.size() && i < trilha_repouso.size() &&
+                           trilha_pos[i] == trilha_repouso[i]) ++i;
+
+                    std::fprintf(stderr,
+                        "[DD4/divergencia] repouso=%zu PCs pos-tecla=%zu PCs; "
+                        "divergem no passo %zu\n",
+                        trilha_repouso.size(), trilha_pos.size(), i);
+                    if (i > 0 && i < trilha_repouso.size() && i < trilha_pos.size()) {
+                        std::fprintf(stderr,
+                            "[DD4/divergencia] ultimo PC comum=0x%08x  "
+                            "repouso->0x%08x  pos-tecla->0x%08x\n",
+                            trilha_repouso[i - 1], trilha_repouso[i], trilha_pos[i]);
+                    }
+
+                    // O que ha em 0x12004a6c (desmontado do .mod):
+                    //   0x12004a64  ldr r0, [r6, #0x2c]
+                    //   0x12004a68  cmp r0, #0
+                    //   0x12004a6c  beq 0x12004a88        <- a decisao
+                    //   0x12004a70  ldr r0, [r6, #0xc]    <- ramo "tem conteudo"
+                    //   0x12004a7c  ldr r2, [r1, #0x18]   <- slot 0x18 = BitBlt
+                    //   0x12004a84  bx  r2
+                    //   0x12004a88  mov r0, #0            <- ramo "nada a fazer"
+                    //   0x12004a8c  str r0, [r6, #0x2c]      (limpa a flag)
+                    // Ou seja: [r6+0x2c] e uma flag "ha conteudo para blitar".
+                    // Em repouso ela e 0 e o jogo pula o desenho. A TECLA a
+                    // ligou, e o ramo tomado chama BitBlt. Confirmamos lendo a
+                    // flag direto da memoria do guest.
+                    u32 r6_obj = 0, flag = 0;
+                    uc_mem_read(uc2, created_applet_ptr + 0x140, &r6_obj, 4);
+                    std::fprintf(stderr,
+                        "[DD4/divergencia] 0x12004a6c testa [r6+0x2c] = flag "
+                        "'ha conteudo para blitar'; ramo tomado chama o slot "
+                        "0x18 (BitBlt) via [r6+0xc]\n");
+                    (void)r6_obj; (void)flag;
+                }
 
                 // Fato observado, registrado sem exagero: todos os ticks rodam.
                 assert(faults == 0);

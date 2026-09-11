@@ -185,6 +185,60 @@ faz o deslocamento correto. O jogo limpa a tela de **branco**, não de amarelo.
 Assertiva de regressão: `exp_xrgb == 0x00ffffff`. Mutante que volta à
 decodificação ingênua reprova com `Assertion fb.px[0] == exp_xrgb failed`.
 
+## Input: o jogo responde, e revela o caminho de BitBlt
+
+`EVT_KEY_PRESS` (`0x101`, `AEEEvent.h:49`) despachado no `HandleEvent` com
+`AVK_SELECT`/`AVK_SOFT1`/`AVK_UP` (`0xE035`/`0xE036`/`0xE031`):
+
+| medida | repouso | após tecla |
+|---|---|---|
+| retorno de `HandleEvent` | — | `TRUE` (consumido), 46 insns |
+| instruções do tick seguinte | 1587 | **1568** |
+| frame | branco | branco (inalterado) |
+
+**Controle negativo do booleano.** Evento inexistente `0x7f7f` → `FALSE`, 35
+instruções. O booleano **discrimina** eventos; não é constante. O jogo
+processa input de verdade.
+
+### Onde a tecla muda a decisão
+
+Trilhas de PC dos dois ticks comparadas passo a passo: 525 PCs em repouso,
+510 após a tecla, divergindo no passo 504. Último PC comum: **`0x12004a6c`**.
+
+```
+0x12004a64  ldr r0, [r6, #0x2c]
+0x12004a68  cmp r0, #0
+0x12004a6c  beq 0x12004a88      <- decisão
+0x12004a70  ldr r0, [r6, #0xc]  <- ramo "tem conteúdo"
+0x12004a7c  ldr r2, [r1, #0x18] <- slot 0x18 = BitBlt
+0x12004a84  bx  r2
+0x12004a88  mov r0, #0          <- ramo "nada a fazer"
+0x12004a8c  str r0, [r6, #0x2c]    (limpa a flag)
+```
+
+`[r6+0x2c]` é uma flag **"há conteúdo para blitar"**. Em repouso vale 0 e o
+jogo pula o desenho — corretamente, já que não há o que desenhar. A tecla a
+ligou, e o ramo tomado chama `BitBlt` (slot `0x18`, confirmado pelo layout do
+SDK).
+
+### Reconciliação com "nenhum slot faltante"
+
+A sonda de slots vazios monitorava `DISP_VTBL`. Esta chamada deriva a vtable de
+`[r6+0xc]` — **outro objeto**, cuja vtable não foi instrumentada. As duas
+observações não se contradizem: `BitBlt` não aparecia porque não estava sendo
+alcançado (flag em 0) *e* porque a sonda olhava a vtable errada.
+
+Isto também resolve o offset `0x10` deixado em aberto: o layout do SDK dá
+`0x10 = DrawText`, e a vtable alcançada por `[r6+0xc]` é um `IDisplay`. O nome
+`DISP_OFF10_DIMS_STUB` pode ser revisto quando houver evidência de aridade.
+
+### Próximo passo
+
+O gargalo não é mais "que slot implementar" — é **de onde vem o bitmap**. O
+`pbmSource` de `BitBlt` sai de algum lugar que hoje não existe: os assets em
+`data.ggz`, inacessíveis por falta de `IFileMgr`. Essa é a próxima dependência
+real.
+
 ## Por que o frame não muda entre ticks
 
 Oito ticks sucessivos no mesmo estado de guest produzem **1 frame distinto**,
