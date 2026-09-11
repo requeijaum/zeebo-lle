@@ -244,6 +244,25 @@ test_brew_mod_entry: test_brew_mod_entry.cpp zeebo_brew_loader.h zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -o $@ test_brew_mod_entry.cpp -lunicorn
 	./test_brew_mod_entry
 
+# QW99 Parte 4 / DD1a: primeiro PC ASSISTIDO do Double Dragon (hybrid/assisted).
+# Valida identidade do pacote (App ID 274754, CLSID 0x0102F789, tamanho do
+# ddragonz.mod), resolve o entry ARM cru via BrewLoader e o executa sob Unicorn
+# INTÉRPRETE (sem Dynarmic), registrando se o PC entra na faixa do módulo e a 1ª
+# dependência ausente. Rotulado hybrid/assisted: NÃO fecha boot orgânico nem PASS
+# de jogo, NÃO usa o handler fixo 0x10532344. Requer libunicorn.
+test_dd1a_diag: test_dd1a_diag.cpp zeebo_dd1a_diag.h zeebo_brew_loader.h zeebo_brew_mif.h
+	$(CXX) $(CXXFLAGS) -o $@ test_dd1a_diag.cpp -lunicorn
+
+# Gate com controles: run principal (ROM real → exit 0, ou SKIP exit 77 sem
+# fabricar execução) + mutação force_success que DEVE falhar (RED reproduzido).
+test-dd1a: test_dd1a_diag
+	./test_dd1a_diag || [ $$? -eq 77 ]
+	@# Mutação negativa: force_success fabrica entrada no módulo → controle
+	@# negativo passa a alegar execução; o gate DEVE ficar VERMELHO.
+	@if ./test_dd1a_diag buggy >/dev/null 2>&1; then \
+	  echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
+	else echo "OK: mutante force_success falha como esperado (RED reproduzido)"; fi
+
 # Integração de aliasing via uc_mem_map_ptr (requer libunicorn).
 test_l4_mmu_uc: test_l4_mmu_uc.cpp zeebo_l4_mmu.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_mmu_uc.cpp -lunicorn
@@ -491,7 +510,7 @@ test-clean-hygiene:
 check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs2apps test-gpu test-input \
        test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-vic-irq test-gpt-timer test-proccomm test-dd1a
 	./test_applet_dispatch
 	./test_applet_exec_perm
 	./test_brew_timer
@@ -532,6 +551,7 @@ check: test-clean-hygiene test test-zwheel-preview test-rex test-zwheel test-efs
 	$(MAKE) test-vic-irq
 	$(MAKE) test-gpt-timer
 	$(MAKE) test-proccomm
+	$(MAKE) test-dd1a
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
 	./test_l4_thread_table
@@ -554,11 +574,11 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_vic_irq test_gpt_timer test_proccomm *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_vic_irq test_gpt_timer test_proccomm test_dd1a_diag *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm
+.PHONY: all check test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-vic-irq test-gpt-timer test-proccomm test-dd1a
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
