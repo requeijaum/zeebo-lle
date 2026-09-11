@@ -284,6 +284,12 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, SCRATCH, &vtbl, 4); // pIShell->vtable
             u32 ppObj = SCRATCH + 0x200;
 
+            // Suprir o ponteiro de static-base (AEEHelperFuncs) em moduleBase - 4 (0x11fffffc)
+            // apontando para uma tabela de serviços / C-runtime helpers.
+            // Em ddragonz.mod @0x12002184: ldr r0, [r0, #-4] carrega de LB - 4.
+            const u32 STATIC_BASE = SCRATCH + 0x1000;
+            uc_mem_write(uc2, LB - 4, &STATIC_BASE, 4);
+
             // Invocação com r0=pIShell, r1=pIModule(0), r2=ppObj
             FirstPcResult r2 = run_first_pc(uc2, m.entry_va, LB, m.size, STK, 200000, false,
                                             SCRATCH, 0, ppObj, 0);
@@ -294,13 +300,14 @@ int main(int argc, char** argv) {
                          r2.first_pc, r2.last_pc, (unsigned long long)r2.instructions,
                          fault_label(r2.fault), r2.fault_va);
 
-            // Prova observável: avança além das 23 instruções iniciais (35 instruções)
-            // e atinge a chamada de método vtable em 0x1200218c (ldr r1, [r0, #0x68] -> leitura em 0x68 unmapped).
+            // Prova observável: avança além das 23 instruções iniciais e além das 35 instruções
+            // (com static_base em LB-4, alcança 37 instruções e executa bx r1 em 0x12002194,
+            // onde r1 é carregado de [STATIC_BASE + 0x68], que representa MALLOC em AEEHelperFuncs).
             assert(r2.ran && r2.entered_module);
-            assert(r2.instructions == 35);
-            assert(r2.last_pc == 0x1200218c);
-            assert(r2.fault == FAULT_READ_UNMAPPED);
-            assert(r2.fault_va == 0x00000068);
+            assert(r2.instructions == 37);
+            assert(r2.last_pc == 0x12002194);
+            assert(r2.fault == FAULT_FETCH_UNMAPPED);
+            assert(r2.fault_va == 0x00000000);
 
             uc_close(uc2);
         }
