@@ -28,12 +28,14 @@ static LoadResult parse_phdrs(const std::vector<u8>& d, u32 phoff, u16 phent, u1
     LoadResult r;
     for (int i = 0; i < phnum; i++) {
         size_t o = phoff + (size_t)i * phent;
-        if (o + 4 > d.size()) { r.skipped++; continue; }
+        // Bug 10: o cabecalho de 32 bytes precisa caber INTEIRO (rd32 le ate
+        // o+20..o+23); a guarda antiga "o+4>size" deixava rd32 ler fora.
+        if (o + 32 > d.size()) { r.skipped++; continue; }
         u32 ptype = rd32(d.data(), o);
         if (ptype != 1) continue;
-        u32 p_filesz = o + 16 < d.size() ? rd32(d.data(), o + 16) : 0;
-        u32 p_memsz  = o + 20 < d.size() ? rd32(d.data(), o + 20) : 0;
-        u32 val      = o + 4  < d.size() ? rd32(d.data(), o + 4)  : 0;  // p_offset
+        u32 val      = rd32(d.data(), o + 4);   // p_offset
+        u32 p_filesz = rd32(d.data(), o + 16);
+        u32 p_memsz  = rd32(d.data(), o + 20);
         size_t nmem = p_memsz ? p_memsz : p_filesz;
         if (!nmem) continue;
         if (nmem > kMaxSegBytes) { r.skipped++; continue; }
@@ -101,6 +103,17 @@ int main() {
         auto r = parse_phdrs(d, 64, phent, 1);
         assert(r.loaded == 0 && r.skipped == 1);
         printf("[ok] p_memsz acima do teto e recusado\n");
+    }
+
+    // 6. Cabecalho parcial no fim do arquivo: recusa em vez de ler fora.
+    // o=64, arquivo de 82 bytes: o+32=96 > 82, entao rd32(o+16)/rd32(o+20)
+    // leriam fora. A guarda "o+32>size" recusa antes de qualquer rd32.
+    {
+        std::vector<u8> d(82, 0xAA);
+        u32 one = 1; std::memcpy(d.data() + 64, &one, 4);  // ptype=1
+        auto r = parse_phdrs(d, 64, phent, 1);
+        assert(r.loaded == 0 && r.skipped == 1 && r.bytes_copied == 0);
+        printf("[ok] cabecalho parcial no fim do arquivo e recusado\n");
     }
 
     printf("[Test] limites do leitor de ELF: OK\n");
