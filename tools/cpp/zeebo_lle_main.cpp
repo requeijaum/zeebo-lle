@@ -5422,6 +5422,10 @@ int main(int argc, char** argv) {
     int slice_insns = 10000;
     double max_seconds = 0.0;
     int boot_firstapp = 0; // 0 = BREW Appmgr (padrão jailbreak), 3 = Z-Wheel (fábrica)
+    // --boot-appmgr/--boot-zwheel explícito: com --applet= junto, injeta o .mod e
+    // deixa o BOOT rodar (a shell real cria o applet com o pIShell vivo), em vez
+    // de curto-circuitar para o caminho sintético do applet.
+    bool want_boot = false;
 
     // Processa argumentos de linha de comando
     for (int i = 1; i < argc; i++) {
@@ -5439,8 +5443,10 @@ int main(int argc, char** argv) {
             show_fps = true;
         } else if (arg == "--boot-appmgr") {
             boot_firstapp = 0;
+            want_boot = true;
         } else if (arg == "--boot-zwheel") {
             boot_firstapp = 3;
+            want_boot = true;
         } else if (arg == "--zwheel-preview") {
             zwheel_preview = true;
             headless = false; // preview interativo abre a janela SDL2
@@ -5585,8 +5591,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // CAMINHO VIVO (opção 2): com boot explícito + --applet=, injeta o módulo no
+    // BrewLoader e deixa o boot rodar. O AEECShell dispatch do firmware então
+    // encontra o módulo injetado e o applet nasce pelo caminho REAL, com o
+    // pIShell vivo capturado — em vez do caminho sintético abaixo.
+    if (!applet_path.empty() && want_boot) {
+        printf("[Applet] Boot vivo: injetando '%s' e deixando a shell real criar o "
+               "applet (sem caminho sintético).\n", applet_path.c_str());
+        if (!sys.load_applet(applet_path, 0x12000000)) {
+            printf("[Warn] injeção falhou para o boot vivo: %s\n", applet_path.c_str());
+            return 1;
+        }
+        // Sem return: cai no run_interleaved (o boot) no fim do main.
+    }
+
     // Direct applet injection if requested
-    if (!applet_path.empty()) {
+    if (!applet_path.empty() && !want_boot) {
         printf("[Applet] Loading external applet into memory: %s\n", applet_path.c_str());
         // Se for o Zeetris, usa o ZeetrisRunner com ciclo de vida completo e gameloop contínuo
         auto mod_bytes = zeebo::zeetris::ZeetrisRunner::load_file(applet_path);
