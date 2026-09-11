@@ -2,10 +2,12 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <vector>
 #include <chrono>
 #include <unicorn/unicorn.h>
+#include "gpu/igl_hook.h"   // zeebo::gpu::GuestMachine (ponte GL ES -> IglHook)
 
 namespace zeebo::zeetris {
 
@@ -36,7 +38,12 @@ struct ZeetrisContext {
 
     // IGL (GL ES) dispatch tracking
     uint32_t igl_calls = 0;
+    uint32_t igl_handled = 0;
     std::map<uint32_t, uint32_t> igl_slot_calls;
+    std::map<uint32_t, uint32_t> igl_slot_handled; // slots aceitos pelo IglHook
+    // Ponte real para o IglHook (gpu/). Se vazio, os slots gl* caem no stub
+    // honesto que apenas conta a chamada e devolve void.
+    std::function<bool(int, zeebo::gpu::GuestMachine&)> igl_dispatcher;
 
     // Framebuffer 640x480 RGB565 (inicializado em branco 0xFFFF)
     std::vector<uint16_t> framebuffer = std::vector<uint16_t>(640 * 480, 0xFFFF);
@@ -68,6 +75,31 @@ public:
     static constexpr u32 DISPLAY_VTBL_VA = IGL_VTBL_VA;
     static constexpr u32 BITMAP_OBJ_VA   = 0x60004000u;
     static constexpr u32 BITMAP_VTBL_VA  = 0x60005000u;
+
+    // Ponte uc -> GuestMachine: args 0..3 em R0..R3, >=4 em SP+((n-4)*4);
+    // `read` lê memória guest (usada pelo IglHook para arrays de vértices/cor no
+    // momento do draw, conforme igl_hook.h).
+    static zeebo::gpu::GuestMachine make_guest_machine(uc_engine* uc) {
+        zeebo::gpu::GuestMachine gm;
+        gm.arg = [uc](int n) -> u32 {
+            u32 v = 0;
+            if (n >= 0 && n < 4) {
+                const int regs[4] = {UC_ARM_REG_R0, UC_ARM_REG_R1,
+                                     UC_ARM_REG_R2, UC_ARM_REG_R3};
+                uc_reg_read(uc, regs[n], &v);
+            } else if (n >= 4) {
+                u32 sp = 0;
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_mem_read(uc, sp + static_cast<u32>(n - 4) * 4u, &v, 4);
+            }
+            return v;
+        };
+        gm.read = [uc](u32 va, void* dst, u32 size) {
+            return uc_mem_read(uc, va, dst, size) == UC_ERR_OK;
+        };
+        gm.set_ret = [uc](u32 v) { uc_reg_write(uc, UC_ARM_REG_R0, &v); };
+        return gm;
+    }
 
     static void hook_getuptime(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
         (void)addr; (void)size;
@@ -267,15 +299,25 @@ public:
             u32 slot = (pc - IGL_SENTINEL_VA) / 4u;
             if (ctx) {
                 ctx->igl_calls++;
-                if (ctx->igl_slot_calls.find(slot) == ctx->igl_slot_calls.end())
-                    ctx->igl_slot_calls[slot] = 0;
                 ctx->igl_slot_calls[slot]++;
                 if (ctx->igl_slot_calls[slot] <= 3) {
                     std::printf("[IGL] slot %u gl* (lr=0x%08x) a0=0x%08x a1=0x%08x "
                                 "a2=0x%08x a3=0x%08x\n", slot, lr, a0, a1, a2, a3);
                 }
+                if (ctx->igl_dispatcher) {
+                    // R0..R3 foram lidos acima mas o GuestMachine relê via uc para
+                    // que o IglHook possa pedir args >=4 (pilha) e ler arrays do
+                    // guest no draw. Slots gl* NÃO recebem `po` (ver igl_hook.h).
+                    auto gm = make_guest_machine(uc);
+                    if (ctx->igl_dispatcher(static_cast<int>(slot), gm)) {
+                        ctx->igl_handled++;
+                        ctx->igl_slot_handled[slot]++;
+                    }
+                    uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+                    return;
+                }
             }
-            // Slots 3..79 devolvem void; 0..2 devolvem int 0 (sucesso).
+            // Sem dispatcher: stub honesto (slots gl* devolvem void).
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
         } else if (pc >= 0x50000500u && pc < 0x50000600u) {

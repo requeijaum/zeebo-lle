@@ -408,8 +408,10 @@ test-zeetris-full-lifecycle: test_zeetris_full_lifecycle
 	  echo "FAIL: mutante (malloc NULL aceito) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
 
-test_zeetris_runner: test_zeetris_runner.cpp zeebo_zeetris_runner.h
-	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_runner.cpp -lunicorn
+test_zeetris_runner: test_zeetris_runner.cpp zeebo_zeetris_runner.h gpu/igl_hook.h \
+                    gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_runner.cpp \
+	  gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp -lunicorn
 
 test-zeetris-runner: test_zeetris_runner
 	./test_zeetris_runner || [ $$? -eq 77 ]
