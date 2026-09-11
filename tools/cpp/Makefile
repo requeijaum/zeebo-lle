@@ -154,6 +154,11 @@ test-peripheral-bus: test_peripheral_bus
 	@if ./test_peripheral_bus buggy-reentrant >/dev/null 2>&1; then \
 	  echo "FAIL: reentrant IRQ redelivery unexpectedly passed"; exit 1; \
 	else echo "OK: reentrant IRQ redelivery fails as expected (RED reproduced)"; fi
+	@# Negative control C: Bug5b sub-bank mutant (old +0x08/0x100 window) MUST
+	@# fail — firmware COUNT @0xC5000108 is outside the reference decode window.
+	@if ./test_peripheral_bus mutant-subbank >/dev/null 2>&1; then \
+	  echo "FAIL: GPT sub-bank mutant (+0x08) unexpectedly passed"; exit 1; \
+	else echo "OK: GPT sub-bank mutant fails as expected (0xC5000108 mismatch)"; fi
 
 # Bug 6: inter-core ProcComm over shared SMEM — Core0 issue becomes visible,
 # only a Core1 service step completes it with an honest status. Host-only.

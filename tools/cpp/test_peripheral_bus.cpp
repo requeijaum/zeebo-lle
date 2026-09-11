@@ -248,9 +248,75 @@ static void test_decode_semantics() {
     CHECK(!bus.vic.irq_asserted() && bus.vic.in_service == 0, "EOI cleared pending+service");
 }
 
+// Firmware sub-bank layout: prove the production 0xC5000100 timer bank decodes
+// COUNT at 0xC5000108 (not 0xC5000004), and a guest MMIO read at 0xC5000108
+// returns a DETERMINISTIC, monotonically CHANGING count as virtual time
+// advances. The MUTANT (old +0x08 reference layout) reads flat-RAM zero at
+// 0xC5000108 and MUST fail — that is the pre-fix Bug 5b address mismatch.
+//
+// `mutant` (compile-time -DBUG5B_MUTANT, or argv "mutant") keeps the OLD layout
+// where COUNT decodes at +0x04 and the window is only 0x100 wide, so the
+// firmware address 0xC5000108 falls outside the decode window entirely.
+static void test_firmware_subbank_layout(bool mutant) {
+    PeripheralBus bus;
+    bus.gpt_base = PB_GPT_BASE_FW;          // 0xC5000000
+    if (!mutant) {
+        bus.use_firmware_gpt_layout();      // COUNT @ +0x108, window 0x200
+    }
+    // else: default reference layout (COUNT @ +0x04, window 0x100) = the bug.
+
+    const uint32_t COUNT_ADDR = PB_GPT_BASE_FW + PB_GPT_FW_COUNT_OFF;  // 0xC5000108
+    const uint32_t MATCH_ADDR = PB_GPT_BASE_FW + bus.gpt_match_off;
+    const uint32_t EN_ADDR    = PB_GPT_BASE_FW + bus.gpt_enable_off;
+
+    // Guest programs + starts the timer via the (configured) register bank.
+    bus.mmio_write(MATCH_ADDR, 0x10000);
+    bus.mmio_write(EN_ADDR, PB_GPT_ENABLE_EN);
+
+    // Guest MMIO read of the firmware COUNT address 0xC5000108.
+    auto guest_count = [&](uint32_t* out) -> bool {
+        return bus.mmio_read(COUNT_ADDR, out);
+    };
+
+    uint32_t c0 = 0xDEAD, c1 = 0xDEAD, c2 = 0xDEAD;
+    bool d0 = guest_count(&c0);
+    bus.tick(500);
+    bool d1 = guest_count(&c1);
+    bus.tick(500);
+    bool d2 = guest_count(&c2);
+
+    if (mutant) {
+        // The firmware COUNT address is OUTSIDE the reference window/offset, so
+        // the model never reports the advancing count here. Assert against the
+        // CORRECT outcome so the mutant FAILS (RED reproduced).
+        CHECK(d0 && c0 == 0 && c1 == 500 && c2 == 1000,
+              "mutant: firmware COUNT @0xC5000108 reads advancing count (RED)");
+    } else {
+        CHECK(d0 && d1 && d2, "firmware COUNT @0xC5000108 is decoded by the bank");
+        CHECK(c0 == 0, "COUNT starts at 0");
+        CHECK(c1 == 500, "COUNT advanced deterministically to 500 after 500 vticks");
+        CHECK(c2 == 1000, "COUNT advanced deterministically to 1000 after another 500");
+        // Determinism: a fresh bus with identical stimulus yields identical reads.
+        PeripheralBus b2; b2.gpt_base = PB_GPT_BASE_FW; b2.use_firmware_gpt_layout();
+        b2.mmio_write(PB_GPT_BASE_FW + b2.gpt_enable_off, PB_GPT_ENABLE_EN);
+        uint32_t r = 0; b2.tick(500); b2.mmio_read(COUNT_ADDR, &r);
+        CHECK(r == 500, "COUNT read is deterministic across runs");
+        // Watchdog ACK address 0xC500010C is inside the window (consumed, no crash).
+        CHECK(b2.mmio_write(PB_GPT_BASE_FW + PB_GPT_FW_WDOG_ACK, 1),
+              "watchdog ACK @0xC500010C is decoded by the bank");
+    }
+}
+
 int main(int argc, char** argv) {
     std::string mode = argc > 1 ? argv[1] : "";
+    if (mode == "mutant" || mode == "mutant-subbank") {
+        test_firmware_subbank_layout(/*mutant=*/true);
+        if (failures) { printf("\n%d CHECK(s) FAILED\n", failures); return 1; }
+        printf("\nALL PASS (%s)\n", mode.c_str());
+        return 0;
+    }
     test_decode_semantics();
+    test_firmware_subbank_layout(/*mutant=*/false);
     if (mode == "buggy" || mode == "buggy-disconnected") {
         run(/*disc=*/true, /*reentrant=*/false);
     } else if (mode == "buggy-reentrant") {

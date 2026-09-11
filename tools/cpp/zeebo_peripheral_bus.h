@@ -69,6 +69,27 @@ enum : uint32_t {
     // Firmware-resolved GPT base for the shipped MSM7201A NAND 1.1.2 (see header).
     PB_GPT_BASE_FW       = 0xC5000000u,
 
+    // GPT TIMER SUB-BANK — RESOLVED FROM THE REAL FIRMWARE, NOT THE HEADER
+    // -------------------------------------------------------------------
+    // The literal firmware scan (primary evidence) is more specific than "page
+    // 0xC5000000": the *timer register bank* the AMSS/REX code actually touches
+    // is the 0xC5000100 sub-bank — the free-running COUNT is read at
+    // 0xC5000108 (545/590 refs) and the watchdog tick is acknowledged at
+    // 0xC500010C (FINDINGS.md L1181, ROADMAP.md L103). Those addresses lie a
+    // full 0x100 ABOVE the page base, so a 0x100-wide window rooted at
+    // 0xC5000000 with 0x00/04/08/0c offsets DECODES THE WRONG BYTES: the guest
+    // COUNT poll at 0xC5000108 falls outside the window and lands in flat RAM,
+    // where the model never advances it (the pre-fix Bug 5b latent mismatch).
+    // The register offsets below are therefore per-instance members: the
+    // production integration points them at the firmware sub-bank and widens
+    // the window; the standalone decoder test keeps the reference layout.
+    PB_GPT_FW_SUBBANK    = 0x00000100u, // sub-bank base within the GPT page
+    PB_GPT_FW_WINDOW     = 0x00000200u, // window that covers the sub-bank regs
+    PB_GPT_FW_COUNT_OFF  = 0x00000108u, // COUNT read (firmware: 0xC5000108)
+    PB_GPT_FW_WDOG_ACK   = 0x0000010Cu, // watchdog tick ACK (firmware: 0xC500010C)
+    PB_GPT_FW_MATCH_OFF  = 0x00000100u, // MATCH compare [model: no primary ref]
+    PB_GPT_FW_ENABLE_OFF = 0x00000104u, // ENABLE/CTL     [model: no primary ref]
+
     // VIC register offsets (vic.h, pp 218-228)
     PB_VIC_IRQ_STATUS0   = 0x0000, // masked pending = pending & enable (read)
     PB_VIC_RAW_STATUS0   = 0x0010, // raw pending latch (read)
@@ -106,6 +127,28 @@ struct PeripheralBus {
     // gpt_base = PB_GPT_BASE_FW (0xC5000000) to avoid the MSM_CSR collision.
     uint32_t vic_base = PB_VIC_BASE;
     uint32_t gpt_base = PB_GPT_BASE;
+
+    // Per-instance GPT register layout. Defaults are the reference offsets used
+    // by the standalone decoder test (sub-bank 0 within a 0x100 window).
+    // Production calls use_firmware_gpt_layout() so COUNT decodes at the real
+    // firmware address 0xC5000108, not 0xC5000004. gpt_window MUST be wide
+    // enough to cover the highest register offset (firmware needs >= 0x110).
+    uint32_t gpt_window   = PB_GPT_SIZE;      // decode window above gpt_base
+    uint32_t gpt_match_off  = PB_GPT_MATCH_VAL; // 0x00 ref / 0x100 firmware
+    uint32_t gpt_count_off  = PB_GPT_COUNT_VAL; // 0x04 ref / 0x108 firmware
+    uint32_t gpt_enable_off = PB_GPT_ENABLE;    // 0x08 ref / 0x104 firmware
+    uint32_t gpt_clear_off  = PB_GPT_CLEAR;     // 0x0c ref / 0x10c firmware (wdog ACK)
+
+    // Point the decoder at the firmware-resolved 0xC5000100 timer sub-bank:
+    // COUNT at 0xC5000108, watchdog ACK at 0xC500010C, with a window wide
+    // enough to include them. Call after setting gpt_base = 0xC5000000.
+    void use_firmware_gpt_layout() {
+        gpt_window     = PB_GPT_FW_WINDOW;
+        gpt_match_off  = PB_GPT_FW_MATCH_OFF;
+        gpt_count_off  = PB_GPT_FW_COUNT_OFF;
+        gpt_enable_off = PB_GPT_FW_ENABLE_OFF;
+        gpt_clear_off  = PB_GPT_FW_WDOG_ACK;
+    }
 
     // --- Deterministic virtual time (independent of dual-core retired counts) ---
     //
@@ -154,16 +197,16 @@ struct PeripheralBus {
                 default:                  return true; // consumed, no side effect
             }
         }
-        if (addr >= gpt_base && addr < gpt_base + PB_GPT_SIZE) {
-            switch (addr - gpt_base) {
-                case PB_GPT_MATCH_VAL: gpt.set_match(val); return true;
-                case PB_GPT_ENABLE:
-                    gpt.clr_on_match = (val & PB_GPT_ENABLE_CLR_ON_MATCH) != 0;
-                    if (val & PB_GPT_ENABLE_EN) gpt.enable(); else gpt.disable();
-                    return true;
-                case PB_GPT_CLEAR:     gpt.clear(); return true;
-                default:               return true;
+        if (addr >= gpt_base && addr < gpt_base + gpt_window) {
+            uint32_t off = addr - gpt_base;
+            if (off == gpt_match_off)  { gpt.set_match(val); return true; }
+            if (off == gpt_enable_off) {
+                gpt.clr_on_match = (val & PB_GPT_ENABLE_CLR_ON_MATCH) != 0;
+                if (val & PB_GPT_ENABLE_EN) gpt.enable(); else gpt.disable();
+                return true;
             }
+            if (off == gpt_clear_off)  { gpt.clear(); return true; }
+            return true; // consumed, no side effect
         }
         return false;
     }
@@ -177,13 +220,12 @@ struct PeripheralBus {
                 default:                 *out = 0;                    return true;
             }
         }
-        if (addr >= gpt_base && addr < gpt_base + PB_GPT_SIZE) {
-            switch (addr - gpt_base) {
-                case PB_GPT_COUNT_VAL: *out = gpt.count; return true; // read: no advance
-                case PB_GPT_MATCH_VAL: *out = gpt.match; return true;
-                case PB_GPT_ENABLE:    *out = gpt.enabled ? (uint32_t)PB_GPT_ENABLE_EN : 0u; return true;
-                default:               *out = 0; return true;
-            }
+        if (addr >= gpt_base && addr < gpt_base + gpt_window) {
+            uint32_t off = addr - gpt_base;
+            if (off == gpt_count_off)  { *out = gpt.count; return true; } // read: no advance
+            if (off == gpt_match_off)  { *out = gpt.match; return true; }
+            if (off == gpt_enable_off) { *out = gpt.enabled ? (uint32_t)PB_GPT_ENABLE_EN : 0u; return true; }
+            *out = 0; return true;
         }
         return false;
     }
