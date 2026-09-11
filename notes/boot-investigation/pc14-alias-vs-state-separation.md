@@ -130,6 +130,24 @@ objeto de heap.
    demonstrada. Como o `pop {r4-r8,lr}` vem depois do `ldr`, esta captura ainda não
    prova restauração incorreta de `r4`, SP ou frame pelo emulador.
 
+### Cadeia Causal da Atribuição de `r4` (Medição Exata)
+A rastreabilidade da atribuição de `r4` até o caller foi fechada via `ZEEBO_PC14_R4ENTRY`:
+1. `b04001d4 ldr r1,[r4]` recebe `r4` herdado na entrada de `b04001c4`.
+2. A função real começa em `0xb040014c`:
+   - `0xb040014c: push {r4-r8, lr}`
+   - `0xb0400150: movs r4, r0` -> **`r4` é exatamente o argumento `r0` passado pelo chamador**.
+3. O chamador é a rotina em modo Thumb em `0xb040d218`:
+   - `0xb040d218: push {r3, lr}`
+   - `0xb040d21a: mov r0, sp`
+   - `0xb040d21c: str r0, [sp]`
+   - `0xb040d21e: ldr r0, [sp, #0x10]`  <-- carrega o argumento do objeto da pilha do caller
+   - `0xb040d220: blx #0xb040014c`
+4. Na 1ª invocação (boa):
+   - `sp = 0xb0046f58`; `ldr r0, [sp, #0x10]` carrega `0xb0041268` (objeto válido).
+5. Na 2ª invocação (má):
+   - `sp = 0xb0327e18`; `ldr r0, [sp, #0x10]` carrega `0xb0046fa8` (slot de pilha da thread anterior contendo `r6=5`).
+6. A origem de `0xb0046fa8` em `[0xb0327e28]` decorre diretamente do frame de pilha preparado pelo caller anterior em `0xb0410090` (veneer ARM->Thumb) / contexto da thread `0x8000c001`.
+
 ### Consequência de protocolo (não-fix)
 O `bx` é **fielmente executado** pelo interpretador: a memória guest==host e o
 `5` tem produtor conhecido. Ainda não foi isolado um defeito específico do
