@@ -3591,6 +3591,34 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
 
+        // [SHELL-ANCHOR] Instrumentação read-only, gated por ZEEBO_SHELL_TRACE, que
+        // emite UMA linha marcadora inequívoca SÓ quando o Core0 executa EXATAMENTE o
+        // ISHELL_CreateInstance (0x105c7fb4) ou o AEECShell dispatch (0x10c874f4) — os
+        // dois VAs onde um AEECShell/IShell REAL seria construído/despachado. Captura o
+        // contexto ARM vivo (PC/r0/r1/r2/sp) que derivaria pIShell, SEM fabricar nada.
+        // Ausente a env, não altera o boot; presente, não patcheia PC/ponteiro/memória.
+        // Diferente do sample por-ciclo e da janela ampla APPS: casa o ANCHOR exato.
+        static const bool shell_trace_on = std::getenv("ZEEBO_SHELL_TRACE") != nullptr;
+        if (shell_trace_on && sys->brew_) {
+            const u32 here = (u32)ad;
+            const u32 ish  = sys->brew_->symbols().ishell_create_va;    // 0x105c7fb4
+            const u32 aees = sys->brew_->symbols().aeecshell_dispatch_va; // 0x10c874f4
+            if ((ish && here == ish) || here == aees) {
+                u32 r0=0,r1=0,r2=0,sp=0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                fprintf(stderr,
+                    "[SHELL-ANCHOR] Core0 HIT %s pc=0x%08x r0=0x%08x r1=0x%08x "
+                    "r2=0x%08x sp=0x%08x insns=%llu\n",
+                    (here == aees) ? "AEECShell_dispatch" : "ISHELL_CreateInstance",
+                    here, r0, r1, r2, sp,
+                    (unsigned long long)sys->core0_.insns);
+                fflush(stderr);
+            }
+        }
+
         // [QW-PC14] Instrumentação read-only da fronteira PC=0x00000014 pós-scatterload.
         // Mantém um ring buffer dos últimos PCs/opcodes executados no Core0 e, na
         // PRIMEIRA vez que o PC cai na página de vetores baixos (0x00..0x1f), despeja
