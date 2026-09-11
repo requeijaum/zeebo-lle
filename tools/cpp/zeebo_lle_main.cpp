@@ -1793,6 +1793,33 @@ public:
                     }
                 }
             }
+
+            // --- Bug 6 / AUDIO_TODO A11: ProcComm modem service, between slices.
+            // Core 1 (modem) is the SOLE writer of the ProcComm completion. It
+            // runs HERE — the engine is quiescent between uc_emu_start slices, so
+            // no in-flight guest STR can overwrite the DONE we write (that was
+            // exactly the A11 clobber when service happened inside the write
+            // hook). We service at most one pending command per cycle and mirror
+            // the honest completion words into the guest-visible Unicorn view.
+            if (proccomm_.command_pending()) {
+                u32 pend_cmd = proccomm_.rd(zeebo::PCOM_OFF_PEND_CMD);
+                if (proccomm_.core1_service()) {
+                    u32 st   = proccomm_.status();
+                    u32 done = proccomm_.rd(zeebo::PCOM_OFF_APP_COMMAND);
+                    printf("[ProcComm] Core 1 serviced command 0x%x -> status=%s (0x%x) [between slices]\n",
+                           pend_cmd,
+                           st == zeebo::PCOM_CMD_SUCCESS ? "SUCCESS" : "FAIL_UNSUPPORTED",
+                           st);
+                    // Publish the completion into the guest view now that the
+                    // guest's own STR has already retired (previous slice).
+                    if (core0_.uc) {
+                        uc_mem_write(core0_.uc, SMEM_BASE + 0x04, &st, 4);
+                        uc_mem_write(core0_.uc, SMEM_BASE + 0x00, &done, 4);
+                    }
+                    vtlb_.write_u32(SMEM_BASE + 0x04, st);
+                    vtlb_.write_u32(SMEM_BASE + 0x00, done);
+                }
+            }
             if (gpu_ && gpu_->is_fb_dirty()) {
                 gpu_->clear_fb_dirty();
                 const u16* cur_fb = nullptr;
@@ -3860,38 +3887,29 @@ private:
                 }
             }
         }
-        // ProcComm command write by Core 0 (bug 6). The old path unconditionally
-        // wrote PCOM_CMD_SUCCESS from Core 0 itself — fabricated success. Now the
-        // command becomes VISIBLE in shared SMEM (Core0 issue), then a modeled
-        // Core 1 service step produces the completion with an HONEST,
-        // command-specific status (unsupported stays unsupported).
+        // ProcComm command write by Core 0 (bug 6 / AUDIO_TODO A11).
+        //
+        // ORDERING: this hook fires INSIDE UC_HOOK_MEM_WRITE, i.e. BEFORE the
+        // guest's own STR store has retired. Servicing the modem here and writing
+        // PCOM_CMD_DONE back into the Unicorn view is unsafe: after the hook
+        // returns, Unicorn completes the original STR and overwrites SMEM+0x00
+        // with the command id, CLOBBERING the DONE we just wrote (A11 repro:
+        // command 0x1 read back as 0x1, never DONE).
+        //
+        // The honest model therefore ONLY issues the command here: it becomes
+        // VISIBLE in the shared backing and marked pending. The original guest
+        // STR is then free to write the command id into its own Unicorn view
+        // (that is exactly the command bytes it intended). Completion is produced
+        // later, between emulation slices, by the modeled Core 1 service step
+        // (see run_interleaved) — the SOLE writer of DONE, running while the
+        // engine is quiescent so no guest store can overwrite it.
         else if (addr == SMEM_BASE + 0x00) { // APP_COMMAND
             u32 cmd = value;
-            // Make the command visible through the shared backing (both cores).
+            // Make the command visible through the shared backing (both cores)
+            // and leave it PENDING. Do NOT service, do NOT fake a completion,
+            // do NOT touch the Unicorn view — the guest STR still owns this store.
             proccomm_.core0_issue(cmd);
-            printf("[ProcComm] Core 0 issued command 0x%x (visible in SMEM, awaiting modem)\n", cmd);
-
-            // Core 1 (modem) services the pending command. This is the only path
-            // that produces completion; it writes an honest status.
-            bool serviced = proccomm_.core1_service();
-            if (serviced) {
-                u32 st = proccomm_.status();
-                printf("[ProcComm] Core 1 serviced command 0x%x -> status=%s (0x%x)\n",
-                       cmd,
-                       st == zeebo::PCOM_CMD_SUCCESS ? "SUCCESS" : "FAIL_UNSUPPORTED",
-                       st);
-            }
-
-            // Mirror the shared-backing completion words into the Unicorn view so
-            // a guest polling APP_COMMAND/APP_STATUS observes the same bytes.
-            if (core0_.uc) {
-                u32 done = proccomm_.rd(zeebo::PCOM_OFF_APP_COMMAND);
-                u32 st   = proccomm_.rd(zeebo::PCOM_OFF_APP_STATUS);
-                uc_mem_write(core0_.uc, SMEM_BASE + 0x04, &st, 4);
-                uc_mem_write(core0_.uc, SMEM_BASE + 0x00, &done, 4);
-            }
-            vtlb_.write_u32(SMEM_BASE + 0x04, proccomm_.rd(zeebo::PCOM_OFF_APP_STATUS));
-            vtlb_.write_u32(SMEM_BASE + 0x00, proccomm_.rd(zeebo::PCOM_OFF_APP_COMMAND));
+            printf("[ProcComm] Core 0 issued command 0x%x (visible in SMEM, PENDING modem service)\n", cmd);
         }
         // MDDI write
         else if (addr >= MSM_MDDI_BASE && addr < MSM_MDDI_BASE + MDDI_SIZE) {

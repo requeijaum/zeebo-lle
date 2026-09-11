@@ -185,6 +185,23 @@ test-proccomm-integration: test_proccomm_integration
 	  echo "FAIL: derived-pending integration unexpectedly passed"; exit 1; \
 	else echo "OK: derived-pending integration fails as expected (guest never sees DONE/SUCCESS)"; fi
 
+# QW99 Bug 6 / AUDIO_TODO A11: PRODUCTION scheduling-order regression on a REAL
+# Unicorn guest. An actual ARM `str` writes APP_COMMAND under UC_HOOK_MEM_WRITE
+# (issue-only, command stays PENDING); the modem services BETWEEN slices; a
+# subsequent guest load observes DONE/SUCCESS. `sync` reproduces the A11 clobber
+# (service+DONE synchronously inside the hook, then the guest str overwrites
+# DONE) and MUST fail. Requires libunicorn.
+test_proccomm_production_order: test_proccomm_production_order.cpp zeebo_proccomm.h
+	$(CXX) $(CXXFLAGS) -o $@ test_proccomm_production_order.cpp -lunicorn
+
+test-proccomm-production-order: test_proccomm_production_order
+	./test_proccomm_production_order
+	@# Negative mutation: synchronous service inside the write hook lets the
+	@# guest str clobber DONE — MUST fail (A11 RED reproduced on a live guest).
+	@if ./test_proccomm_production_order sync >/dev/null 2>&1; then \
+	  echo "FAIL: synchronous-in-hook service unexpectedly passed (A11 clobber unguarded)"; exit 1; \
+	else echo "OK: synchronous-in-hook service fails as expected (A11 RED: guest str clobbers DONE)"; fi
+
 zeebo_harness: zeebo_harness.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_harness.cpp $(LIBS)
 
@@ -592,7 +609,7 @@ FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs t
 check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
        test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-peripheral-bus test-dd1a
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a
 	./test_applet_dispatch
 	./test_applet_exec_perm
 	./test_module_gate
@@ -636,6 +653,7 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-input \
 	$(MAKE) test-peripheral-bus
 	$(MAKE) test-proccomm
 	$(MAKE) test-proccomm-integration
+	$(MAKE) test-proccomm-production-order
 	$(MAKE) test-dd1a
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
@@ -684,11 +702,11 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_thread_sid_ctx \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_peripheral_bus test_dd1a_diag *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag *.o
 	rm -rf testkit/build
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-peripheral-bus test-dd1a
+.PHONY: all check check-fast check-firmware check-full test test-cli clean gpu test-gpu test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
