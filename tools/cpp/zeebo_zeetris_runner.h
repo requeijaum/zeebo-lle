@@ -703,6 +703,19 @@ public:
         // env-gated para poder medir a hipótese de que é ele que mantém o jogo
         // num estado "vazio" — com o gate ligado, o jogo fica com o que ele
         // mesmo puser ali (ou com o que o .mod trouxer).
+        // MEDIÇÃO CRÍTICA: o que o JOGO deixou em [pApplet+0x20] depois do
+        // EVT_APP_START? Se for um ponteiro de heap, o jogo alocou/inicializou o
+        // próprio contexto e a linha seguinte o CLOBA com uma região zerada.
+        {
+            u32 game_ctx = 0;
+            if (uc_mem_read(uc, ctx.pApplet + 0x20, &game_ctx, 4) == UC_ERR_OK) {
+                std::printf("[ZeetrisRunner] [pApplet+0x20] DEPOIS do EVT_APP_START "
+                            "= 0x%08x%s\n", game_ctx,
+                            (game_ctx >= 0x30005000u && game_ctx < 0x30020000u)
+                                ? "  <== ponteiro do heap do jogo (o runner CLOBA!)"
+                                : "  (nao parece ponteiro de heap do jogo)");
+            }
+        }
         if (!std::getenv("ZEEBO_ZEETRIS_NO_APPCTX")) {
             u32 app_ctx_va = 0x30010000u;
             uc_mem_write(uc, ctx.pApplet + 0x20, &app_ctx_va, 4);
