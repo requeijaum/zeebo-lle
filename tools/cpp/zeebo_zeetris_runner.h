@@ -6,6 +6,7 @@
 #include <map>
 #include <vector>
 #include <chrono>
+#include <cstdlib>
 #include <unicorn/unicorn.h>
 #include "gpu/igl_hook.h"   // zeebo::gpu::GuestMachine (ponte GL ES -> IglHook)
 
@@ -112,6 +113,10 @@ public:
 
     static void hook_trace_gameloop(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
         (void)size; (void)user_data;
+        // Instrumento de diagnóstico: imprime CADA instrução da rotina de desenho,
+        // o que enche o log e derruba o FPS. Fica atrás de ZEEBO_ZEETRIS_TRACE.
+        static const bool trace_on = std::getenv("ZEEBO_ZEETRIS_TRACE") != nullptr;
+        if (!trace_on) return;
         u32 pc = (u32)addr;
         static int trace_steps = 0;
         if (trace_steps < 30) {

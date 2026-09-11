@@ -5,6 +5,7 @@
 #include <fstream>
 #include <set>
 #include <cstdlib>
+#include <cstdint>
 #include <vector>
 #include <unicorn/unicorn.h>
 #include "zeebo_zeetris_runner.h"
@@ -165,6 +166,43 @@ int main(int argc, char** argv) {
         assert(top_col != 0xF800u);
         assert(hist.size() >= 2);          // há mais de uma cor
         assert(n - top_px > n / 50);       // >2% da tela é geometria do jogo
+    }
+
+    // Controles: o jogo REALMENTE reage à tecla? Em vez de assumir, mede-se o
+    // estado do applet por checksum antes e depois de despachar a tecla. Se o
+    // handle_event muda qualquer palavra de estado, o checksum difere.
+    {
+        auto checksum = [uc, &ctx]() -> uint64_t {
+            // Cobre as três regiões plausíveis de estado: AppContext, a área
+            // sb (app_ctx+0x9000, onde vive o flag de transição de tela) e os
+            // dados do módulo. Regiões não mapeadas são ignoradas e reportadas.
+            const struct { u32 va, len; const char* nome; } regs[] = {
+                { ctx.app_ctx_va,        0x1000,  "AppContext" },
+                { ctx.app_ctx_va + 0x9000, 0x1000, "sb(+0x9000)" },
+                { 0x123c0000u,           0x10000, "mod-data" },
+                { 0x30004000u,           0xC000,  "heap/applet" },
+            };
+            uint64_t h = 1469598103934665603ull;
+            for (const auto& r : regs) {
+                std::vector<u8> buf(r.len);
+                if (uc_mem_read(uc, r.va, buf.data(), r.len) != UC_ERR_OK) {
+                    std::printf("[ctrl] regiao %s (0x%08x) NAO mapeada\n", r.nome, r.va);
+                    continue;
+                }
+                for (u8 b : buf) { h ^= b; h *= 1099511628211ull; }
+            }
+            return h;
+        };
+        const uint64_t before = checksum();
+        bool k1 = ZeetrisRunner::dispatch_key(uc, ctx, 0xE032, true);   // AVK_DOWN press
+        bool k2 = ZeetrisRunner::dispatch_key(uc, ctx, 0xE032, false);  // AVK_DOWN release
+        const uint64_t after = checksum();
+        std::printf("[+] Controles: AVK_DOWN press=%d release=%d; estado do applet "
+                    "0x%016llx -> 0x%016llx (%s)\n",
+                    (int)k1, (int)k2, (unsigned long long)before, (unsigned long long)after,
+                    before == after ? "SEM reacao" : "REAGIU");
+        assert(k1 && k2);                 // a tecla foi consumida pelo HandleEvent
+        assert(ctx.igl_calls > 0);        // e o loop de desenho continua vivo
     }
 
     // Validação de áudio / IMedia (0x0106e415)

@@ -308,7 +308,7 @@ public:
             }
         }
 
-        window_ = SDL_CreateWindow("Zeebo LLE Unified Emulator (MSM7201A)",
+        window_ = SDL_CreateWindow("beLLEZeebo - LLE Zeebo Emulator (MSM7201A)",
                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                    FB_WIDTH, FB_HEIGHT,
                                    SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
@@ -1504,7 +1504,7 @@ public:
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true, bool use_dynarmic = false) {
         printf("===================================================================\n");
-        printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
+        printf("  beLLEZeebo SYSTEM ORCHESTRATOR: Unified MSM7201A Engine               \n");
         printf("===================================================================\n");
 
         // 1. Initialize Hardware Flash Controller & DMOV DMA
@@ -5290,7 +5290,7 @@ uint32_t        ZeeboLLESystem::s_zwheel_stub_va_  = 0;
 
 static void print_usage(const char* prog) {
     printf("===================================================================\n");
-    printf("ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine\n");
+    printf("beLLEZeebo SYSTEM ORCHESTRATOR: Unified MSM7201A Engine     \n");
     printf("Clean-room Low-Level Emulator (ARM11 APPS + ARM9 AMSS + Adreno 130)\n");
     printf("===================================================================\n\n");
     printf("Uso:\n");
