@@ -542,7 +542,7 @@ REMOTO (2 FACILIDADES IMPORTANTES):
   usando vendor kernel sources. NÃO virou patch merged ainda (só RFC mai/2026).
   => Reavalia a recomendação "construir board QEMU = semanas": se este trabalho
      progredir, a borda QEMU pode existir. Vale rastrear patchew/lore por uma
-     série v1+v2; e o autor é contatável (gumenezes2019@gmail.com).
+     série v1+v2; e o autor é contatável (<redacted>).
 - Linux kernel driver `mtd: msm_nand` (lkml 2011) + linux-msm.github.io
   mainline-status: driver MSM NAND oficial no kernel, e MSM no mainline — base
   para kernel/boot.
@@ -556,7 +556,7 @@ ROADMAP: Phase-1 alt = rastrear QEMU-MSMTk + tentar kernel msm_nand como boot re
 Rafael pediu (a)+(b): rastrea QEMU MSM7k + obter driver msm_nand como ref.
 (a) QEMU: o RFC de gustavo menezes (mai/2026) ainda NAO virou serie v1/v2 em
     patchew/lore; as contas GitHub da web sao homonimos (nao do autor). O trabalho
-    dele segue em aberto; contato gumenezes2019@gmail.com. Nao merged ainda.
+    dele segue em aberto; contato <redacted>. Nao merged ainda.
 (b) Kernel MSM NAND driver ADQUIRIDO: refs/msm_nand-kernel-driver.c (7307 lines,
     firekernel-ace/official-gb, from android-msm tree, GPL). This is the OFFICIAL
     msm_nand.c. KEY VERIFICATION (lines ~599-603, msm_nand_read):
