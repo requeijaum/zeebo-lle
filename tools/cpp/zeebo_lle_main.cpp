@@ -3576,6 +3576,70 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
 
+        // [QW-PC14] Instrumentação read-only da fronteira PC=0x00000014 pós-scatterload.
+        // Mantém um ring buffer dos últimos PCs/opcodes executados no Core0 e, na
+        // PRIMEIRA vez que o PC cai na página de vetores baixos (0x00..0x1f), despeja
+        // a proveniência completa (últimos PCs, CPSR/modo/LR/SP, TID/SID, conteúdo
+        // do vetor). Gated por ZEEBO_PC14 — não altera o boot quando ausente.
+        static const bool pc14_on = std::getenv("ZEEBO_PC14") != nullptr;
+        if (pc14_on) {
+            static constexpr int RB = 24;
+            static u32 rb_pc[RB] = {0}, rb_op[RB] = {0};
+            static int rb_i = 0;
+            static bool dumped = false;
+            u32 op_here = 0; uc_mem_read(uc, (u32)ad, &op_here, 4);
+            rb_pc[rb_i] = (u32)ad; rb_op[rb_i] = op_here; rb_i = (rb_i + 1) % RB;
+            if (!dumped && (u32)ad < 0x20) {
+                dumped = true;
+                u32 r[16] = {0};
+                for (int i = 0; i < 16; i++) uc_reg_read(uc, UC_ARM_REG_R0 + i, &r[i]);
+                u32 cpsr = 0, spsr = 0, sp = 0, lr = 0;
+                uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                uc_reg_read(uc, UC_ARM_REG_SPSR, &spsr);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                u32 tid = sys->thread_table_.current_tid();
+                u32 tsid = sys->thread_table_.thread_space(tid);
+                u32 asid = sys->space_manager_.active_sid();
+                fprintf(stderr, "\n[PC14] ==== Core0 entrou na pagina de vetores baixos ad=0x%08x insns=%llu ====\n",
+                        (u32)ad, (unsigned long long)sys->core0_.insns);
+                fprintf(stderr, "[PC14] CPSR=0x%08x modo=0x%02x T=%d LR=0x%08x SP=0x%08x SPSR=0x%08x\n",
+                        cpsr, cpsr & 0x1f, (cpsr >> 5) & 1, lr, sp, spsr);
+                fprintf(stderr, "[PC14] TID=0x%x TSID=0x%x active_sid=0x%x has_space=%d\n",
+                        tid, tsid, asid, (int)sys->space_manager_.has_space(tsid));
+                for (int i = 0; i < 16; i += 4)
+                    fprintf(stderr, "[PC14] r%-2d=%08x r%-2d=%08x r%-2d=%08x r%-2d=%08x\n",
+                            i, r[i], i+1, r[i+1], i+2, r[i+2], i+3, r[i+3]);
+                // Últimos PCs em ordem cronológica (rb_i aponta o próximo slot livre).
+                fprintf(stderr, "[PC14] trilha (mais antigo -> mais novo):\n");
+                for (int k = 0; k < RB; k++) {
+                    int idx = (rb_i + k) % RB;
+                    if (rb_pc[idx] == 0 && rb_op[idx] == 0) continue;
+                    fprintf(stderr, "[PC14]   pc=0x%08x op=0x%08x\n", rb_pc[idx], rb_op[idx]);
+                }
+                // Conteúdo bruto da página de vetores (0x00..0x3f).
+                u32 vec[16] = {0};
+                for (int i = 0; i < 16; i++) uc_mem_read(uc, i * 4u, &vec[i], 4);
+                fprintf(stderr, "[PC14] vetores 0x00..0x3c:");
+                for (int i = 0; i < 16; i++) fprintf(stderr, " %02x:%08x", i*4, vec[i]);
+                fprintf(stderr, "\n");
+                // Dump do objeto apontado por r4 (dispatch alvo) e do contexto r0/r9.
+                auto dump = [&](const char* tag, u32 base) {
+                    u32 w[8] = {0};
+                    for (int i = 0; i < 8; i++) uc_mem_read(uc, base + i*4u, &w[i], 4);
+                    fprintf(stderr, "[PC14] %s @0x%08x:", tag, base);
+                    for (int i = 0; i < 8; i++) fprintf(stderr, " %08x", w[i]);
+                    fprintf(stderr, "\n");
+                };
+                dump("obj[r4]", r[4] & ~0x1fu);
+                dump("ctx[r0]", r[0] & ~0x1fu);
+                dump("code@b04001c0", 0xb04001c0);
+                dump("code@b0400180", 0xb0400180);
+                // A instrução no PC-2 (Thumb) e PC-4 (ARM) do último salto real.
+                fflush(stderr);
+            }
+        }
+
         // [QW99] Instrumentação read-only da entrada do scatterload em 0xb0400000.
         // Loga TID, SID ativo, SP/LR, offset físico de backing e hash de 252B em
         // 0xb04151a4, a cada entrada em 0xb0400000. Gated por ZEEBO_QW99.
