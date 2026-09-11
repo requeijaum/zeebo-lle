@@ -2356,27 +2356,29 @@ contém somente mudanças deliberadas.
 
 Estado dos dez bugs: 1/2 (`cd7da2f`), 3 (`68a477d`), 4 (`3808767`/`b4a4d35`),
 7 (`03b29c7`), 8 (`3e3e563`), 9 (`19a1a4b8`) e 10 (`18caa09`/`350984c`) estão
-integrados com controles negativos. **5 e 6 foram reabertos pela auditoria**: modelos
-isolados não satisfazem o caminho real do firmware. Os números deste painel são os do
-backlog de dez bugs, não as subseções de `AUDIT_2026-09-10.md`.
+integrados com controles negativos. **5 e 6 foram reabertos pela auditoria e
+corrigidos no caminho de produção**: Bug 6 em `128d80d`; Bug 5 em `0a88d98` +
+`f7938c5`. O gate de acesso vivo pelo firmware continua separado abaixo. Os números
+deste painel são os do backlog de dez bugs, não as subseções de
+`AUDIT_2026-09-10.md`.
 
-- [ ] Bug 5: ligar leituras/escritas MMIO do guest **em `zeebo_lle_main`** aos modelos
+- [x] Bug 5: ligar leituras/escritas MMIO do guest **em `zeebo_lle_main`** aos modelos
   VIC/GPT por um decoder compartilhado com os testes. Escritas em ENABLE/MATCH/
-  INTENABLE/ACK/EOI devem alterar o modelo; ligação apenas em `zeebo_dual_core` ou RAM
-  plana não conta. Resolver por evidência primária a divergência de base GPT/CSR
-  (`0xc0100000` versus `0xc5000000`) antes de declarar o mapa correto.
-- [ ] Modelar `pending`, `enabled` e `in_service`; não redeliver a mesma IRQ antes do
-  EOI nem sobrescrever `LR_irq/SPSR_irq`.
-- [ ] Substituir `ticks = instruções Core0 + instruções Core1` por tempo virtual
-  determinístico independente dos dois cores, calibrado contra polling observado.
-- [ ] Bug 6: resolver a colisão `PCOM_CMD_RESET_MODEM == PCOM_CMD_DONE == 1` usando
-  estado shadow real (`pending_cmd/has_pending`) ou estado equivalente. O Core1 deve
-  ser o único produtor da conclusão, **fora de `UC_HOOK_MEM_WRITE` e após o STR guest**;
-  escrever DONE dentro do hook antes da store original permite que o comando o
-  sobrescreva e não fecha o gate.
-- [ ] Criar testes de integração pelo caminho de produção: escrita guest MMIO → GPT →
+  INTENABLE/ACK/EOI alteram o modelo. `f7938c5` fecha a divergência observada: página
+  de timers em `0xc5000000`, sub-banco GPT em `0xc5000100`, COUNT em
+  `0xc5000108` e ACK em `0xc500010c`; o mutante do offset antigo fica vermelho.
+- [x] Modelar `pending`, `enabled` e `in_service`; não redeliver a mesma IRQ antes do
+  EOI nem sobrescrever `LR_irq/SPSR_irq` (`0a88d98`/`f7938c5`).
+- [x] Substituir `ticks = instruções Core0 + instruções Core1` por tempo virtual
+  determinístico independente dos dois cores (`tick_slice()`).
+- [x] Bug 6: resolver a colisão `PCOM_CMD_RESET_MODEM == PCOM_CMD_DONE == 1` usando
+  estado shadow real (`pending_cmd/has_pending`) ou estado equivalente. Em `128d80d`,
+  o Core1 é o único produtor da conclusão, fora de `UC_HOOK_MEM_WRITE` e após o STR
+  guest; o mutante síncrono fica vermelho.
+- [x] Criar testes de integração pelo caminho de produção: escrita guest MMIO → GPT →
   VIC → exceção → ACK/EOI; e Core0 escreve RESET_MODEM → SMEM → Core1 atende → Core0
-  observa DONE/status.
+  observa DONE/status. Os testes exercitam os adaptadores usados por
+  `zeebo_lle_main`, não cópias isoladas.
 
 Gate P1: além do teste unitário e do mutante vermelho, o firmware executa os acessos
 MMIO/SMEM reais e a variável defeituosa muda. Modelo não conectado = item aberto.
