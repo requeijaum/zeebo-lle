@@ -52,6 +52,7 @@
 #include "zeebo_shared_memory.h"
 #include "zeebo_cli_paths.h"
 #include "zeebo_dynarmic_core.h"
+#include "zeebo_slide_detector.h"
 
 using u8  = uint8_t;
 using u16 = uint16_t;
@@ -449,11 +450,9 @@ struct CoreState {
     u32 entry = 0;
     u64 insns = 0;
     bool halted = false;
-    // Slide-detector: rastreia avanco linear de PC (+4) sem branch tomado.
-    u32 slide_last_pc = 0;      // PC da insn anterior
-    u32 slide_run = 0;          // quantas insns consecutivas avancaram +4
-    bool slide_tripped = false; // ja disparou o aviso (evita spam)
-    u32 slide_blank_run = 0;    // insns blank/NOP consecutivas (slide real)
+    // Slide-detector (bug 8): agora orientado a BLOCO (UC_HOOK_BLOCK), sem
+    // uc_mem_read por instrucao. Ver zeebo_slide_detector.h.
+    zeebo::SlideDetector slide;
 };
 
 // Ring buffer do console do kernel OKL4 no Core1 (medido no firmware:
@@ -2751,6 +2750,28 @@ private:
         uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
 
+        // Slide-detector (bug 8): opera na fronteira de BLOCO, nao por
+        // instrucao. OPT-IN (diagnostico): so e' instalado quando o usuario
+        // pede via ZEEBO_SLIDE_DETECT (ou define ZEEBO_SLIDE_LIMIT). Motivo:
+        // um unico bloco basico linear grande e legitimo (ex.: init/memcpy
+        // desenrolado, tabela de saltos preenchida) pode ultrapassar o limite
+        // e disparar um falso positivo em execucao normal. Deixando o detector
+        // desligado por padrao, nenhuma execucao real e' abortada por engano;
+        // quem investiga um derail de entry ativa o hook explicitamente.
+        {
+            static uc_hook h_slide;
+            core1_.slide = zeebo::SlideDetector{};
+            bool enable = (std::getenv("ZEEBO_SLIDE_DETECT") != nullptr);
+            if (const char* s = std::getenv("ZEEBO_SLIDE_LIMIT")) {
+                unsigned v = (unsigned)strtoul(s, nullptr, 0);
+                if (v) { core1_.slide.slide_limit = v; enable = true; }
+            }
+            if (enable) {
+                uc_hook_add(core1_.uc, &h_slide, UC_HOOK_BLOCK,
+                            (void*)c1_block_hook, this, 0, ~0ULL);
+            }
+        }
+
 
 
         // Console do kernel OKL4 (Core1). O putchar do kernel (0xf000e6e0) grava
@@ -3693,6 +3714,25 @@ private:
         }
     }
 
+    // Slide-detector (bug 8): roda uma vez POR BLOCO BASICO do Core1, nao por
+    // instrucao. size = bytes do bloco; size/4 = insns lineares sem branch
+    // tomado. Nenhum opcode e' lido no caminho quente. Preserva a mesma
+    // semantica de diagnostico do detector antigo (halt + mensagem).
+    static void c1_block_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
+        ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
+        CoreState& c = sys->core1_;
+        if (c.slide.on_block((u32)ad, size / 4)) {
+            printf("\n[Core1][SLIDE-DETECT] NOP-slide/derail detectado @0x%08x "
+                   "(run=%u insns lineares sem branch tomado, limite=%u). Entry "
+                   "provavelmente errado — abortando execucao do Core1 em vez de "
+                   "rodar cego ate 0xfffffe.\n",
+                   (u32)ad, c.slide.linear_run, c.slide.slide_limit);
+            fflush(stdout);
+            c.halted = true;
+            uc_emu_stop(uc);
+        }
+    }
+
     static void c1_code_hook(uc_engine* uc, uint64_t ad, uint32_t size, void* ud) {
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core1_.insns++;
@@ -3792,78 +3832,15 @@ private:
         if (sys->rex_split_id_ && rex_in_heap((u32)ad))
             sys->rex_restore_code((u32)ad, size?size:4);
 
-        // ── Slide-detector (Item 1) ────────────────────────────────────────
-        // Se o PC avanca estritamente +4 (ARM) por N insns consecutivas sem
-        // nenhum branch tomado — ou entra em area zerada/NOP — o Core1 esta
-        // "escorregando" (NOP-slide): entry errado, sem preambulo de reset.
-        // Detectamos em milissegundos em vez de rodar 90s cegos ate crashar
-        // em pc=0x00fffffe (padrao de ouro do Rafael: bytes/branches reais).
-        {
-            CoreState& c = sys->core1_;
-            u32 pc = (u32)ad;
-
-            u32 insn = 0;
-            bool have_insn = (uc_mem_read(uc, ad, &insn, 4) == UC_ERR_OK);
-
-            // Detecta se a insn ARM eh um branch/call/escrita-de-PC real.
-            // Um NOP-slide autentico NAO contem nenhum destes por centenas de
-            // instrucoes; um loop de init (bl, beq, ble, pop {..,pc}) contem.
-            bool is_ctrl_flow = false;
-            if (have_insn) {
-                u32 cond = insn >> 28;
-                u32 op   = (insn >> 25) & 0x7;   // bits[27:25]
-                // B / BL: cond xxxx 101L ...
-                if (op == 0x5) is_ctrl_flow = true;
-                // BX/BLX/BXJ: cond 0001 0010 .... 000L1 Rm (bits[27:20]=0x12)
-                if ((insn & 0x0ff000f0) == 0x01200010 ||  // BX
-                    (insn & 0x0ff000f0) == 0x01200030)    // BLX reg
-                    is_ctrl_flow = true;
-                // BLX imm (cond==1111, bits[27:25]==101)
-                if (cond == 0xf && op == 0x5) is_ctrl_flow = true;
-                // Qualquer insn que escreve Rd=PC (r15): data-proc/ldr/mov pc,..
-                // Rd em bits[15:12] para data-proc/ldr single.
-                {
-                    u32 top3 = (insn >> 26) & 0x3;    // 00=dp/mul, 01=ldr/str
-                    u32 rd   = (insn >> 12) & 0xf;
-                    if ((top3 == 0x0 || top3 == 0x1) && rd == 0xf)
-                        is_ctrl_flow = true;
-                }
-                // LDM/POP com PC na lista (bit 15): cond 100x xxxx .... 1xxx...
-                if (op == 0x4 && (insn & 0x00008000)) is_ctrl_flow = true;
-            }
-
-            if (c.slide_last_pc != 0 && pc == c.slide_last_pc + 4 && !is_ctrl_flow) {
-                c.slide_run++;
-            } else {
-                // branch tomado / PC nao-linear / insn de control-flow -> reset.
-                // Loops legitimos de init (bl/beq/ble/pop pc) zeram aqui e nunca
-                // acumulam a run linear necessaria para tripar o detector.
-                c.slide_run = 0;
-            }
-            c.slide_last_pc = pc;
-
-            // Detecta area zerada/NOP: exige uma RUN de blanks, nao um unico
-            // blank isolado (evita falso positivo em constantes/dados inline).
-            bool blank_insn = have_insn &&
-                (insn == 0x00000000 || insn == 0xe1a00000 || insn == 0xffffffff);
-            if (blank_insn) c.slide_blank_run++; else c.slide_blank_run = 0;
-
-            const u32 SLIDE_LIMIT = 256;       // insns lineares SEM branch => derail
-            const u32 BLANK_LIMIT = 64;        // blanks consecutivos => slide real
-            bool blank = (c.slide_blank_run >= BLANK_LIMIT);
-            if (!c.slide_tripped && (c.slide_run >= SLIDE_LIMIT || blank)) {
-                c.slide_tripped = true;
-                printf("\n[Core1][SLIDE-DETECT] NOP-slide detectado @0x%08x "
-                       "(run=%u linear+4, blank_run=%u). Entry provavelmente errado — "
-                       "abortando execucao do Core1 em vez de rodar cego ate 0xfffffe.\n",
-                       pc, c.slide_run, c.slide_blank_run);
-                fflush(stdout);
-                sys->core1_.halted = true;
-                uc_emu_stop(uc);
-                return;
-            }
-        }
+        // ── Slide-detector (bug 8): movido para UC_HOOK_BLOCK ──────────────
+        // O detector antigo vivia AQUI (uma vez por instrucao) e fazia um
+        // uc_mem_read incondicional do opcode so para reconhecer control-flow
+        // — o fetch mais quente do Core1. Agora a deteccao acontece em
+        // c1_block_hook(): a fronteira de bloco basico do Unicorn JA e' o
+        // sinal de branch tomado, entao nenhum opcode e' lido no hot path.
+        // Ver zeebo_slide_detector.h e c1_block_hook().
         // ───────────────────────────────────────────────────────────────────
+
 
         if (!sys->c1_script_hooks_.empty()) {
             auto it = sys->c1_script_hooks_.find((u32)ad);
