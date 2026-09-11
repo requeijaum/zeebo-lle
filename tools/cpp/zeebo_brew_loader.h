@@ -71,9 +71,11 @@ struct BrewSymbols {
     // Confirmado subindo no boot recente (commit "vetor BREW/AEECShell").
     u32 aeecshell_dispatch_va = 0x10c874f4;
     // Entradas de despacho a resolver via RE / reaproveitar do mod_probe.
-    u32 ishell_create_va   = 0;  // ISHELL_CreateInstance(pShell, clsid, ppOut)
-    u32 aeemod_load_va     = 0;  // AEEMod_Load(pIModule, ...)
-    u32 aeeclscreate_va    = 0;  // AEEClsCreateInstance(clsid, pShell, pModule, ppObj)
+    // Localizadas no segmento 11 do APPS.bin (VA base 0x1013a000):
+    u32 ishell_create_va   = 0x105c7fb4;  // ISHELL_CreateInstance(pShell, clsid, ppOut)
+    u32 aeemod_load_va     = 0;           // AEEMod_Load(pIModule, ...)
+    u32 aeeclscreate_va    = 0;           // AEEClsCreateInstance(clsid, pShell, pModule, ppObj)
+    u32 aeeappletnew_va    = 0x105322f2;  // AEEAppletNew (ZeeboApp applet entry)
 };
 
 // ── Eventos e teclas BREW (AEEEvent / AVKType) ───────────────────────────────
