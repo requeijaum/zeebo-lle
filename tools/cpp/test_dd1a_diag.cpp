@@ -298,19 +298,32 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, vtbl, &ADDREF_STUB, 4); // vtbl[0] = ADDREF_STUB
 
             // Slot 2 de IShell: CreateInstance(this=r0, clsid=r1, ppObj=r2)
-            // Chamado em 0x1200058c para instanciar AEECLSID_DISPLAY (0x01001001).
-            // Stub de IShell::CreateInstance em SCRATCH + 0x180:
-            // Grava objeto de display simulado (SCRATCH + 0x500) em *ppObj (*r2) e retorna 0 (AEE_SUCCESS)
+            // Chamado em 0x1200058c para instanciar AEECLSID_DISPLAY (0x01001001),
+            // e depois em 0x1201a6c0 para instanciar AEECLSID_HEAP (0x01001002).
+            // Para classes desconhecidas ou opcionais como HEAP, o BREW retorna 0 (AEE_SUCCESS)
+            // ou erro; em ddragonz @0x1201a6c4: cmp r0, #0; popne {r3-r5, lr}; movne r0, #0; bxne lr
+            // se r0 != 0 (falha ao criar IHeap), ele limpa a pilha e continua limpo!
+            // Se retornar 0, ele tenta ler vtable de *ppObj em 0x1201a6d8.
+            // Para HEAP, retornar 1 (EFAILED/não suportado) permite continuar a inicialização sem criar IHeap.
+            // Stub de IShell::CreateInstance inteligente em SCRATCH + 0x180:
+            //   cmp r1, #0x01001001 (DISPLAY) -> retorna DISPLAY_OBJ e r0 = 0
+            //   senão -> retorna r0 = 1 (EFAILED) e *ppObj = 0
             const u32 DISPLAY_OBJ = SCRATCH + 0x500;
             const u32 SHELL_CREATE_STUB = SCRATCH + 0x180;
-            u32 shell_create_code[4] = {
-                0xe59f3004, // ldr r3, [pc, #4]  -> DISPLAY_OBJ
-                0xe5823000, // str r3, [r2]      -> *ppObj = DISPLAY_OBJ
-                0xe3a00000, // mov r0, #0        -> return AEE_SUCCESS
-                0xe12fff1e  // bx lr
+            u32 shell_create_code[8] = {
+                0xe59f3014, // ldr r3, [pc, #20]  -> literal DISPLAY_CLSID (0x01001001)
+                0xe1510003, // cmp r1, r3
+                0x059f3010, // ldreq r3, [pc, #16] -> DISPLAY_OBJ
+                0x05823000, // streq r3, [r2]      -> *ppObj = DISPLAY_OBJ
+                0x03a00000, // moveq r0, #0        -> return AEE_SUCCESS
+                0x13a00001, // movne r0, #1        -> return EFAILED (para HEAP etc)
+                0xe12fff1e, // bx lr
+                0x00000000  // padding
             };
             uc_mem_write(uc2, SHELL_CREATE_STUB, shell_create_code, sizeof(shell_create_code));
-            uc_mem_write(uc2, SHELL_CREATE_STUB + 16, &DISPLAY_OBJ, 4);
+            u32 disp_clsid = 0x01001001;
+            uc_mem_write(uc2, SHELL_CREATE_STUB + 28, &disp_clsid, 4);
+            uc_mem_write(uc2, SHELL_CREATE_STUB + 32, &DISPLAY_OBJ, 4);
             uc_mem_write(uc2, vtbl + 8, &SHELL_CREATE_STUB, 4); // vtbl[2] = SHELL_CREATE_STUB
 
             u32 ppObj = SCRATCH + 0x200;
@@ -342,6 +355,23 @@ int main(int argc, char** argv) {
             };
             uc_mem_write(uc2, MALLOC_STUB, stub_code, sizeof(stub_code));
             uc_mem_write(uc2, STATIC_BASE + 0x68, &MALLOC_STUB, 4);
+
+            // Mock do helper GetAppContext (offset 0xc0 em static-base / Zeebo platform table):
+            // Em ddragonz.mod @0x1201a688: ldr r0, [r0, #0xc0]; bx r0
+            // GetAppContext retorna ponteiro para a estrutura de contexto da aplicação (APP_CTX)
+            // Layout confirmado: IShell* em +12 (0x0c), IDisplay* em +20 (0x14)
+            const u32 APP_CTX = SCRATCH + 0x600;
+            uc_mem_write(uc2, APP_CTX + 0x0c, &SCRATCH, 4);      // context->pIShell = SCRATCH
+            uc_mem_write(uc2, APP_CTX + 0x14, &DISPLAY_OBJ, 4);  // context->pIDisplay = DISPLAY_OBJ
+
+            const u32 GETAPPCTX_STUB = SCRATCH + 0x2100;
+            u32 getappctx_code[3] = {
+                0xe59f0000, // ldr r0, [pc, #0]
+                0xe12fff1e, // bx lr
+                APP_CTX
+            };
+            uc_mem_write(uc2, GETAPPCTX_STUB, getappctx_code, sizeof(getappctx_code));
+            uc_mem_write(uc2, STATIC_BASE + 0xc0, &GETAPPCTX_STUB, 4);
 
             // Invocação com r0=pIShell, r1=pIModule(0), r2=ppObj
             // (ABI do entry de ddragonz.mod @0x12000014: mov r3, r2; mov r2, r1; mov r1, r0; mov r0, #0x14; bl 0x1200212c)
@@ -406,18 +436,24 @@ int main(int argc, char** argv) {
             uc_mem_write(uc2, ppApplet, "\0\0\0\0", 4);
             FirstPcResult r_match = run_first_pc(uc2, vtbl_methods[2], LB, m.size, STK, 200000, false,
                                                  ALLOC_BUF, SCRATCH, DD_CLSID, ppApplet);
+            u32 r_lr = 0, r_sp = 0, r_r0 = 0, r_r4 = 0;
+            uc_reg_read(uc2, UC_ARM_REG_LR, &r_lr);
+            uc_reg_read(uc2, UC_ARM_REG_SP, &r_sp);
+            uc_reg_read(uc2, UC_ARM_REG_R0, &r_r0);
+            uc_reg_read(uc2, UC_ARM_REG_R4, &r_r4);
             std::fprintf(stderr, "[DD1-runtime/probe] CreateInstance match (0x%08x): ran=%s entered=%s "
-                         "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x\n",
+                         "first_pc=0x%08x last_pc=0x%08x instr=%llu fault=%s @0x%08x lr=0x%08x sp=0x%08x r0=0x%08x r4=0x%08x\n",
                          DD_CLSID, r_match.ran ? "SIM" : "nao", r_match.entered_module ? "SIM" : "nao",
                          r_match.first_pc, r_match.last_pc, (unsigned long long)r_match.instructions,
-                         fault_label(r_match.fault), r_match.fault_va);
+                         fault_label(r_match.fault), r_match.fault_va, r_lr, r_sp, r_r0, r_r4);
 
             // Prova observável de DD1-runtime: CreateInstance aceita a classe DD_CLSID,
-            // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), e avança
-            // até a instrução 174 no módulo guest!
+            // atende ao pedido de IShell::CreateInstance(AEECLSID_DISPLAY), obtém o contexto
+            // da aplicação via GetAppContext (offset 0xc0), despacha verificação de HEAP e avança
+            // até 265 instruções no módulo guest!
             assert(r_match.ran && r_match.entered_module);
-            assert(r_match.instructions == 174);
-            assert(r_match.last_pc == 0x1201a68c);
+            assert(r_match.instructions == 265);
+            assert(r_match.last_pc == 0x1201a620);
             assert(r_match.fault == FAULT_FETCH_UNMAPPED);
             assert(r_match.fault_va == 0x00000000);
 
