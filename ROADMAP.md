@@ -1506,6 +1506,199 @@ Ela não é um descompressor genérico isolado, mas um despachante de inicializa
 1. **Fase Rápida/Fácil (Próxima etapa)**: Repristinar o buffer original de 252 bytes em `0xb04151a4` (obtido da imagem limpa do ELF) quando uma nova task re-executar o vetor de inicialização, ou preservar/restaurar no chaveamento de contexto. Isso neutraliza o underflow e permite medir se a Task 2 também completa o init e avança para `b0410070`.
 2. **Fase Estrutural/Difícil**: Implementar separação real de address space (múltiplas instâncias de `uc_engine` por L4 space ID ou comutação dinâmica de TLB/page tables baseada no `sid` do `handle_map_control`).
 
+### QW89-QW96 — Plano auditado: quick win de BOOT primeiro, correção estrutural depois
+
+Esta seção substitui a formulação imprecisa de que existiriam "quatro bloqueios
+imediatos" equivalentes. A auditoria do código e uma nova execução viva mostraram que
+eles pertencem a etapas diferentes:
+
+| item | estado exato | bloqueia o ponto atual? | falta concreta |
+|---|---|---|---|
+| Address spaces/tasks do Core0 | **bloqueio atual provado** | **SIM**: Core0 para na segunda execução do scatterload | selecionar memória por `sid`/PD e preservar contexto por thread |
+| SMEM/SMSM/ProcComm | **defeito arquitetural provado** | ainda **não provado como a próxima barreira**; o Core0 para antes | mesmo backing host mapeado nos dois cores; completion após o STR guest |
+| IRQ/FIQ/VIC/GPT | **subsistema ausente provado** | ainda **não provado como a barreira atual**; o caminho observado progride por polling/cooperativo | VIC ativo, pending/mask/ack, entrada/retorno IRQ e timer compare→IRQ |
+| BREW/game loader | **gap posterior, parcialmente implementado** | **NÃO bloqueia o firmware em `b040`;** bloqueará o jogo depois do AEECShell | loader raw `.mod`, CreateInstance real, VFS e handler do objeto real |
+
+#### QW89 — testemunha que faltava: identidade da segunda execução
+
+Execução reproduzida (interpretador puro):
+
+    ZEEBO_TBL_DBG=1 ZEEBO_SYSCALL_HIST=1 \
+      ./zeebo_lle_main --headless --boot-appmgr --seconds=45
+
+Os três servidores são criados pelo firmware:
+
+    ig_naming       tid=0x80008001  sp=b0147f24  ip=b0100000
+    quartz_servers  tid=0x8000c001  sp=b0327f24  ip=b0300000
+    AMSS/BREW       tid=0x80010001  sp=b0e1ff0c  ip=10137000
+
+O primeiro scatterload roda antes de `ThreadTable.current_tid` ser estabelecido:
+
+    tid=0           sp=b0046f7c  lr=b000c3fc  -> entradas 0,1,2 -> Z=1
+
+Depois, a reentrada problemática foi identificada sem inferência por pilha:
+
+    tid=8000c001    sp=b0327e3c  lr=b0302dd1  -> entradas 0,1 -> underflow
+
+Logo, a segunda execução pertence especificamente a **`quartz_servers`**, e o LR
+Thumb `b0302dd1` retorna ao código do próprio quartz. Não é uma continuação acidental
+do primeiro laço. O firmware está iniciando o mesmo runtime/scatterload em outro PD,
+mas o emulador lhe entrega a área gravável já transformada pela primeira execução.
+
+A raiz no código é composta, não apenas "um `uc_open`":
+
+1. `handle_map_control(..., sid, ...)` imprime `sid`, mas todos os `map_one` caem no
+   mesmo `core0_.uc`; não existe tabela de mapas por `sid`.
+2. `ThreadInfo` guarda apenas `tid/sp/ip/flags`; não guarda `space_id`, registradores
+   gerais, CPSR nem contexto Unicorn completo.
+3. `MapControl` de query ecoa os MRs da requisição em vez de consultar um mapa por PD;
+   fpage nil/unmap é ignorada.
+4. O scheduler cooperativo troca somente PC/SP. Isso não é contexto L4 completo e
+   precisa ser corrigido junto da separação de espaços para o fix estrutural.
+
+#### QW90 — Quick win diagnóstico (primeiro ataque)
+
+**Objetivo limitado:** fazer `quartz_servers` atravessar a segunda inicialização e
+revelar a próxima fronteira. Isto NÃO será chamado de boot concluído nem de correção
+de MMU.
+
+Implementação mínima, sempre atrás de flag explícita de investigação:
+
+1. Em `load_apps`, antes de descartar o vetor do ELF, salvar os **252 bytes pristinos**
+   `[b04151a4,b04152a0)` e seu hash. Não copiar bytes de outro binário nem regenerar
+   a saída do decoder.
+2. No `c0_code_hook`, detectar a segunda entrada em `b0400000/b0400008` somente quando
+   `current_tid==0x8000c001` e o SP estiver na pilha `b032xxxx`; restaurar os 252 bytes
+   **antes** da entrada 0. Não pular instrução, não alterar `r4`, PC ou retorno.
+3. Logar `restore_count`, `tid`, SP e hash antes/depois. Exigir exatamente uma
+   restauração; repetição inesperada é falha.
+4. Remover/desligar a flag após a medição. O mecanismo corrompe o estado privado do
+   primeiro PD no mapa plano e, portanto, é deliberadamente descartável.
+
+Gates obrigatórios:
+
+| gate | baseline/controle | experimento |
+|---|---|---|
+| instrumento positivo | primeira execução chega a `Z=1`/`b0410070` | continua chegando |
+| causalidade | flag OFF: segunda execução chega à entrada 1 e `r4=ffffffff` | flag ON: segunda execução conclui entradas 0/1/2 e chega a `Z=1` |
+| progresso externo | `MapControl=756`, 100% da janela em `b0400064-6e` | contador/evento externo novo OU PC fora de `b040` sustentado por janela |
+| controle inválido | APPS inválido não passa do loader/ELF | não pode receber restore/PASS |
+| regressão | `make check`, interpretador puro | mesmos testes + teste RED que reproduz os bytes sobrescritos |
+
+**STOP:** se só o contador de instruções aumentar, ou se a Task 2 sair do laço mas
+produzir PC/dados inválidos, o quick win falhou. Registrar a nova fronteira e não
+empilhar outro patch de PC/registrador.
+
+#### QW91 — Fix estrutural de address spaces (segundo ataque, difícil)
+
+Fazer em quatro entregas verificáveis, não em um rewrite único:
+
+1. `AddressSpaceTable`: mapa `(sid,va)->(phys,size,perms,attr)` com query e unmap reais.
+2. Associar `tid -> sid` durante `SpaceControl`/`ThreadControl`/BootInfo; salvar/restaurar
+   contexto completo (`uc_context`) por thread, não só PC/SP.
+3. Fazer a troca de espaço **fora** de code/intr hooks (fila `pending_space_switch`,
+   drenada depois de `uc_emu_start`, como o fix reentrante QW79). Primeiro protótipo:
+   page-bank por `sid` no mesmo engine; se remap em massa for instável/caro, promover
+   para um `uc_engine` por PD com hooks/dispositivos compartilhados.
+4. Compartilhar apenas páginas físicas explicitamente comuns; writable private de
+   `quartz_servers` deve divergir do root, enquanto páginas realmente concedidas devem
+   manter alias byte-idêntico.
+
+Gate estrutural: duas PDs mapeiam o mesmo VA para backings distintos e mantêm bytes
+independentes; duas VAs/PDs que mapeiam o mesmo PA compartilham bytes; switch A→B→A
+restaura registradores+CPSR+memória; o scatterload completa nos dois PDs **sem restore
+especial de `b04151a4`**. Variar quantum não pode alterar a sequência observável.
+
+#### QW92 — SMEM/SMSM/ProcComm (rápido depois da fronteira Core0)
+
+O comentário `// Shared SMEM 2MB` é falso: `setup_memory_maps()` usa dois
+`uc_mem_map` anônimos e duas inicializações. Correção:
+
+1. Criar backing host de 2 MiB com lifetime do sistema.
+2. Mapear o mesmo ponteiro em Core0 e Core1 via `uc_mem_map_ptr`.
+3. Corrigir ProcComm: hoje o hook escreve `CMD_DONE` antes de o STR original terminar,
+   podendo ser sobrescrito pelo próprio guest. Enfileirar completion e aplicá-la depois
+   da fatia, como QW79.
+4. Remover `dummy_payload(16,0x42)` do caminho de produção; conservar somente fixture
+   explicitamente sintética.
+
+Gate: write guest bidirecional visível byte a byte, estados SMSM/SMD produzidos pelos
+cores, request→completion exatamente uma vez e nenhum pacote host contado como RPC guest.
+Este item é necessário para modem/serviços/áudio, mas só será promovido a bloqueio do
+boot quando uma espera viva em SMEM/doorbell for capturada.
+
+#### QW93 — IRQ/FIQ/VIC/GPT (depois de capturar a primeira dependência)
+
+Hoje VIC e GPT são RAM/ticker: setar bit em `0xc0000000` não entra em modo IRQ, não
+salva CPSR/LR e não vetoriza para `0x18`. Implementar:
+
+1. modelo VIC por core: pending, enable/mask, acknowledge/EOI e prioridade mínima;
+2. injeção ARM correta quando CPSR.I permite, com SPSR/LR_irq e vetor `0x18`;
+3. GPT com contador, compare e geração determinística de IRQ;
+4. teste de retorno real pelo handler e repetibilidade com quanta diferentes.
+
+Não implementar FIQ, todas as linhas e todos os timers de uma vez: começar pela linha
+que uma captura viva provar necessária. Gate positivo: loop guest é interrompido,
+handler reconhece/limpa e retorna ao PC exato. Gate negativo: IRQ mascarada permanece
+pending sem executar handler.
+
+#### QW94 — BOOT orgânico até AppMgr (fronteira B)
+
+`--boot-appmgr` hoje só altera `boot_firstapp_` e mensagens de log; não escreve
+`flixfile.dat` nem muda o fluxo do guest. Fechar BOOT exige:
+
+1. Core0 e Core1 continuarem vivos após os fixes acima;
+2. AEECShell ser alcançado organicamente pelo thread `0x80010001`;
+3. `FIRSTAPP:0` ser observado/fornecido na fronteira real de arquivo/configuração;
+4. PC e eventos dentro do AppMgr real, sem scratch applet e sem handler fixo.
+
+Gate B: cold boot alcança um evento real do AppMgr e o controle com 0:APPS/configuração
+corrompida falha identificavelmente. Isso ainda não significa jogo carregado.
+
+#### QW95 — módulo comercial: LOAD e primeira instrução (fronteiras L/I)
+
+O caminho atual é apenas infraestrutura:
+
+- `resolve_mod_entry()` aceita ELF; `ddragonz.mod` é módulo ARM cru;
+- `BrewSymbols.ishell_create_va/aeemod_load_va/aeeclscreate_va` permanecem zero;
+- `dispatch_applet_start()` ignora `handler_va` e chama sempre o ZeeboApp
+  `0x10532344` com objeto/vtable scratch;
+- `run_zwheel_interactive()` pinta azul no host;
+- o parser MIF varre qualquer u32 parecido com CLSID e não resolve DD de forma estrutural;
+- `--boot-appmgr` não seleciona FIRSTAPP no guest.
+
+Ordem: parser MIF real (`CLSID=0x0102F789`) → formato/relocs/imports/ZI do `.mod` cru →
+`AEEMod_Load` → `ISHELL_CreateInstance`/`AEEClsCreateInstance` → objeto+HandleEvent reais →
+primeiro PC dentro da faixa carregada do DD. Arquivo inválido, MIF truncado e CLSID errado
+devem falhar antes da execução. O estado deve distinguir `loaded_only`, `instanced` e
+`executed`.
+
+#### QW96 — lista completa após primeira instrução do jogo (F/N/A)
+
+1. **VFS/armazenamento:** overlay read-only para `fs:/mmc4/mod/274754`, MIF e assets;
+   open/read/seek/stat/close na fronteira guest real; remover `data.ggz` deve falhar.
+2. **Frame guest:** resolver objeto vivo IDisplay/IBitmap/IGL/IEGL e ligar ao
+   SoftRasterizer; clear azul/contador de draw não contam. Controle inválido não gera frame.
+3. **Input/tempo:** eventos e callbacks/timers no objeto DD real; o loop atual descarta
+   callbacks expirados. Sequência deve avançar splash→menu→fase e key-up não pode prender.
+4. **Áudio:** requisição guest → SMD/ONCRPC real → buffer/codec → mixer → SDL/WAV;
+   sem dummy, com request/completion correlacionados. QDSP5 continua congelado até liberação.
+5. **Periféricos sob demanda:** syscalls reais ainda ausentes `0x1c/0x20/0x24/0x28`;
+   RTC, GPIO/TLMM, SDCC/MMC, clocks/reset e PMIC entram somente quando um trace vivo os exigir.
+
+Marcos não intercambiáveis:
+
+    B = AppMgr orgânico
+    L = módulo DD carregado e instanciado
+    I = primeiro PC dentro do DD
+    F = primeiro frame produzido pelo DD
+    N = input altera estado do DD
+    A = PCM originado pelo DD
+
+Somente `B+L+I+F+N+A`, com controle negativo e uma sessão reproduzível de partida,
+permite marcar Double Dragon jogável. Nenhum desses marcos é fechado por bytes copiados,
+frame azul, SDL aberto ou contador maior.
+
 ### QW81-QW87 — Causa raiz do Core0: **um unico address space para todas as tasks**  **[MEDIDO — bloqueio arquitetural]**
 
 Com o teto de 45s removido (QW78-80), rodei ate 180s: `insns=640.944.226`, sem
