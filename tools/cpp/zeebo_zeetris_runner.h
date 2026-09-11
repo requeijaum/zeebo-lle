@@ -697,13 +697,21 @@ public:
             return false;
         }
 
-        // Contexto do Applet [pApplet + 0x20]
-        u32 app_ctx_va = 0x30010000u;
-        uc_mem_write(uc, ctx.pApplet + 0x20, &app_ctx_va, 4);
-
-        // Preenche campos do AppContext: IShell (+12) e IDisplay (+20)
-        uc_mem_write(uc, app_ctx_va + 12, &ishell_ptr, 4);
-        uc_mem_write(uc, app_ctx_va + 20, &idisplay_ptr, 4);
+        // Contexto do Applet [pApplet + 0x20].
+        // ATENÇÃO: este AppContext é FABRICADO pelo runner (região zero em
+        // 0x30010000), não é o contexto que o BREW/CRT do jogo criaria. Fica
+        // env-gated para poder medir a hipótese de que é ele que mantém o jogo
+        // num estado "vazio" — com o gate ligado, o jogo fica com o que ele
+        // mesmo puser ali (ou com o que o .mod trouxer).
+        if (!std::getenv("ZEEBO_ZEETRIS_NO_APPCTX")) {
+            u32 app_ctx_va = 0x30010000u;
+            uc_mem_write(uc, ctx.pApplet + 0x20, &app_ctx_va, 4);
+            uc_mem_write(uc, app_ctx_va + 12, &ishell_ptr, 4);
+            uc_mem_write(uc, app_ctx_va + 20, &idisplay_ptr, 4);
+        } else {
+            std::printf("[ZeetrisRunner] ZEEBO_ZEETRIS_NO_APPCTX: AppContext NAO "
+                        "injetado (medindo a hipotese)\n");
+        }
 
         ctx.is_running = true;
         std::printf("[ZeetrisRunner] Ciclo de vida inicializado com sucesso (Applet @ 0x%08x, Gameloop @ 0x%08x)\n",

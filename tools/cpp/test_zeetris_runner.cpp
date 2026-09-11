@@ -257,6 +257,14 @@ int main(int argc, char** argv) {
                     ctx.input_store_calls);
         std::printf("[state] rotina de CARGA DE TEXTURA (0x120056fc): %u execucoes\n",
                     ctx.tex_loader_calls);
+        u32 appctx_field = 0;
+        if (uc_mem_read(uc, ctx.pApplet + 0x20, &appctx_field, 4) == UC_ERR_OK)
+            std::printf("[state] [pApplet+0x20] (AppContext) = 0x%08x  %s\n",
+                        appctx_field,
+                        appctx_field == 0x30010000u ? "(o valor sintetico do runner)"
+                                                    : "(NAO e o sintetico)");
+        std::printf("[state] slots GL tocados: %zu, IGL calls=%u\n",
+                    ctx.igl_slot_calls.size(), ctx.igl_calls);
         // Os dois espelhos: o módulo acessa seus dados por 0x003Cxxxx (absoluto)
         // e por 0x123Cxxxx (relocado). Só um deles carrega o estado vivo.
         const u32 bases[2] = {0x123c141cu, 0x003c141cu};
@@ -269,6 +277,14 @@ int main(int argc, char** argv) {
                     std::printf("        [+0x%02x] = 0x%08x (%u)\n", off, v, v);
                 else std::printf("        [+0x%02x] = <nao mapeado>\n", off);
             }
+        }
+        // Flags de tela que o gameloop consulta: sb = app_ctx+0x9000, e o
+        // gameloop lê [sb+0x30] como flag de transição.
+        std::printf("[state] sb = 0x%08x; flags do gameloop:\n", ctx.app_ctx_va + 0x9000);
+        for (u32 off = 0; off <= 0x40; off += 4) {
+            u32 v = 0;
+            if (uc_mem_read(uc, ctx.app_ctx_va + 0x9000 + off, &v, 4) == UC_ERR_OK)
+                std::printf("        [sb+0x%02x] = 0x%08x (%u)\n", off, v, v);
         }
         const u32 ib[2] = {0x123c14acu, 0x003c14acu};
         for (int b = 0; b < 2; ++b) {
