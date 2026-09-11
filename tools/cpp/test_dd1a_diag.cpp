@@ -50,6 +50,30 @@ static std::vector<u8> read_file(const std::string& p) {
     return d;
 }
 
+// Constrói um MIF ESTRUTURALMENTE válido cujo único registro de applet (20 bytes,
+// f4==0 e fc==0) carrega `clsid` — exatamente a forma que zeebo::brew::MifParser
+// reconhece como registro de applet. Espelha a estrutura do 274754.mif real
+// (magic 0x0011, tabela de bounds em 0x10/0x14).
+static std::vector<u8> make_structural_mif(u32 clsid) {
+    std::vector<u8> b(0x64, 0);
+    auto p16 = [&](size_t off, uint16_t v){ std::memcpy(b.data()+off, &v, 2); };
+    p16(0x00, 0x0011);          // magic
+    put32(b, 0x10, 0x20);       // table_offset
+    put32(b, 0x14, 2);          // section_count => 3 bounds
+    put32(b, 0x20, 0x40);       // bound[0]
+    put32(b, 0x24, 0x24);       // bound[1] -> sec0 tamanho não-applet (negativo p/ diff)
+    // corrige ordenação: bounds devem ser crescentes.
+    put32(b, 0x20, 0x40);
+    put32(b, 0x24, 0x50);       // bound[1]: sec0=[0x40,0x50) size 16 (não applet)
+    put32(b, 0x28, 0x64);       // bound[2]: sec1=[0x50,0x64) size 20 (applet)
+    put32(b, 0x50, clsid);      // f0 = clsid
+    put32(b, 0x54, 0);          // f4 = 0 (estrutural)
+    put32(b, 0x58, 7);          // f8 arbitrário
+    put32(b, 0x5c, 0);          // fc = 0 (estrutural)
+    put32(b, 0x60, 1);          // f10 arbitrário
+    return b;
+}
+
 int main(int argc, char** argv) {
     const bool BUGGY = (argc > 1 && std::string(argv[1]) == "buggy");
     std::printf("=== Test DD1a first-PC assisted diagnostic (hybrid/assisted)%s ===\n",
@@ -58,18 +82,60 @@ int main(int argc, char** argv) {
     // Proibição explícita: constante do handler Z-Wheel jamais é o entry real.
     assert(FORBIDDEN_ZWHEEL_HANDLER == 0x10532344u);
 
-    // ── (1) Identidade do pacote — fixtures positivo e negativo ──────────────
+    // ── (1) Identidade do pacote — PROVENIÊNCIA ESTRUTURAL ───────────────────
+    //
+    // App ID: DERIVADO do caminho real (diretório mod/<id>/, arquivo mif/<id>.mif),
+    // com parsing ESTRITO. NÃO é mais o constante DD_APP_ID passado como argumento
+    // (isso tornava app_id_ok tautológico). CLSID: validado na POSIÇÃO ESTRUTURAL
+    // do registro de applet do MIF (zeebo::brew::MifParser), NÃO por varredura cega
+    // de 4 bytes. A varredura crua é apenas CORROBORAÇÃO diagnóstica, nunca
+    // autoridade de identidade.
     {
-        // MIF sintético contendo o CLSID autoritativo em little-endian.
-        std::vector<u8> mif(64, 0);
-        put32(mif, 20, DD_CLSID); // 0x0102F789 em algum offset
-        PackageIdentity ok = validate_package(DD_APP_ID, mif, DD_MOD_SIZE);
-        assert(ok.app_id_ok && ok.clsid_ok && ok.mod_size_ok && ok.valid());
-        assert(ok.clsid == 0x0102F789u);
+        // (1a) Derivação estrita do App ID a partir do caminho.
+        AppIdParse p = parse_app_id_from_path(
+            "/x/.Tuxality/Infuse/brew/mod/274754/ddragonz.mod");
+        assert(p.ok && p.app_id == DD_APP_ID);
+        AppIdParse pm = parse_app_id_from_path("/x/brew/mif/274754.mif");
+        assert(pm.ok && pm.app_id == DD_APP_ID);
 
-        // Negativo: App ID errado, CLSID ausente, tamanho errado → inválido.
+        // Controle: diretório ERRADO → derivação continua, mas app_id_ok falha.
+        AppIdParse wrong = parse_app_id_from_path("/x/brew/mod/999999/ddragonz.mod");
+        assert(wrong.ok && wrong.app_id == 999999u);
+        // Controle: caminho MALFORMADO (não-numérico) → parsing ESTRITO rejeita.
+        assert(!parse_app_id_from_path("/x/brew/mod/27a4b/x.mod").ok);
+        assert(!parse_app_id_from_path("/x/brew/mod/2747540000000/x.mod").ok); // overflow u32
+        assert(!parse_app_id_from_path("/x/brew/mod//x.mod").ok);              // dir vazio
+        assert(!parse_app_id_from_path("/x/brew/mif/274a.mif").ok);            // stem não-numérico
+
+        // (1b) MIF ESTRUTURAL positivo: registro de applet de 20 bytes com o CLSID.
+        std::vector<u8> mif_ok = make_structural_mif(DD_CLSID);
+        PackageIdentity ok = validate_package(
+            "/x/brew/mod/274754/ddragonz.mod", "/x/brew/mif/274754.mif",
+            mif_ok, DD_MOD_SIZE);
+        assert(ok.app_id_ok && ok.app_id == DD_APP_ID);
+        assert(ok.clsid_ok && ok.clsid == 0x0102f789u);
+        assert(ok.clsid_structural);          // veio do registro estrutural
+        assert(ok.mod_size_ok && ok.valid());
+
+        // (1c) Controle CLSID: bytes 0x0102F789 presentes SOMENTE fora de um
+        //      registro estrutural (varredura crua os acha, estrutura NÃO).
+        //      clsid_ok DEVE ser falso; a varredura corrobora mas não decide.
+        std::vector<u8> mif_decoy = make_structural_mif(0x11223344u); // applet real ≠ DD
+        // injeta os 4 bytes do CLSID num ponto arbitrário não-estrutural.
+        mif_decoy.resize(mif_decoy.size() + 8, 0);
+        put32(mif_decoy, mif_decoy.size() - 6, DD_CLSID);
+        PackageIdentity decoy = validate_package(
+            "/x/brew/mod/274754/ddragonz.mod", "/x/brew/mif/274754.mif",
+            mif_decoy, DD_MOD_SIZE);
+        assert(!decoy.clsid_ok);              // estrutura não confirma DD
+        assert(decoy.clsid_scan_corroborates);// varredura crua achou (diagnóstico)
+        assert(!decoy.valid());               // identidade REJEITADA apesar do scan
+
+        // (1d) Controle negativo pleno: App ID errado, CLSID ausente, tamanho errado.
         std::vector<u8> mif_bad(64, 0x55);
-        PackageIdentity bad = validate_package(999999, mif_bad, 1234);
+        PackageIdentity bad = validate_package(
+            "/x/brew/mod/999999/other.mod", "/x/brew/mif/999999.mif",
+            mif_bad, 1234);
         assert(!bad.app_id_ok && !bad.clsid_ok && !bad.mod_size_ok && !bad.valid());
     }
 
@@ -150,13 +216,18 @@ int main(int argc, char** argv) {
             return 77;
         }
 
-        // Identidade real do pacote.
-        PackageIdentity id = validate_package(DD_APP_ID, mif, mod.size());
-        std::printf("[ID] app_id=%u(%s) clsid=0x%08x(%s) mod=%u(%s)\n",
+        // Identidade real do pacote: App ID DERIVADO do caminho real (não constante),
+        // CLSID na posição estrutural do MIF, tamanho do mod.
+        PackageIdentity id = validate_package(mod_path, mif_path, mif, mod.size());
+        std::printf("[ID] app_id=%u(%s) clsid=0x%08x(%s,%s) mod=%u(%s) scan_corrob=%s\n",
                     id.app_id, id.app_id_ok ? "ok" : "X",
                     id.clsid, id.clsid_ok ? "ok" : "X",
-                    id.mod_size, id.mod_size_ok ? "ok" : "X");
-        assert(id.valid()); // pacote real DEVE ter identidade correta
+                    id.clsid_structural ? "estrutural" : "NAO-estrutural",
+                    id.mod_size, id.mod_size_ok ? "ok" : "X",
+                    id.clsid_scan_corroborates ? "sim" : "nao");
+        assert(id.app_id == DD_APP_ID);       // derivado do caminho, não do constante
+        assert(id.clsid_structural);          // CLSID veio do registro estrutural do MIF
+        assert(id.valid());                   // pacote real DEVE ter identidade correta
 
         // Injeção + resolução de entry via infraestrutura existente.
         uc_engine* uc = nullptr;
