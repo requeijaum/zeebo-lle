@@ -483,6 +483,117 @@ private:
     std::map<u32, VtlbLut> spaces_;
 };
 
+// --- SpaceManager (Bug 1, runtime): TRUE address-space switching -----------
+// SpaceMap acima só REGISTRA a tradução VA->host por SID (para consultas). Ele
+// NÃO troca o que o Unicorn realmente executa: todo o boot corria sobre um
+// único mapeamento plano, então a MESMA VA nunca era de fato comutada entre
+// espaços — dois SIDs enxergavam os mesmos bytes.
+//
+// SpaceManager fecha essa lacuna. Para cada L4_SpaceId_t ele guarda a LISTA de
+// regiões (VA, tamanho, prot, host_ptr de backing físico) que aquele espaço
+// mapeou. activate(uc, sid) comuta o address space REAL do Unicorn:
+//   1) desmapeia (uc_mem_unmap) todas as regiões do espaço atualmente ativo
+//      que NÃO pertencem ao alvo (ou cujo backing difere);
+//   2) mapeia (uc_mem_map_ptr) as regiões do espaço alvo apontando para o
+//      backing físico daquele espaço.
+// Assim a mesma VA passa a ler/executar o backing do SID ativo, e uma escrita
+// só toca o backing daquele espaço (isolamento real).
+//
+// SEGURANÇA (Unicorn): uc_mem_unmap/uc_mem_map_ptr NUNCA podem ser chamados de
+// dentro de um code/mem hook (remap durante tradução de TB corrompe o cache de
+// tradução e trava/segfaulta). activate() é projetado para rodar ENTRE fatias
+// de uc_emu_start (no laço de escalonamento), jamais dentro de um hook.
+class SpaceManager {
+public:
+    struct Region {
+        u64 va = 0;
+        u64 size = 0;
+        int prot = 0;      // UC_PROT_*
+        u8* host = nullptr; // backing físico de host (dono externo)
+    };
+
+    // Registra/atualiza uma região do espaço `sid`. Alinha a 4KB. Se já existe
+    // região com mesma VA nesse espaço, substitui (permite re-protect/rebacking).
+    void record(u32 sid, u64 va, u64 size, int prot, u8* host) {
+        const u64 PAGE = 0x1000;
+        u64 base = va & ~(PAGE - 1);
+        u64 end  = (va + size + PAGE - 1) & ~(PAGE - 1);
+        if (base >= 0x100000000ull) return;
+        if (end > 0x100000000ull) end = 0x100000000ull;
+        u64 msize = end - base;
+        if (msize < PAGE) msize = PAGE;
+        auto& regs = spaces_[sid];
+        for (auto& r : regs) {
+            if (r.va == base) { r.size = msize; r.prot = prot; r.host = host; return; }
+        }
+        regs.push_back(Region{ base, msize, prot, host });
+    }
+
+    bool has_space(u32 sid) const { return spaces_.find(sid) != spaces_.end(); }
+    u32  active_sid() const { return active_sid_; }
+    size_t space_count() const { return spaces_.size(); }
+
+    const std::vector<Region>* regions_of(u32 sid) const {
+        auto it = spaces_.find(sid);
+        return it != spaces_.end() ? &it->second : nullptr;
+    }
+
+#ifdef ZEEBO_L4_MMU_WITH_UNICORN
+    // Comuta o address space REAL do Unicorn para `sid`. Idempotente: reativar
+    // o SID já ativo é no-op. DEVE ser chamado FORA de qualquer hook.
+    uc_err activate(uc_engine* uc, u32 sid) {
+        if (!uc) return UC_ERR_ARG;
+        auto it = spaces_.find(sid);
+        if (it == spaces_.end()) return UC_ERR_ARG;
+        if (sid == active_sid_ && activated_once_) return UC_ERR_OK;
+
+        const std::vector<Region>& target = it->second;
+
+        // 1) Desmapear regiões do espaço ativo que não coincidem (VA+backing)
+        //    com nenhuma região do alvo. Só toca regiões que ESTE manager criou.
+        if (activated_once_) {
+            auto prev = spaces_.find(active_sid_);
+            if (prev != spaces_.end()) {
+                for (const auto& pr : prev->second) {
+                    bool keep = false;
+                    for (const auto& tr : target) {
+                        if (tr.va == pr.va && tr.size == pr.size && tr.host == pr.host) {
+                            keep = true; break;
+                        }
+                    }
+                    if (!keep) uc_mem_unmap(uc, pr.va, (size_t)pr.size);
+                }
+            }
+        }
+
+        // 2) Mapear (ou re-proteger) as regiões do alvo apontando para o backing
+        //    físico daquele espaço.
+        uc_err first_err = UC_ERR_OK;
+        for (const auto& tr : target) {
+            int prot = tr.prot ? tr.prot : UC_PROT_READ;
+            uc_err e = uc_mem_map_ptr(uc, tr.va, (size_t)tr.size, prot, tr.host);
+            if (e == UC_ERR_MAP) {
+                // VA já mapeada (região preservada do espaço anterior por ser
+                // idêntica, ou colisão com região estática): reajusta a proteção.
+                e = uc_mem_protect(uc, tr.va, (size_t)tr.size, prot);
+            }
+            if (e != UC_ERR_OK && first_err == UC_ERR_OK) first_err = e;
+        }
+
+        active_sid_ = sid;
+        activated_once_ = true;
+        return first_err;
+    }
+#endif
+
+    void clear() { spaces_.clear(); active_sid_ = 0; activated_once_ = false; }
+
+private:
+    std::map<u32, std::vector<Region>> spaces_;
+    u32  active_sid_ = 0;
+    bool activated_once_ = false;
+};
+
 // Dispatcher principal. Lê os descritores dos MRs do UTCB e executa os
 // mapeamentos reais no Unicorn. Retorna o valor de resultado da syscall
 // (fpage de resultado do primeiro item na convenção OKL4; aqui 1 = ok).
