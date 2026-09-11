@@ -73,13 +73,16 @@ int main(int argc,char**argv){
     for(int i=0;i<phnum;i++){
         size_t o=phoff+(size_t)i*phent;
         // Header do proprio arquivo: nao confiar em phoff/phent/phnum.
-        if(o+4>d.size()){ printf("  [skip] phdr %d fora do arquivo (off=%zu size=%zu)\n", i, o, d.size()); continue; }
+        // Bug 10: os campos lidos por rd32 vao ate o+20..o+23 (p_memsz), entao o
+        // cabecalho de 32 bytes precisa caber INTEIRO no arquivo; guardas do tipo
+        // "o+16<size" deixavam rd32(o+16) ler 2-3 bytes fora do buffer.
+        if(o+32>d.size()){ printf("  [skip] phdr %d fora do arquivo (off=%zu size=%zu)\n", i, o, d.size()); continue; }
         u32 ptype=rd32(d.data(),o);
         if(ptype!=1) continue;
-        u32 p_filesz=o+16<d.size()? rd32(d.data(),o+16):0;
-        u32 p_vaddr=o+8<d.size()? rd32(d.data(),o+8):0;
-        u32 p_memsz =o+20<d.size()? rd32(d.data(),o+20):0;
-        u32 val=(o+4<d.size())?rd32(d.data(),o+4):0;  // p_offset
+        u32 val     =rd32(d.data(),o+4);   // p_offset
+        u32 p_vaddr =rd32(d.data(),o+8);
+        u32 p_filesz=rd32(d.data(),o+16);
+        u32 p_memsz =rd32(d.data(),o+20);
         u32 lmap = physical ? va2pa(p_vaddr) : p_vaddr;
         size_t nmem=p_memsz? p_memsz : p_filesz;
         if(!nmem) continue;
@@ -89,6 +92,8 @@ int main(int argc,char**argv){
         std::vector<u8> seg(nmem,0);
         if(p_filesz){
             // p_offset/p_filesz sao do arquivo: validar contra o buffer real.
+            // Aritmetica verificada: val+p_filesz nao pode passar do arquivo nem
+            // estourar; usa comparacao por subtracao para evitar overflow.
             if((size_t)val>d.size()){ printf("  [skip] phdr %d p_offset=0x%x fora do arquivo\n", i, val); continue; }
             size_t avail=d.size()-(size_t)val;
             size_t cl=std::min({(size_t)p_filesz, seg.size(), avail});

@@ -111,23 +111,45 @@ int main(int argc, char** argv) {
     printf("  Entrypoint: 0x%08x\n", entry);
     printf("  Program Headers: %u entries (offset 0x%x, size %u)\n", phnum, phoff, phent);
 
-    // Read Program Header table from page
-    std::vector<u8> phtab(phent * phnum);
-    uc_mem_read(uc, DEST + phoff, phtab.data(), phtab.size());
+    // Bug 10: nao confiar em phoff/phentsize/phnum vindos da NAND. A tabela de
+    // cabecalhos precisa (a) ter phentsize grande o bastante para um phdr ELF32
+    // (32 bytes), (b) ter phent*phnum calculado sem overflow, e (c) caber
+    // inteira na pagina realmente lida via DMOV. Caso contrario o uc_mem_read
+    // abaixo leria memoria Unicorn nao carregada (fora do dump) e o laco leria
+    // cabecalhos parciais fora do buffer alocado.
+    const u32 kPhdrMin  = 32;      // sizeof(Elf32_Phdr)
+    const u32 kPageBytes = 2048;   // pagina NAND lida em DEST por dmov_read_page
+    bool phdr_ok = true;
+    if (phent < kPhdrMin) {
+        printf("[Error] phentsize %u < %u: cabecalho de programa parcial, recusado\n", phent, kPhdrMin);
+        phdr_ok = false;
+    }
+    u64 table_bytes = (u64)phent * (u64)phnum;  // multiplicacao verificada (64 bits)
+    if (phdr_ok && (phoff > kPageBytes || table_bytes > (u64)kPageBytes - phoff)) {
+        printf("[Error] tabela de phdr (off=0x%x, %llu bytes) fora da pagina lida (%u): recusada\n",
+               phoff, (unsigned long long)table_bytes, kPageBytes);
+        phdr_ok = false;
+    }
 
-    printf("[Relocator] Parsed PT_LOAD segments:\n");
-    for (int i = 0; i < phnum; i++) {
-        size_t o = i * phent;
-        u32 p_type  = rd32(phtab.data(), o);
-        u32 p_off   = rd32(phtab.data(), o + 4);
-        u32 p_vaddr = rd32(phtab.data(), o + 8);
-        u32 p_paddr = rd32(phtab.data(), o + 12);
-        u32 p_filesz= rd32(phtab.data(), o + 16);
-        u32 p_memsz = rd32(phtab.data(), o + 20);
+    if (phdr_ok) {
+        std::vector<u8> phtab((size_t)table_bytes);
+        uc_mem_read(uc, DEST + phoff, phtab.data(), phtab.size());
 
-        if (p_type == 1) { // PT_LOAD
-            printf("  [%02d] PT_LOAD: vaddr=0x%08x paddr=0x%08x filesz=0x%06x memsz=0x%06x fileoff=0x%06x\n",
-                   i, p_vaddr, p_paddr, p_filesz, p_memsz, p_off);
+        printf("[Relocator] Parsed PT_LOAD segments:\n");
+        for (int i = 0; i < phnum; i++) {
+            size_t o = (size_t)i * phent;
+            if (o + kPhdrMin > phtab.size()) break;  // cabecalho parcial: para.
+            u32 p_type  = rd32(phtab.data(), o);
+            u32 p_off   = rd32(phtab.data(), o + 4);
+            u32 p_vaddr = rd32(phtab.data(), o + 8);
+            u32 p_paddr = rd32(phtab.data(), o + 12);
+            u32 p_filesz= rd32(phtab.data(), o + 16);
+            u32 p_memsz = rd32(phtab.data(), o + 20);
+
+            if (p_type == 1) { // PT_LOAD
+                printf("  [%02d] PT_LOAD: vaddr=0x%08x paddr=0x%08x filesz=0x%06x memsz=0x%06x fileoff=0x%06x\n",
+                       i, p_vaddr, p_paddr, p_filesz, p_memsz, p_off);
+            }
         }
     }
 
