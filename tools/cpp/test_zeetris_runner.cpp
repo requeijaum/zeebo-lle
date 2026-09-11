@@ -206,6 +206,36 @@ int main(int argc, char** argv) {
         assert(ctx.igl_calls > 0);        // e o loop de desenho continua vivo
     }
 
+    // Diagnóstico: algum evento de aplicação faz o jogo inicializar o próprio
+    // contexto ([pApplet+0x20]) ou entrar na carga de assets?
+    if (std::getenv("ZEEBO_ZEETRIS_EVENTS")) {
+        const struct { u32 evt; const char* nome; } evts[] = {
+            // MEDIDO: no ramo evt==0 o jogo faz malloc(size) e grava o resultado em
+            // [applet+0x20] (0x1200ab4c..0x1200ab68) e chama o init (0x120019f4).
+            {0x0000u, "evt=0 (aloca ctx)"},
+            {0x0001u, "EVT_APP_START"},   {0x0002u, "EVT_APP_STOP"},
+            {0x0003u, "EVT_APP_SUSPEND"}, {0x0004u, "EVT_APP_RESUME"},
+            {0x0005u, "EVT_BROWSE_URL"},  {0x0006u, "EVT_BROWSE_FILE"},
+            {0x0007u, "EVT_BROWSE_MEDIA"},{0x0008u, "EVT_SCREEN_ORIENT"},
+            {0x0009u, "EVT_APP_TERMINATE"},
+        };
+        for (const auto& e : evts) {
+            u32 before_ctx = 0;
+            uc_mem_read(uc, ctx.pApplet + 0x20, &before_ctx, 4);
+            const u32 tex_before = ctx.tex_loader_calls;
+            const size_t slots_before = ctx.igl_slot_calls.size();
+            bool ok = ZeetrisRunner::dispatch_app_event(uc, ctx, e.evt);
+            for (int i = 0; i < 4; ++i) ZeetrisRunner::step_frame(uc, ctx);
+            u32 after_ctx = 0;
+            uc_mem_read(uc, ctx.pApplet + 0x20, &after_ctx, 4);
+            std::printf("[events] evt=0x%04x %-18s handled=%d applet+0x20: 0x%08x->0x%08x "
+                        "| loader_textura %u->%u | slots GL %zu->%zu\n",
+                        e.evt, e.nome, (int)ok, before_ctx, after_ctx,
+                        tex_before, ctx.tex_loader_calls, slots_before,
+                        ctx.igl_slot_calls.size());
+        }
+    }
+
     // Diagnóstico: a máscara de botões da plataforma move o jogo?
     // Env-gated. Escreve a máscara no ponto que o poll lê e mede se o estado do
     // jogo (checksum) muda -- e se surgem slots GL novos (textura/upload).

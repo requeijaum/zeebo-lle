@@ -716,7 +716,22 @@ public:
                                 : "  (nao parece ponteiro de heap do jogo)");
             }
         }
-        if (!std::getenv("ZEEBO_ZEETRIS_NO_APPCTX")) {
+        // PADRÃO: o jogo constrói o próprio contexto (evt==0 -> malloc+init),
+        // medido em 0x1200ab4c. ZEEBO_ZEETRIS_SYNTH_APPCTX=1 volta ao paliativo
+        // antigo (região sintética zerada em 0x30010000) só para comparação.
+        if (!std::getenv("ZEEBO_ZEETRIS_SYNTH_APPCTX")) {
+            // MEDIDO: com evt==0 o jogo faz malloc(size) + init e grava o próprio
+            // contexto em [pApplet+0x20] (0x1200ab4c..0x1200ab6c). Não fabricamos
+            // nada: deixamos o jogo construir o contexto dele.
+            ctx.is_running = true;
+            bool ok_ev0 = dispatch_app_event(uc, ctx, 0u);
+            u32 game_ctx = 0;
+            uc_mem_read(uc, ctx.pApplet + 0x20, &game_ctx, 4);
+            std::printf("[ZeetrisRunner] EV0: disp(evt=0)=%d -> [pApplet+0x20]=0x%08x%s\n",
+                        (int)ok_ev0, game_ctx,
+                        (game_ctx >= 0x30005000u && game_ctx < 0x30020000u)
+                            ? "  (contexto do PROPRIO jogo, no heap)" : "");
+        } else if (!std::getenv("ZEEBO_ZEETRIS_NO_APPCTX")) {
             u32 app_ctx_va = 0x30010000u;
             uc_mem_write(uc, ctx.pApplet + 0x20, &app_ctx_va, 4);
             uc_mem_write(uc, app_ctx_va + 12, &ishell_ptr, 4);
@@ -758,6 +773,25 @@ public:
                         uc_strerror(err), pc_end);
         }
         return err == UC_ERR_OK;
+    }
+
+    // Despacha um evento de aplicação arbitrário ao HandleEvent do applet.
+    // Existe para MEDIR (não para assumir) se algum evento além do EVT_APP_START
+    // faz o jogo inicializar o próprio contexto/carregar assets.
+    static bool dispatch_app_event(uc_engine* uc, ZeetrisContext& ctx, u32 evt, u32 wparam = 0) {
+        if (!ctx.is_running || !uc) return false;
+        u32 sp = STK, lr = 0xF0F0F0F0u, r3 = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
+        uc_reg_write(uc, UC_ARM_REG_R1, &evt);
+        uc_reg_write(uc, UC_ARM_REG_R2, &wparam);
+        uc_reg_write(uc, UC_ARM_REG_R3, &r3);
+        uc_reg_write(uc, UC_ARM_REG_SP, &sp);
+        uc_reg_write(uc, UC_ARM_REG_LR, &lr);
+        uc_err err = uc_emu_start(uc, ctx.handle_event_va, 0xF0F0F0F0u, 0, 500000);
+        if (err != UC_ERR_OK) return false;
+        u32 r0 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        return r0 == 1;
     }
 
     // Seam de input da PLATAFORMA. O gameloop do jogo faz poll de uma máscara
