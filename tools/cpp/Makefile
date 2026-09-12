@@ -499,7 +499,7 @@ test-zeetris-playable: test_zeetris_playable test-zeetris-playable-selftest
 # em contraste com o BREW/Zeetris onde silencio e ambiguo entre bug e estado
 # legitimo do jogo. L1 imagem valida / L2 CPU executa / L3 console fala.
 test_linux_boot: test_linux_boot.cpp
-	$(CXX) $(CXXFLAGS) -o $@ test_linux_boot.cpp -lunicorn
+	$(CXX) $(CXXFLAGS) -DZEEBO_SDL -o $@ test_linux_boot.cpp -lunicorn -lSDL2 -lSDL2_ttf
 
 # Carga bare-metal real do TripleOxygen (blinkenlichten.bin, 244B).
 # Substituto honesto do kernel: o zImage do Fausto nunca foi publicado.

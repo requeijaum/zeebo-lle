@@ -868,6 +868,132 @@ static void check_repeat_fault(uc_engine* uc, u32 pc, u32 addr, bool is_pabt) {
     std::fflush(stdout);
 }
 
+// --- Janela SDL2 (Wayland) com o console do guest ---------------------------
+// O guest ainda nao tem driver de framebuffer (TVENC nao portado), mas o console
+// dele (ttyMSM2 -> UART) ja e' integro: aqui ele vira uma janela de terminal no
+// host, e o teclado da janela e' injetado de volta no RX da UART.
+#if defined(ZEEBO_SDL)
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+
+static SDL_Window*   g_sdl_win  = nullptr;
+static SDL_Renderer* g_sdl_ren  = nullptr;
+static TTF_Font*     g_sdl_font = nullptr;
+static bool          g_sdl_on   = false;
+static bool          g_sdl_quit = false;
+static const char*   g_sdl_shot = "/tmp/zeebo_console.bmp";
+
+static void sdl_open() {
+    // O usuario pediu Wayland: se ninguem escolheu driver, forca wayland.
+    if (!std::getenv("SDL_VIDEODRIVER")) setenv("SDL_VIDEODRIVER", "wayland", 0);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        std::printf("[sdl] SDL_Init falhou: %s\n", SDL_GetError());
+        return;
+    }
+    const char* drv = SDL_GetCurrentVideoDriver();
+    g_sdl_win = SDL_CreateWindow("Zeebo LLE - console do guest (ttyMSM2)",
+                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                 720, 480, SDL_WINDOW_SHOWN);
+    if (!g_sdl_win) {
+        std::printf("[sdl] janela falhou: %s\n", SDL_GetError());
+        return;
+    }
+    g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_SOFTWARE);
+    if (!g_sdl_ren) g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_ACCELERATED);
+    if (TTF_Init() == 0) {
+        g_sdl_font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13);
+    }
+    std::printf("[sdl] driver=video:%s janela:ok renderer:%s fonte:%s\n",
+                drv ? drv : "(nenhum)", g_sdl_ren ? "ok" : "sem", g_sdl_font ? "ok" : "sem");
+    std::fflush(stdout);
+    g_sdl_on = true;
+}
+
+// Teclado da janela -> RX da UART (mesmo caminho que usa o teclado do host).
+static void sdl_pump() {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) { g_sdl_quit = true; continue; }
+        if (e.type != SDL_KEYDOWN) continue;
+        switch (e.key.keysym.sym) {
+            case SDLK_RETURN:    g_rx_buf.push_back('\r'); break;
+            case SDLK_BACKSPACE: g_rx_buf.push_back(127);  break;
+            case SDLK_TAB:       g_rx_buf.push_back('\t'); break;
+            case SDLK_ESCAPE:    g_rx_buf.push_back(27);   break;
+            case SDLK_UP:        g_rx_buf += "\x1b[A";     break;
+            case SDLK_DOWN:      g_rx_buf += "\x1b[B";     break;
+            case SDLK_RIGHT:     g_rx_buf += "\x1b[C";     break;
+            case SDLK_LEFT:      g_rx_buf += "\x1b[D";     break;
+            default: {
+                const char* nm = SDL_GetKeyName(e.key.keysym.sym);
+                if (nm && nm[0] && !nm[1]) {      // so teclas de 1 caractere
+                    char c = nm[0];
+                    if (c >= 'A' && c <= 'Z' && !(e.key.keysym.mod & KMOD_SHIFT))
+                        c = static_cast<char>(c - 'A' + 'a');
+                    g_rx_buf.push_back(c);
+                }
+                break;
+            }
+        }
+    }
+}
+
+static void sdl_present(const std::string& console) {
+    if (!g_sdl_on) return;
+    SDL_SetRenderDrawColor(g_sdl_ren, 16, 16, 24, 255);
+    SDL_RenderClear(g_sdl_ren);
+    if (g_sdl_font) {
+        // ultimas 28 linhas de 90 colunas (o console e' um fluxo de bytes)
+        std::vector<std::string> lines;
+        std::string cur;
+        for (char c : console) {
+            if (c == '\r') continue;
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else cur.push_back((c >= 32 && c < 127) ? c : ' ');
+        }
+        if (!cur.empty()) lines.push_back(cur);
+        const size_t nlines = 28, lh = 16;
+        const size_t start = lines.size() > nlines ? lines.size() - nlines : 0;
+        SDL_Color fg = {220, 220, 220, 255};
+        for (size_t i = start, row = 0; i < lines.size(); ++i, ++row) {
+            std::string l = lines[i];
+            if (l.size() > 88) l.resize(88);
+            SDL_Surface* s = TTF_RenderText_Blended(g_sdl_font, l.c_str(), fg);
+            if (!s) continue;
+            SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_ren, s);
+            if (t) {
+                SDL_Rect dst = {8, static_cast<int>(4 + row * lh), s->w, s->h};
+                SDL_RenderCopy(g_sdl_ren, t, nullptr, &dst);
+                SDL_DestroyTexture(t);
+            }
+            SDL_FreeSurface(s);
+        }
+    }
+    SDL_RenderPresent(g_sdl_ren);
+}
+
+// Prova honesta: quantos pixels nao-fundo a janela tem (0 = nada desenhado).
+static void sdl_shot_save() {
+    if (!g_sdl_on || !g_sdl_ren) return;
+    int w = 0, h = 0;
+    SDL_GetRendererOutputSize(g_sdl_ren, &w, &h);
+    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!surf) return;
+    if (SDL_RenderReadPixels(g_sdl_ren, nullptr, SDL_PIXELFORMAT_ARGB8888,
+                             surf->pixels, surf->pitch) == 0) {
+        const u32* px = static_cast<const u32*>(surf->pixels);
+        size_t nonzero = 0;
+        for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+            if ((px[i] & 0x00ffffffu) > 0x00202020u) ++nonzero;
+        SDL_SaveBMP(surf, g_sdl_shot);
+        std::printf("[sdl] screenshot: %s (%dx%d, %zu pixels desenhados)\n",
+                    g_sdl_shot, w, h, nonzero);
+        std::fflush(stdout);
+    }
+    SDL_FreeSurface(surf);
+}
+#endif  // ZEEBO_SDL
+
 static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
     (void)ud;
     u32 cpsr = 0, pc = 0;
@@ -982,6 +1108,14 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     // Entrada do host (teclado/pipe) -> RX da UART do guest.
     if ((g_icount & 0x3FFFu) == 0u) rx_fill_from_host();
     rx_try_stage();
+#if defined(ZEEBO_SDL)
+    // Janela do console: bombeia teclado e redesenha a cada ~256k instrucoes.
+    if (g_sdl_on && (g_icount & 0x3FFFFu) == 0u) {
+        sdl_pump();
+        sdl_present(g_console);
+        if (g_sdl_quit) uc_emu_stop(uc);
+    }
+#endif
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
         static int ucount = 0;
@@ -1401,6 +1535,9 @@ int main(int argc, char** argv) {
         g_stdin_tty = true;
     }
     g_irq_log  = (std::getenv("ZEEBO_IRQ_LOG") != nullptr);    // traco de VIC/IRQ
+#if defined(ZEEBO_SDL)
+    if (std::getenv("ZEEBO_SDL")) sdl_open();                  // janela Wayland do console
+#endif
     // VIC: modelo dos registradores usados pelo entry-macro e pelo irq_chip.
     uc_hook hvw = 0, hvr = 0;
     uc_hook_add(uc, &hvw, UC_HOOK_MEM_WRITE, (void*)on_vic_write, nullptr,
@@ -1487,6 +1624,9 @@ int main(int argc, char** argv) {
                 uc_strerror(e), (int)e, (unsigned long long)g_insn, g_last_pc);
     v.insn = g_insn;
     dump_kernel_log(uc, "fim da execucao");
+#if defined(ZEEBO_SDL)
+    sdl_shot_save();          // prova visual do que a janela desenhou
+#endif
     if (g_probe) {
         std::printf("[probe] paginas de PC mais visitadas (top 8):\n");
         {
