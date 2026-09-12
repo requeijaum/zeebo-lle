@@ -1731,6 +1731,47 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     if ((g_icount & 0xFFFF) == 0) g_pc_hist[static_cast<u32>(addr)]++;  // PC exato
 }
 
+// ---------------------------------------------------------------------------
+// USB HS (EHCI) do MSM: o kernel ioremappa 0xa0800000 e le' os registradores de
+// capacidade para subir o HCD. Sem modelo, a leitura devolve lixo e o ehci-hcd
+// aborta ("can't find host controller"). Modelamos o minimo: CAPLENGTH/
+// HCIVERSION/HCSPARAMS/HCCPARAMS + os operacionais, com HCRESET se limpando no
+// write (ehci_reset escreve e fica em polling ate' o bit cair).
+// Layout EHCI: 0x00 CAPLENGTH(u8)+HCIVERSION(u16), 0x04 HCSPARAMS, 0x08 HCCPARAMS,
+// 0x20 USBCMD, 0x24 USBSTS, 0x28 USBINTR, 0x2c FRINDEX, 0x34 PERIODICLISTBASE,
+// 0x38 ASYNCLISTADDR, 0x40 CONFIGFLAG, 0x44+ PORTSC (1 porta no HCSPARAMS).
+static u32 g_usb_regs[0x100 / 4];
+static bool g_usb_log = false;
+
+static u32 usb_reg_read(u32 off) {
+    switch (off & ~0x3u) {
+    case 0x00: return 0x01000020u;           // HCIVERSION=0x0100 (EHCI 1.0), CAPLENGTH=0x20
+    case 0x04: return 0x00000011u;           // N_PORTS=1 (bits 0-3), PPC=1 (bit 4)
+    case 0x08: return 0x00000006u;           // HCCPARAMS: lista de frames programavel
+    case 0x44: return 0x00001000u;           // PORTSC1: PP (bit 12), sem dispositivo (CCS=0)
+    default:   return g_usb_regs[(off & 0xffu) >> 2];
+    }
+}
+
+static void on_usb_write(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value, void* ud) {
+    (void)uc; (void)type; (void)ud; (void)size;
+    u32 off = (u32)(addr & 0xfffu);
+    u32 v   = (u32)value;
+    if ((off & ~0x3u) == 0x20u) {
+        v &= ~0x2u;                          // USBCMD.HCRESET: hardware limpa sozinho
+        if (g_usb_log) printf("[usb] USBCMD <- 0x%08x\n", v);
+    }
+    g_usb_regs[(off & 0xffu) >> 2] = v;
+}
+
+static void on_usb_read(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value, void* ud) {
+    (void)uc; (void)type; (void)value; (void)ud; (void)size;
+    u32 off = (u32)(addr & 0xfffu);
+    u32 v   = usb_reg_read(off);
+    if (g_usb_log) printf("[usb] read 0x%03x -> 0x%08x\n", off, v);
+    g_usb_regs[(off & 0xffu) >> 2] = v;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
     if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
@@ -1782,6 +1823,13 @@ int main(int argc, char** argv) {
     // 0xaa200060). O espaco de FB memoria fica em PA 0x15000000 (dentro da RAM
     // mapeada de 96MB, fora dos 64MB que o kernel gerencia).
     uc_mem_map(uc, MDP_BASE, MDP_SIZE, UC_PROT_ALL);
+    // USB HS: o OTG/EHCI ioremappam este bloco e leem os registradores; sem o
+    // mapeamento o acesso vira UC_ERR_MAP e mata o boot (visto no MDP tambem).
+    uc_mem_map(uc, 0xa0800000u, 0x1000u, UC_PROT_ALL);
+    g_usb_log = (std::getenv("ZEEBO_USB_LOG") != nullptr);
+    uc_hook hu_w = 0, hu_r = 0;
+    uc_hook_add(uc, &hu_w, UC_HOOK_MEM_WRITE, (void*)on_usb_write, nullptr, 0xa0800000u, 0xa0801000u);
+    uc_hook_add(uc, &hu_r, UC_HOOK_MEM_READ,  (void*)on_usb_read,  nullptr, 0xa0800000u, 0xa0801000u);
     g_mdp_log = (std::getenv("ZEEBO_MDP_LOG") != nullptr);
     uc_hook hmw = 0, hmr = 0;
     uc_hook_add(uc, &hmw, UC_HOOK_MEM_WRITE, (void*)on_mdp_write, nullptr, MDP_BASE, MDP_BASE + MDP_SIZE);
@@ -1936,13 +1984,16 @@ int main(int argc, char** argv) {
         t.push_back(4); t.push_back(0x54410002u);
         t.push_back(64u * 1024u * 1024u); t.push_back(APPS_RAM_PHYS);
         // ATAG_CMDLINE (0x54410009)
-        const char* cmdline = "console=ttyMSM2,115200n8 earlyprintk=msm_serial,0xa9c00000 mem=64M lpj=2629632 init=/init";
-        size_t clen = std::strlen(cmdline) + 1;
+        // zeebo_usb=1 liga o bring-up do host controller EHCI no kernel (o caminho
+        // de transferencia USB ainda nao esta' modelado, entao por padrao fica off).
+        std::string cmdline = "console=ttyMSM2,115200n8 earlyprintk=msm_serial,0xa9c00000 mem=64M lpj=2629632 init=/init";
+        if (std::getenv("ZEEBO_USB")) cmdline += " zeebo_usb=1";
+        size_t clen = cmdline.size() + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
         size_t base = t.size();
         t.resize(base + cwords, 0);
-        std::memcpy(&t[base], cmdline, clen);
+        std::memcpy(&t[base], cmdline.c_str(), clen);
         // ATAG_NONE (0x00000000) encerra a lista
         t.push_back(0); t.push_back(0);
         uc_mem_write(uc, atags, t.data(), t.size() * sizeof(u32));
