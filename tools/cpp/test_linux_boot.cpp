@@ -899,6 +899,9 @@ static TTF_Font*     g_sdl_font = nullptr;
 static bool          g_sdl_on   = false;
 static bool          g_sdl_quit = false;
 static const char*   g_sdl_shot = "/tmp/zeebo_console.bmp";
+// Janela 1x2: esquerda = texto do console UART, direita = framebuffer do guest.
+static SDL_Rect      g_sdl_pane_left  = {0, 0, 720, 480};
+static SDL_Rect      g_sdl_pane_right = {720, 0, 720, 480};
 
 static void sdl_open() {
     // O usuario pediu Wayland: se ninguem escolheu driver, forca wayland.
@@ -908,15 +911,24 @@ static void sdl_open() {
         return;
     }
     const char* drv = SDL_GetCurrentVideoDriver();
-    g_sdl_win = SDL_CreateWindow("Zeebo LLE - console do guest (ttyMSM2)",
+    // Janela 1x2: painel esquerdo = console UART (ttyMSM2), direito = framebuffer do
+    // guest. Os dois lado a lado para depurar (o FB e' 720x480, entao 1440x480).
+    g_sdl_pane_left  = {0, 0, 720, 480};
+    g_sdl_pane_right = {720, 0, 720, 480};
+    g_sdl_win = SDL_CreateWindow("Zeebo LLE - UART (esq) | framebuffer do guest (dir)",
                                  SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                 720, 480, SDL_WINDOW_SHOWN);
+                                 1440, 480, SDL_WINDOW_SHOWN);
     if (!g_sdl_win) {
         std::printf("[sdl] janela falhou: %s\n", SDL_GetError());
         return;
     }
-    g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_SOFTWARE);
-    if (!g_sdl_ren) g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_ACCELERATED);
+    // Renderer software (o acelerado nao permite ler os pixels de volta no Wayland).
+    // Com ZEEBO_VSYNC=1 liga o vblank do compositor tambem -- util para inspecao
+    // visual, mas bloqueia a thread (que e' a mesma da emulacao).
+    Uint32 rflags = SDL_RENDERER_SOFTWARE;
+    if (std::getenv("ZEEBO_VSYNC")) rflags |= SDL_RENDERER_PRESENTVSYNC;
+    g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, rflags);
+    if (!g_sdl_ren) g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_SOFTWARE);
     if (TTF_Init() == 0) {
         g_sdl_font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13);
     }
@@ -927,31 +939,111 @@ static void sdl_open() {
 }
 
 // Teclado da janela -> RX da UART (mesmo caminho que usa o teclado do host).
+// Traduz para bytes como um terminal espera: espaco, shift (maiusculas E simbolos),
+// caps lock, ctrl (C-a..C-z), tab, esc, DEL, setas e as teclas de edicao (ANSI).
+// A versao anterior usava SDL_GetKeyName(), que so' cobria teclas de 1 caractere --
+// por isso espaço, shift e os simbolos com shift nao entravam.
+static void key_to_rx(const SDL_KeyboardEvent& k) {
+    const SDL_Keysym ks = k.keysym;
+    const bool shift = (ks.mod & KMOD_SHIFT) != 0;
+    const bool caps  = (ks.mod & KMOD_CAPS)  != 0;
+    const bool ctrl  = (ks.mod & KMOD_CTRL)  != 0;
+    const bool upper = (shift != caps);
+    auto put = [](char c) { g_rx_buf.push_back(c); };
+    if (ctrl && ks.sym >= SDLK_a && ks.sym <= SDLK_z) {       // C-a .. C-z (C-c, C-d...)
+        put(static_cast<char>(ks.sym - SDLK_a + 1));
+        return;
+    }
+    const char* seq = nullptr;
+    switch (ks.sym) {
+        case SDLK_RETURN: case SDLK_KP_ENTER: put('\r'); return;
+        case SDLK_BACKSPACE: put(0x7f); return;                // DEL = erase do tty
+        case SDLK_TAB: put('\t'); return;
+        case SDLK_ESCAPE: put(27); return;
+        case SDLK_SPACE: put(' '); return;
+        case SDLK_UP:        seq = "\x1b[A"; break;
+        case SDLK_DOWN:      seq = "\x1b[B"; break;
+        case SDLK_RIGHT:     seq = "\x1b[C"; break;
+        case SDLK_LEFT:      seq = "\x1b[D"; break;
+        case SDLK_HOME:      seq = "\x1b[H"; break;
+        case SDLK_END:       seq = "\x1b[F"; break;
+        case SDLK_INSERT:    seq = "\x1b[2~"; break;
+        case SDLK_DELETE:    seq = "\x1b[3~"; break;
+        case SDLK_PAGEUP:    seq = "\x1b[5~"; break;
+        case SDLK_PAGEDOWN:  seq = "\x1b[6~"; break;
+        default: break;
+    }
+    if (seq) { g_rx_buf += seq; return; }
+    if (ks.sym >= SDLK_a && ks.sym <= SDLK_z) {                // letras (shift/caps)
+        put(static_cast<char>(upper ? (ks.sym - SDLK_a + 'A') : (ks.sym - SDLK_a + 'a')));
+        return;
+    }
+    if (ks.sym >= SDLK_0 && ks.sym <= SDLK_9) {                // digitos e !@#$%^&*()
+        static const char shifted[] = ")!@#$%^&*(";
+        put(shift ? shifted[ks.sym - SDLK_0] : static_cast<char>('0' + (ks.sym - SDLK_0)));
+        return;
+    }
+    if (ks.sym >= SDLK_KP_0 && ks.sym <= SDLK_KP_9) {          // teclado numerico
+        put(static_cast<char>('0' + (ks.sym - SDLK_KP_0)));
+        return;
+    }
+    switch (ks.sym) {                                          // pontuacao (par normal/shift)
+        case SDLK_MINUS:        put(shift ? '_' : '-');  return;
+        case SDLK_EQUALS:       put(shift ? '+' : '=');  return;
+        case SDLK_LEFTBRACKET:  put(shift ? '{' : '[');  return;
+        case SDLK_RIGHTBRACKET: put(shift ? '}' : ']');  return;
+        case SDLK_BACKSLASH:    put(shift ? '|' : '\\'); return;
+        case SDLK_SEMICOLON:    put(shift ? ':' : ';');  return;
+        case SDLK_QUOTE:        put(shift ? '"' : '\''); return;
+        case SDLK_COMMA:        put(shift ? '<' : ',');  return;
+        case SDLK_PERIOD:       put(shift ? '>' : '.');  return;
+        case SDLK_SLASH:        put(shift ? '?' : '/');  return;
+        case SDLK_BACKQUOTE:    put(shift ? '~' : '`');  return;
+        default: break;
+    }
+    if (ks.sym >= SDLK_F1 && ks.sym <= SDLK_F12) return;       // F* ainda nao mapeadas
+}
+
+// Auto-teste deterministico da tabela de teclas (env ZEEBO_KEY_TEST=1): alimenta
+// eventos sinteticos e confere os bytes que iriam para a RX da UART. Roda antes da
+// emulacao, entao a verificacao e' rapida e nao depende de janela.
+static void key_test() {
+    struct Case { SDL_Keycode sym; Uint16 mod; const char* want; const char* name; };
+    static const Case k[] = {
+        {SDLK_a, 0, "a", "a"}, {SDLK_a, KMOD_SHIFT, "A", "shift+a"},
+        {SDLK_SPACE, 0, " ", "espaco"}, {SDLK_1, KMOD_SHIFT, "!", "shift+1"},
+        {SDLK_SLASH, KMOD_SHIFT, "?", "shift+/"}, {SDLK_SLASH, 0, "/", "barra"},
+        {SDLK_PERIOD, 0, ".", "ponto"}, {SDLK_MINUS, KMOD_SHIFT, "_", "shift+-"},
+        {SDLK_SEMICOLON, KMOD_SHIFT, ":", "shift+;"}, {SDLK_RETURN, 0, "\r", "enter"},
+        {SDLK_BACKSPACE, 0, "\x7f", "backspace"}, {SDLK_TAB, 0, "\t", "tab"},
+        {SDLK_c, KMOD_CTRL, "\x03", "ctrl+c"}, {SDLK_d, KMOD_CTRL, "\x04", "ctrl+d"},
+        {SDLK_UP, 0, "\x1b[A", "seta cima"}, {SDLK_DELETE, 0, "\x1b[3~", "delete"},
+        {SDLK_a, KMOD_CAPS, "A", "caps+a"}, {SDLK_z, KMOD_CAPS | KMOD_SHIFT, "z", "caps+shift+z"},
+    };
+    int ok = 0, fail = 0;
+    for (const Case& c : k) {
+        g_rx_buf.clear();
+        SDL_KeyboardEvent e{};
+        e.type = SDL_KEYDOWN;
+        e.keysym.sym = c.sym;
+        e.keysym.mod = c.mod;
+        key_to_rx(e);
+        const bool good = (g_rx_buf == c.want);
+        if (good) ++ok; else ++fail;
+        std::printf("[key-test] %-14s -> %-8s %s\n", c.name, g_rx_buf.c_str(), good ? "OK" : "FALHOU");
+        if (!good) std::printf("[key-test]   esperado: %s\n", c.want);
+    }
+    g_rx_buf.clear();
+    std::printf("[key-test] %d OK, %d falhas\n", ok, fail);
+    std::fflush(stdout);
+}
+
 static void sdl_pump() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { g_sdl_quit = true; continue; }
         if (e.type != SDL_KEYDOWN) continue;
-        switch (e.key.keysym.sym) {
-            case SDLK_RETURN:    g_rx_buf.push_back('\r'); break;
-            case SDLK_BACKSPACE: g_rx_buf.push_back(127);  break;
-            case SDLK_TAB:       g_rx_buf.push_back('\t'); break;
-            case SDLK_ESCAPE:    g_rx_buf.push_back(27);   break;
-            case SDLK_UP:        g_rx_buf += "\x1b[A";     break;
-            case SDLK_DOWN:      g_rx_buf += "\x1b[B";     break;
-            case SDLK_RIGHT:     g_rx_buf += "\x1b[C";     break;
-            case SDLK_LEFT:      g_rx_buf += "\x1b[D";     break;
-            default: {
-                const char* nm = SDL_GetKeyName(e.key.keysym.sym);
-                if (nm && nm[0] && !nm[1]) {      // so teclas de 1 caractere
-                    char c = nm[0];
-                    if (c >= 'A' && c <= 'Z' && !(e.key.keysym.mod & KMOD_SHIFT))
-                        c = static_cast<char>(c - 'A' + 'a');
-                    g_rx_buf.push_back(c);
-                }
-                break;
-            }
-        }
+        key_to_rx(e.key);
     }
 }
 
@@ -970,6 +1062,14 @@ static std::vector<u32> g_sdl_fbpix;
 // Devolve true se desenhou o FB; false para usar o texto do console.
 static bool sdl_draw_fb(uc_engine* uc) {
     if (!g_sdl_ren) return false;
+    // Vblank "de verdade" nao existe aqui: quem manda no redesenho e' o limitador por
+    // tempo do loop principal. E se o guest nao escreveu nada no framebuffer desde o
+    // ultimo quadro, nem relê os 1,4MB: reusa o texture.
+    u64 fb_writes_count();
+    static u64  last_drawn = 0;
+    static bool fb_valid   = false;
+    if (fb_valid && fb_writes_count() == last_drawn) return true;
+    const u64 writes_now = fb_writes_count();
     if (!g_sdl_fbtex)
         g_sdl_fbtex = SDL_CreateTexture(g_sdl_ren, SDL_PIXELFORMAT_ARGB8888,
                                         SDL_TEXTUREACCESS_STREAMING, FB_XRES, FB_YRES);
@@ -1014,7 +1114,7 @@ static bool sdl_draw_fb(uc_engine* uc) {
         std::fflush(stdout);
     }
     const int half = (ink[1] > ink[0]) ? 1 : 0;
-    if (ink[half] == 0) return false;                        // ainda sem imagem
+    if (ink[half] == 0) { last_drawn = writes_now; return false; }   // ainda sem imagem
     const u8* p = buf.data() + half * frame_bytes;
     g_sdl_fbpix.assign(FB_XRES * FB_YRES, 0);
     for (int i = 0; i < FB_XRES * FB_YRES; ++i) {
@@ -1024,43 +1124,84 @@ static bool sdl_draw_fb(uc_engine* uc) {
                        | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
     }
     SDL_UpdateTexture(g_sdl_fbtex, nullptr, g_sdl_fbpix.data(), FB_XRES * 4);
-    SDL_RenderClear(g_sdl_ren);
-    SDL_RenderCopy(g_sdl_ren, g_sdl_fbtex, nullptr, nullptr);
-    SDL_RenderPresent(g_sdl_ren);
+    // Quem desenha e' o sdl_frame (painel direito); aqui so' atualizamos o texture.
+    last_drawn = writes_now;
+    fb_valid   = true;
     return true;
 }
 
-static void sdl_present(const std::string& console) {
-    if (!g_sdl_on) return;
+// Painel esquerdo: texto do console UART (fluxo de bytes do ttyMSM2).
+static void sdl_text_pane(const std::string& console) {
+    if (!g_sdl_on || !g_sdl_font) return;
+    SDL_RenderSetViewport(g_sdl_ren, &g_sdl_pane_left);
     SDL_SetRenderDrawColor(g_sdl_ren, 16, 16, 24, 255);
-    SDL_RenderClear(g_sdl_ren);
-    if (g_sdl_font) {
-        // ultimas 28 linhas de 90 colunas (o console e' um fluxo de bytes)
-        std::vector<std::string> lines;
-        std::string cur;
-        for (char c : console) {
-            if (c == '\r') continue;
-            if (c == '\n') { lines.push_back(cur); cur.clear(); }
-            else cur.push_back((c >= 32 && c < 127) ? c : ' ');
+    SDL_RenderFillRect(g_sdl_ren, nullptr);
+    SDL_Color title = {120, 200, 255, 255};
+    SDL_Surface* ts = TTF_RenderText_Blended(g_sdl_font, "UART ttyMSM2 (console do kernel)", title);
+    if (ts) {
+        SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_ren, ts);
+        if (tt) { SDL_Rect d = {8, 2, ts->w, ts->h}; SDL_RenderCopy(g_sdl_ren, tt, nullptr, &d); SDL_DestroyTexture(tt); }
+        SDL_FreeSurface(ts);
+    }
+    // ultimas 26 linhas de 88 colunas (o console e' um fluxo de bytes)
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : console) {
+        if (c == '\r') continue;
+        if (c == '\n') { lines.push_back(cur); cur.clear(); }
+        else cur.push_back((c >= 32 && c < 127) ? c : ' ');
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    const size_t nlines = 26, lh = 17;
+    const size_t start = lines.size() > nlines ? lines.size() - nlines : 0;
+    SDL_Color fg = {220, 220, 220, 255};
+    for (size_t i = start, row = 0; i < lines.size(); ++i, ++row) {
+        std::string l = lines[i];
+        if (l.size() > 88) l.resize(88);
+        SDL_Surface* s = TTF_RenderText_Blended(g_sdl_font, l.c_str(), fg);
+        if (!s) continue;
+        SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_ren, s);
+        if (t) {
+            SDL_Rect dst = {8, static_cast<int>(20 + row * lh), s->w, s->h};
+            SDL_RenderCopy(g_sdl_ren, t, nullptr, &dst);
+            SDL_DestroyTexture(t);
         }
-        if (!cur.empty()) lines.push_back(cur);
-        const size_t nlines = 28, lh = 16;
-        const size_t start = lines.size() > nlines ? lines.size() - nlines : 0;
-        SDL_Color fg = {220, 220, 220, 255};
-        for (size_t i = start, row = 0; i < lines.size(); ++i, ++row) {
-            std::string l = lines[i];
-            if (l.size() > 88) l.resize(88);
-            SDL_Surface* s = TTF_RenderText_Blended(g_sdl_font, l.c_str(), fg);
-            if (!s) continue;
-            SDL_Texture* t = SDL_CreateTextureFromSurface(g_sdl_ren, s);
-            if (t) {
-                SDL_Rect dst = {8, static_cast<int>(4 + row * lh), s->w, s->h};
-                SDL_RenderCopy(g_sdl_ren, t, nullptr, &dst);
-                SDL_DestroyTexture(t);
-            }
-            SDL_FreeSurface(s);
+        SDL_FreeSurface(s);
+    }
+}
+
+// Painel direito: framebuffer do guest (720x480 RGB565 lido de FB_PA).
+static void sdl_fb_pane() {
+    if (!g_sdl_on) return;
+    SDL_RenderSetViewport(g_sdl_ren, &g_sdl_pane_right);
+    SDL_SetRenderDrawColor(g_sdl_ren, 0, 0, 0, 255);
+    SDL_RenderFillRect(g_sdl_ren, nullptr);
+    SDL_Color title = {140, 255, 160, 255};
+    if (g_sdl_font) {
+        SDL_Surface* ts = TTF_RenderText_Blended(g_sdl_font, "FRAMEBUFFER fb0 720x480 (tvout)", title);
+        if (ts) {
+            SDL_Texture* tt = SDL_CreateTextureFromSurface(g_sdl_ren, ts);
+            if (tt) { SDL_Rect d = {8, 2, ts->w, ts->h}; SDL_RenderCopy(g_sdl_ren, tt, nullptr, &d); SDL_DestroyTexture(tt); }
+            SDL_FreeSurface(ts);
         }
     }
+    if (g_sdl_fbtex) SDL_RenderCopy(g_sdl_ren, g_sdl_fbtex, nullptr, nullptr);
+}
+
+// Um quadro da janela 1x2: UART a' esquerda, framebuffer a' direita. Os dois paineis
+// sao sempre desenhados (o FB vazio fica preto, mas o painel existe) para dar para
+// comparar o mesmo momento nos dois lados.
+static void sdl_frame(uc_engine* uc, const std::string& console) {
+    if (!g_sdl_on) return;
+    sdl_draw_fb(uc);                       // atualiza o texture do FB (se houver imagem)
+    SDL_RenderSetViewport(g_sdl_ren, nullptr);
+    SDL_SetRenderDrawColor(g_sdl_ren, 40, 40, 48, 255);
+    SDL_RenderClear(g_sdl_ren);
+    sdl_text_pane(console);
+    sdl_fb_pane();
+    SDL_RenderSetViewport(g_sdl_ren, nullptr);
+    SDL_SetRenderDrawColor(g_sdl_ren, 90, 90, 100, 255);
+    SDL_RenderDrawLine(g_sdl_ren, 720, 0, 720, 480);
     SDL_RenderPresent(g_sdl_ren);
 }
 
@@ -1258,6 +1399,7 @@ void on_mdp_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
 
 static u64 g_fb_writes = 0;        // total de escritas na faixa do framebuffer
 static u64 g_fb_writes_nz = 0;     // quantas com valor != 0
+u64 fb_writes_count() { return g_fb_writes; }   // usado pelo redesenho (dirty check)
 
 static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                              int size, int64_t value, void* ud) {
@@ -1405,15 +1547,44 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     // Janela: bombeia teclado e redesenha a cada ~256k instrucoes. Se o guest tem
     // framebuffer com conteudo (driver de fb carregado), ele e' o que aparece;
     // senao cai no texto do console.
-    if (g_sdl_on && (g_icount & 0x3FFFFu) == 0u) {
-        sdl_pump();
-        if (!sdl_draw_fb(uc)) sdl_present(g_console);
-        if (g_sdl_quit) uc_emu_stop(uc);
+    // Redesenho limitado por tempo de parede (padrao 60 fps, ZEEBO_FPS=n): antes a
+    // janela desenhava a cada 256k instrucoes (centenas de fps) e relia os 1,4MB do
+    // framebuffer em todo quadro. Com ZEEBO_VSYNC=1 o compositor tambem sincroniza.
+    if (g_sdl_on && (g_icount & 0xFFFFu) == 0u) {
+        static const u32 fps = [] {
+            const char* e = std::getenv("ZEEBO_FPS");
+            const int v = e ? std::atoi(e) : 60;
+            return (v >= 1 && v <= 240) ? (u32)v : 60u;
+        }();
+        static u64 last_frame = 0;
+        static u64 frames = 0, t0 = 0;
+        const u64 now = SDL_GetTicks();
+        const u32 step = 1000u / fps;
+        if (t0 == 0) t0 = now;
+        if (now - last_frame >= step) {
+            last_frame = now;
+            ++frames;
+            sdl_pump();
+            sdl_frame(uc, g_console);      // janela 1x2: UART | framebuffer
+            if (g_sdl_quit) uc_emu_stop(uc);
+        }
+        // Medicao honesta da taxa de redesenho (a cada ~4s de tempo de parede).
+        static u64 reported = 0;
+        if (now - reported >= 4000u) {
+            reported = now;
+            const double dt = (now - t0) / 1000.0;
+            std::printf("[sdl] %.1f fps efetivos (%llu quadros em %.1fs, teto %u)\n",
+                        dt > 0 ? frames / dt : 0.0, (unsigned long long)frames, dt, fps);
+            std::fflush(stdout);
+        }
     }
     // A definicao de usb_async_poll esta' mais abaixo, junto do modelo do USB.
     void usb_async_poll(uc_engine*);
     static const bool usb_async_on = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
     if (usb_async_on && (g_icount & 0x3FFFFu) == 0u) usb_async_poll(uc);
+    void fb_decode_text(uc_engine*);
+    static const bool fb_text_on = (std::getenv("ZEEBO_FB_TEXT") != nullptr);
+    if (fb_text_on && (g_icount & 0x3FFFFFu) == 0u) fb_decode_text(uc);
 #endif
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
@@ -1875,6 +2046,75 @@ void usb_async_poll(uc_engine* uc) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Le' o framebuffer do guest e o converte de volta para TEXTO usando a propria fonte
+// 8x16 do kernel (simbolo fontdata_8x16, VA 0xc02352b8 -> PA 0x102352b8). Serve para
+// conferir se o que o shell escreve no console de VT chega ao FB, e para depurar os
+// dois paineis lado a lado sem depender de olhar a imagem.
+static const u32 FONT_PA = 0x102352b8u;
+
+void fb_decode_text(uc_engine* uc) {
+    const u32 half_bytes = (u32)FB_XRES * FB_YRES * 2u;      // 691200
+    std::vector<u8> buf(half_bytes * 2u);
+    if (uc_mem_read(uc, FB_PA, buf.data(), buf.size()) != UC_ERR_OK) return;
+    size_t ink[2] = {0, 0};
+    for (int h = 0; h < 2; ++h) {
+        const u8* p = buf.data() + (size_t)h * half_bytes;
+        for (u32 i = 0; i + 1 < half_bytes; i += 2) if (p[i] | p[i + 1]) ++ink[h];
+    }
+    const int half = (ink[1] > ink[0]) ? 1 : 0;
+    const u8* fb = buf.data() + (size_t)half * half_bytes;
+    std::vector<u8> font(4096);
+    if (uc_mem_read(uc, FONT_PA, font.data(), font.size()) != UC_ERR_OK) return;
+    const int cols = FB_XRES / 8, rows = FB_YRES / 16;
+    // Compara as duas ordens de bits (o dumper do fbcon pode escrever com bit7 ou bit0
+    // a' esquerda) e usa a que casar mais celulas com a fonte.
+    auto decode = [&](bool msb_left, std::vector<std::string>& out) -> int {
+        out.assign(rows, std::string(cols, ' '));
+        int matched = 0;
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                u8 pat[16];
+                bool blank = true;
+                for (int y = 0; y < 16; ++y) {
+                    u8 b = 0;
+                    for (int x = 0; x < 8; ++x) {
+                        const u32 off = (((u32)(r * 16 + y) * FB_XRES) + (u32)(c * 8 + x)) * 2u;
+                        const u16 px = (u16)(fb[off] | (fb[off + 1] << 8));
+                        if (px) { b |= msb_left ? (u8)(0x80u >> x) : (u8)(1u << x); blank = false; }
+                    }
+                    pat[y] = b;
+                }
+                if (blank) continue;
+                for (int g = 0; g < 256; ++g) {
+                    if (std::memcmp(pat, &font[(size_t)g * 16], 16) == 0) {
+                        out[r][c] = (g >= 32 && g < 127) ? (char)g : '.';
+                        ++matched;
+                        break;
+                    }
+                }
+            }
+        }
+        return matched;
+    };
+    std::vector<std::string> txt_a, txt_b;
+    const int na = decode(true, txt_a);
+    const int nb = decode(false, txt_b);
+    const std::vector<std::string>& txt = (nb > na) ? txt_b : txt_a;
+    std::printf("[fb-text] metade=%d ink=%zu/%zu %dx%d celulas; casou bit7=%d bit0=%d -> usando %s\n",
+                half, ink[0], ink[1], cols, rows, na, nb, (nb > na) ? "bit0-esquerda" : "bit7-esquerda");
+    int last = -1;
+    for (int r = 0; r < rows; ++r)
+        if (txt[r].find_first_not_of(' ') != std::string::npos) last = r;
+    const int first = (last > 24) ? last - 24 : 0;
+    for (int r = first; r <= last; ++r) {
+        std::string l = txt[r];
+        while (!l.empty() && l.back() == ' ') l.pop_back();
+        if (!l.empty()) std::printf("[fb-text] %2d|%s\n", r, l.c_str());
+    }
+    std::fflush(stdout);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
     if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
@@ -1931,6 +2171,7 @@ int main(int argc, char** argv) {
     uc_mem_map(uc, 0xa0800000u, 0x1000u, UC_PROT_ALL);
     g_usb_log = (std::getenv("ZEEBO_USB_LOG") != nullptr);
     g_usb_async_log = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
+    if (std::getenv("ZEEBO_KEY_TEST")) key_test();     // tabela de teclas (rapido, sem janela)
     uc_hook hu_w = 0, hu_r = 0;
     uc_hook_add(uc, &hu_w, UC_HOOK_MEM_WRITE, (void*)on_usb_write, nullptr, 0xa0800000u, 0xa0801000u);
     uc_hook_add(uc, &hu_r, UC_HOOK_MEM_READ,  (void*)on_usb_read,  nullptr, 0xa0800000u, 0xa0801000u);
@@ -2122,6 +2363,7 @@ int main(int argc, char** argv) {
     dump_kernel_log(uc, "fim da execucao");
 #if defined(ZEEBO_SDL)
     sdl_fb_dump(uc);          // memoria de FB do guest -> /tmp/zeebo_fb.bmp
+    if (std::getenv("ZEEBO_FB_TEXT")) fb_decode_text(uc);   // estado final do FB, em texto
     sdl_shot_save();          // prova visual do que a janela desenhou
 #endif
     std::printf("[fbprobe] escritas na faixa do FB: %llu (nao-zero: %llu)\n",
