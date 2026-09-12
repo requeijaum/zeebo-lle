@@ -3,6 +3,30 @@
 Health check em 2026-09-08. Este documento lista o que precisa ser resolvido
 ANTES de tornar o repositório público. Nada foi alterado no repo — só auditado.
 
+---
+
+## ⚠️ STATUS EM 2026-09-12 — leia antes do checklist
+
+**O repositório está PÚBLICO desde 2026-09-11T03:13Z (`requeijaum/zeebo-lle`,
+`visibility: PUBLIC`) e o bloqueador nº 2 continua aberto:**
+
+- **`refs/` de terceiros ainda está versionado: 662 arquivos rastreados** —
+  árvore OKL4/Pistachio, `refs/rex.c`/`refs/rexarm.s` (REX/Qualcomm),
+  `refs/msm_nand-kernel-driver.c` (Qualcomm). É exatamente o item marcado como
+  **JURÍDICO / bloqueia** abaixo, e ele **não** foi resolvido antes da publicação.
+- **Não existe `LICENSE`** na raiz (item 4, parcialmente aberto).
+- Resolvidos desde a auditoria: os 6 ELFs (item 1), o firmware do OpenZeebo (item 3),
+  o `README.md` (item 4), a triagem dos untracked (working tree hoje com **0 untracked**;
+  os utilitários de RE foram para `tools/py/` e as notas/TODOs para o versionamento) e,
+  adicionalmente, `docs/remote/` (fonte do OpenZeebo + TRMs da ARM) passou a ser
+  ignorado por inteiro no `.gitignore` — antes só `docs/remote/md/` era coberto.
+
+Consequência prática: manter `refs/` versionado em repo público contraria a política
+clean-room do projeto (a mesma que protege o não-descompilar do a1Sim). As saídas são
+as do item 2 abaixo — remover do índice **e reescrever o histórico** (o conteúdo já
+está publicado nos commits antigos), ou recomeçar o repositório a partir de uma árvore
+limpa, ou voltar a privado enquanto se decide.
+
 ## Resumo do veredito
 
 Build e clean-room OK. Publicação **bloqueada** por 3 itens (2 jurídicos, 1 de higiene).

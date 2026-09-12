@@ -2,7 +2,13 @@
 
 Revisão: 2026-09-10. Código examinado: `f7dea3ac1da87ab2037c81af21fd708563dc3368`.
 Estado: saída SDL e mixer existem; áudio originado pelo firmware/jogo NÃO demonstrado.
-Esta revisão é documental: não corrige o runtime nem libera alterações no QDSP5.
+
+> **Atualização 2026-09-12**: o freeze de desenvolvimento em `tools/cpp/qdsp5/` foi
+> levantado por decisão do Rafael em 2026-09-11 (idem `tools/cpp/gpu/`). Esta revisão
+> continua sendo documental, mas não vale mais como restrição de escopo — trabalho
+> ativo nessas pastas está autorizado, respeitando o gate do respectivo TODO.
+_(Nota histórica: esta revisão nasceu documental e sem liberar alterações no QDSP5 —
+ver a atualização de 2026-09-12 acima.)_
 
 **Atualização 2026-09-10 (HEAD `5471a8b`)** — dois defeitos de MEMÓRIA no caminho de áudio
 já foram corrigidos, mas nenhum deles produz som do jogo:

@@ -535,6 +535,10 @@ test-linux-boot-selftest: test_linux_boot
 	elif [ $$rc -eq 0 ]; then echo "OK: instrumento de console validado"; \
 	else echo "FAIL: instrumento de console quebrado (rc=$$rc)"; exit 1; fi
 
+# Gate do harness de boot de Linux real. Fica FORA do check-fast de proposito: com o
+# zImage em testdata/kernels/ ele boota o kernel inteiro (minutos), e sem imagem sai com
+# exit 77 (SKIP, e' o que o `||` abaixo aceita). O gate rapido que roda sempre e' o
+# `test-linux-boot-selftest` (controle positivo do instrumento, sem emulacao longa).
 test-linux-boot: test_linux_boot test-linux-boot-selftest
 	./test_linux_boot || [ $$? -eq 77 ]
 

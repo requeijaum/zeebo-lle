@@ -1,5 +1,10 @@
 # QDSP5 Subsystem — Deep-Dive & TODO
 
+> **Atualização 2026-09-12**: o freeze de desenvolvimento em `tools/cpp/qdsp5/` foi
+> levantado por decisão do Rafael em 2026-09-11 (idem `tools/cpp/gpu/`). Este documento
+> deixa de valer como restrição de escopo: trabalho ativo no QDSP5 está autorizado,
+> respeitando os gates descritos aqui.
+
 > Zeebo LLE emulator. Target: Qualcomm **MSM7201A** (ARM11 apps + ARM9 modem/AMSS + **QDSP5** DSP).
 > Scope of this document: everything about the QDSP5 multimedia DSP — what is
 > reverse-engineered and proven, what is stubbed, and the concrete work left to make

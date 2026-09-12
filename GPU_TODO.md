@@ -1,6 +1,11 @@
 # GPU_TODO.md — Estratégia gráfica do zeebo-lle (Adreno 130 / BREW OpenGL ES 1.1)
 
 Status: PLANO. Escrito 2026-09-07. Ancorado no corpus local (fontes citadas por caminho).
+
+> **Atualização 2026-09-12**: o freeze de desenvolvimento em `tools/cpp/gpu/` foi
+> levantado por decisão do Rafael em 2026-09-11 (idem `tools/cpp/qdsp5/`). O plano
+> segue válido como estratégia; trabalho ativo na pasta está autorizado, com os gates
+> descritos aqui (verificar por bytes/efeito, nunca por "retornou sucesso").
 Regra de ouro herdada: verificar execução por bytes/efeito, nunca por "retornou sucesso"
 (ver notes/FINDINGS.md sessão 5a — o Adreno atual é falso: conta packets, não desenha).
 

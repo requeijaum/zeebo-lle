@@ -1030,6 +1030,38 @@ o disco e o build falha com `error writing to /tmp/ccXXXX.s: Não há espaço di
 
 ---
 
+### Fase 16: Boot de Linux real (kernel 3.4.113) — [EM CURSO; HID pendente]
+
+Linha `linux-boot`: bootar um kernel Linux real no LLE, com rootfs limpo e shell
+funcional, saída no framebuffer e janela de depuração. É o caminho mais rápido para
+exercitar os modelos de SoC ponta a ponta — e foi ele que validou (e corrigiu)
+GPT/DGT, VIC, MDP, UART e EHCI de uma vez.
+
+**Verificado por execução** (harness `tools/cpp/test_linux_boot.cpp`):
+
+- o kernel 3.4.113 (zImage versionado em `testdata/kernels/`) boota até a shell
+  BusyBox com `/proc` montado, e o teclado do host chega na shell;
+- `fb0` instalado (`msmfb_probe() installing 720 x 480 panel`, fbcon em 90x30) e o
+  texto do console de VT aparece na memória de framebuffer — conferido decodificando o
+  FB como texto com a fonte 8x16 do próprio kernel (`ZEEBO_FB_TEXT=1`);
+- janela SDL2/Wayland **1x2** (UART | framebuffer), limitador de 60 fps por tempo de
+  parede e releitura do FB só quando o guest escreve nele (~55 fps efetivos medidos);
+- **host controller EHCI funcionando**: `new USB bus registered, assigned bus number 1`
+  e o hub enumera um dispositivo high-speed
+  (`usb 1-1: new high-speed USB device number 2`).
+
+**Pendente (critério da fase)**: enumerar o **teclado HID**. O hub para em
+`device descriptor read/64, error -110` porque falta o motor de transferência:
+executar os qTD da lista assíncrona (status/bytes de volta), levantar
+`USBSTS.USBINT` e entregar a IRQ 47 (`INT_USB_HS` — o VIC hoje só entrega IRQs 0-31,
+e os dois pontos a mudar estão mapeados no doc de patches), mais os descritores do
+HID (device/config/report) e o endpoint de interrupção para as teclas.
+
+Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
+`testdata/kernel-patches/`.
+
+---
+
 ## Próximos Passos Priorizados — vertical slice Double Dragon **[HISTÓRICO]**
 
 > Esta lista, a tabela DD-QW1–6 e os candidatos associados foram consolidados e

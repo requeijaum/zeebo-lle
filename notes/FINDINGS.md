@@ -1792,3 +1792,48 @@ Menor page size = 4KB (bit 12), condizente com `l4e_min_pagesize()==0x1000`.
   inalterado por esta correção.
 CONCLUSÃO: KIP+0xc8 destravado legitimamente via spec. Próxima fronteira Core0 =
 0xb000d6b8 / MAP_CONTROL mapping (já conhecido).
+
+## 2026-09-12 — Linha `linux-boot`: kernel Linux 3.4.113 real, framebuffer, janela 1x2 e EHCI
+
+Frente separada do boot do firmware: bootar um **kernel Linux real** no LLE para
+exercitar os modelos de SoC ponta a ponta. Harness `tools/cpp/test_linux_boot.cpp`
+(alvo `test_linux_boot`), documentação em `docs/linux-boot.md`, ROADMAP §Fase 16.
+
+**O que passou a funcionar, verificado por execução:**
+- o kernel 3.4.113 boota até a shell BusyBox com `/proc` montado (`Freeing init memory`,
+  `~ #`), com o teclado do host entrando pelo RX da UART;
+- `fb0` instalado (`msmfb_probe() installing 720 x 480 panel`, fbcon em 90x30) e o texto
+  do console de VT na memória de framebuffer (PA 0x15000000, RGB565, line_length 1440,
+  buffer duplo) — conferido decodificando o FB como texto com a fonte 8x16 do próprio
+  kernel;
+- janela SDL2/Wayland **1x2** (UART | framebuffer), ~55 fps efetivos e releitura do FB
+  só quando o guest escreve nele;
+- host controller **EHCI** subindo (`new USB bus registered, assigned bus number 1`) e o
+  hub enumerando um dispositivo high-speed
+  (`usb 1-1: new high-speed USB device number 2`).
+
+**Causas raiz que custaram tempo** (medidas, não inferidas):
+1. o Unicorn não entrega exceção do guest ao vetor do guest — o host emula a entrada de
+   exceção ARM1136; para escrita o FSR correto é `0x807` (bit 11 = FSR_WRITE) e `0x407`
+   cai em `do_bad` → SIGBUS → `Attempted to kill init`;
+2. hooks do Unicorn reportam o endereço **físico** com a MMU ligada: o CSR/GPT (VA
+   0xE0001000) precisa ser hookado por PA 0xC0100000, e mapear o espelho de 96MB em
+   0xc0000000 corrompia a RAM do kernel;
+3. ler CP15 (`uc_arm_cp_reg`) de dentro do `UC_HOOK_INTR` travava o emulador (exit 124) —
+   abandonado em favor da emulação de exceção no host;
+4. o `ehci-msm.c` do 3.4 é um **stub**: cria o HCD com `usb_create_hcd` e retorna sem
+   chamar `usb_add_hcd` (por isso o guest não tinha host controller nenhum);
+5. CAPLENGTH tem de ser **0x40** (não 0x20) para o USBCMD cair em 0x140, como o
+   `msm_hsusb_hw.h` define — e o modelo de registradores **precisa escrever as leituras
+   na memória do guest**, senão o kernel lê zero no CAPLENGTH, calcula `HC_LENGTH = 0` e
+   passa a acreditar que o USBCMD é 0x100; foi isso que prendia o `ehci_reset` em ~180
+   mil leituras de polling no handshake do HCRESET;
+6. `ASYNCLISTADDR` aponta para o `struct ehci_qh_hw` (bloco DMA só de hardware): a
+   `qtd_list` de software não é alcançável por ali.
+
+**Pendente (critério da frente)**: enumerar o **teclado HID**. O hub para em
+`device descriptor read/64, error -110` porque falta o motor de transferência —
+executar os qTD da lista assíncrona (status/bytes de volta, `USBSTS.USBINT`) — e a
+entrega da IRQ 47 (`INT_USB_HS`; o VIC só entrega IRQs 0-31, com os dois pontos a mudar
+já mapeados em `testdata/kernel-patches/usb-ehci-msm.md`), mais os descritores do HID
+(device/config/report) e o endpoint de interrupção.

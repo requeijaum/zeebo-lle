@@ -45,6 +45,27 @@ To understand why **beLLEZeebo** exists, it helps to understand how the Zeebo pr
 
 ---
 
+## Booting a real Linux kernel (`linux-boot` branch)
+
+Beyond the firmware path, the project boots a **real Linux kernel (3.4.113 for
+MSM/ARMv6)** inside the emulator, with a clean BusyBox initramfs and an interactive
+shell. It is the fastest way to exercise the SoC models end to end, and it is what the
+peripheral work is validated against.
+
+- Harness: `tools/cpp/test_linux_boot.cpp` (`make -C tools/cpp test_linux_boot`).
+- Kernels, kernel patches and rootfs sources: `testdata/kernels/`,
+  `testdata/kernel-patches/`, `testdata/rootfs/`.
+- Debug window (SDL2/Wayland, 1x2): the left pane is the guest's UART console, the
+  right pane is the **guest framebuffer** — the shell runs on the VT console, so what
+  you type shows up in the framebuffer pane.
+- Validated by execution: clean rootfs + shell, `fb0` at 720x480 RGB565, GPT/DGT
+  clockevent, MDP/VIC, the UART consoles, and a working **EHCI host controller** (the
+  hub enumerates a high-speed device). HID keyboard enumeration is the open item.
+
+Full details, peripheral map and debugging env vars: [docs/linux-boot.md](docs/linux-boot.md).
+
+---
+
 ## Building
 
 ### Requirements
