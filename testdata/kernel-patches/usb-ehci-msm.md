@@ -97,6 +97,23 @@ essas estruturas na RAM, não mais MMIO.
 Por isso o bring-up ficou atrás de `zeebo_usb=1`: sem ele o boot padrão segue
 limpo (shell + framebuffer + SDL2) — verificado com o mesmo zImage commitado.
 
+## Onde exatamente mexer para entregar a IRQ 47 (mapeado no código)
+
+No `tools/cpp/test_linux_boot.cpp` a entrega de IRQ tem **dois pontos**, e os dois
+hoje só olham a palavra 0 (`g_vic_pending[0] & g_vic_en[0]`, IRQs 0-31):
+
+1. a entrega no hook de código (dentro do bloco que roda a cada instrução):
+   condição `(g_vic_pending[0] & g_vic_en[0]) != 0` mais o laço que escolhe `nr` com
+   `g_vic_cursor` limitado a 32 bits; depois ele escreve CPSR modo IRQ / SPSR / LR e
+   salta para o vetor `0xffff0018`;
+2. `on_vic_read`, que calcula `act = g_vic_pending[0] & g_vic_en[0]` e é de onde o
+   kernel (`vic_handle_irq`) lê o número da IRQ pendente — com a palavra 0 só, a
+   IRQ 47 nunca aparece.
+
+`g_vic_en[2]`/`g_vic_pending[2]` já existem e as escritas (ENSET1/ENCLEAR1/CLEAR1)
+já são tratadas: falta só a seleção/entrega considerar a palavra 1 e devolver
+`32 + bit` no lugar de `bit`.
+
 ## Próximo passo (para enumerar o teclado HID)
 
 1. **entregar a IRQ 47 (INT_USB_HS)**: o modelo de VIC do harness só entrega IRQs
