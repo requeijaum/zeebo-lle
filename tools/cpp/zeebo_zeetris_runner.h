@@ -289,8 +289,16 @@ public:
                 u32 obj_ptr = 0;
                 if (clsid == CREATE_CLSID) {
                     obj_ptr = EXTRA_OBJ_VA;
-                } else if (clsid == 0x01001001u) {
+                } else if (clsid == 0x01001001u) { // AEECLSID_DISPLAY
                     obj_ptr = DISPLAY_OBJ_VA;
+                } else if (clsid == 0x01001003u) { // AEECLSID_FILEMGR
+                    obj_ptr = EXTRA_OBJ_VA; // reaproveita vtable básica com retorno 0
+                } else if (clsid == 0x0106c411u) { // AEECLSID_HID (driver de entrada Qualcomm)
+                    obj_ptr = EXTRA_OBJ_VA;
+                } else if (clsid == 0x01014bc3u) { // AEECLSID_GL (OpenGL ES 1.1)
+                    obj_ptr = IGL_OBJ_VA;
+                } else if (clsid == 0x01014bc4u) { // AEECLSID_EGL (EGL 1.1)
+                    obj_ptr = DISPLAY_OBJ_VA; // expõe vtable compatível
                 }
                 if (obj_ptr != 0 && ppObj != 0) {
                     uc_mem_write(uc, ppObj, &obj_ptr, 4);

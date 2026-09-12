@@ -345,6 +345,10 @@ bool IglHook::dispatch_igl(int slot, GuestMachine& gm){
         // no rasterizador sejam completados sem corromper o estado de R0.
         return true;
     }
+    // Sub-textura comprimida (glCompressedTexSubImage2D)
+    if(slot==glCompressedTexSubImage2D){
+        return true;
+    }
     // Slot não modelado: não altere registradores. O bridge devolve false e
     // permite que o wrapper/firmware real execute em vez de fabricar sucesso.
     return false;

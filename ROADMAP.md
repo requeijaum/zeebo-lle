@@ -9,18 +9,13 @@ BREW AppMgr e Z-Wheel permanecem gates de boot; não substituir o emulador por I
 
 ### Atualização de direção e evidência — 2026-09-11
 
-- AppMgr: handoff real para AMSS/BREW e `AEECShell dispatch @0x10c874f4` foram observados;
-  isso é progresso de boot, não shell visível nem jogo executado.
-- Zeetris: o `.mod` foi injetado em `0x12000000` e seu `AEEMod_Load @0x12000048` executou.
-  O dispatcher ainda o chama incorretamente como `IApplet::HandleEvent`; a próxima fronteira é
-  `AEEMod_Load → IModule::CreateInstance(CLSID estrutural do .mif) → IApplet::HandleEvent`.
+- AppMgr: o bootstrap inicial AMSS/Iguana alcança `0x10c874f4` (instalador de `env_base`), mas o rótulo antigo \"AEECShell dispatch\" foi refutado (testes de proveniência e semântica confirmam que `0x10c874f4` é instalador de bootstrap e `0x105c7fb4` é string rodata). O ponto real de despacho da Shell permanece não provado no boot livre.
+- Zeetris: o runner sintético agora opera em `0x12000000`, corrigiu eventos de teclado (`EVT_KEY_PRESS=0x0100`/`0x0101`) e rejeita falso sucesso por estouro de cota de instruções. O applet aloca seu contexto próprio (`0x30005080`, malloc `0x9094`), emite 660 chamadas IGL por slot, mas permanece travado no setup inicial (`[sb+0x30]=0`, sem chamar a carga de textura `0x120056fc`).
+- EFS2 / NAND: o catálogo EFS2 opera em modo fail-closed (`zeebo_efs2_module_guard.h`); blobs sem ponto de entrada ARM/ELF legítimo (incluindo o dump histórico de `reksio.mod`, que contém dados de modem) são sumariamente rejeitados até a reversão do gnode.
 - Vídeo: `b568d97` adicionou, com TDD, o consumidor de lista MDDI RGB565 (`PRI_PTR`) usando
   memória guest via callback. O teste cobre duas regiões e controles negativos, mas o runtime
   principal ainda precisa conectar esse sink à apresentação e medir um `PRI_PTR` real do AppMgr.
-- QDSP5 e GPU: Rafael liberou desenvolvimento em ambos. A regra anterior de freeze foi removida.
-  O primeiro alvo QDSP5 é roteamento AUDPLAY medido; Zeetris usa MP3, portanto ACK, WAV sintético
-  ou PCM inventado não são áudio do jogo. O primeiro alvo GPU é scanout MDDI real e, depois,
-  fronteiras IDisplay/IGL vivas.
+- QDSP5 e GPU: desenvolvimento liberado em ambos (2026-09-11). Injeção fabricada de RPC de liveness foi desacoplada em `zeebo_smd_bridge_unified.h` e isolada sob opt-in estrito `ZEEBO_QDSP5_RPC_PROBE=1`. O primeiro alvo QDSP5 é decodificação e roteamento de áudio MP3/AUDPLAY real para o `UnifiedAudioSink`; o primeiro alvo GPU é textura/renderização do IGL e scanout MDDI real.
 - Gate de jogo jogável: PC no módulo e instância BREW real; frame não uniforme originado pelo
   guest; input real consumido e alterando estado observável; PCM não silencioso derivado de buffer
   guest e uma sessão controlável de cinco minutos. Cada um exige controle negativo.

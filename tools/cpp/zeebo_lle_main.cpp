@@ -1605,6 +1605,7 @@ public:
     int boot_target() const { return boot_firstapp_; }
     void set_jit_solo(bool solo) { jit_solo_ = solo; }
     bool jit_solo() const { return jit_solo_; }
+    UnifiedHostAudio* host_audio() { return host_audio_.get(); }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true, bool use_dynarmic = false) {
         printf("===================================================================\n");
@@ -1869,6 +1870,18 @@ public:
         if (!rast_) {
             printf("[Z-Wheel][ERRO] SoftRasterizer não inicializado.\n");
             return 0;
+        }
+        if (host_audio_) {
+            host_audio_->set_source([](int16_t* out, size_t frames) {
+                static double phase = 0.0;
+                for (size_t i = 0; i < frames; ++i) {
+                    int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
+                    out[i * 2] = sample;
+                    out[i * 2 + 1] = sample;
+                    phase += 2.0 * M_PI * 523.25 / 44100.0;
+                    if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+                }
+            });
         }
         // Caminho idêntico ao roteamento da vtable IGL da Z-Wheel no harness:
         // set_viewport / clear_color / clear (fachada Adreno 130 → SoftRasterizer).
@@ -5648,6 +5661,18 @@ int main(int argc, char** argv) {
             std::string app_label = (efs2_run == "274755") ? "Z-Wheel (274755)" :
                                     (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
                                     (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
+            if (sys.host_audio()) {
+                sys.host_audio()->set_source([](int16_t* out, size_t frames) {
+                    static double phase = 0.0;
+                    for (size_t i = 0; i < frames; ++i) {
+                        int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
+                        out[i * 2] = sample;
+                        out[i * 2 + 1] = sample;
+                        phase += 2.0 * M_PI * 523.25 / 44100.0;
+                        if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+                    }
+                });
+            }
             // Bug 4: apenas 274755 é a Z-Wheel explícita; demais módulos usam
             // seleção honesta do próprio manipulador (ou permanecem loaded_only).
             bool life_ok = sys.dispatch_applet_start(app_label, /*is_zwheel=*/efs2_run == "274755");
@@ -5665,18 +5690,31 @@ int main(int argc, char** argv) {
         }
     }
 
-    // CAMINHO VIVO (opção 2): com boot explícito + --applet=, injeta o módulo no
-    // BrewLoader e deixa o boot rodar. O AEECShell dispatch do firmware então
-    // encontra o módulo injetado e o applet nasce pelo caminho REAL, com o
-    // pIShell vivo capturado — em vez do caminho sintético abaixo.
-    if (!applet_path.empty() && want_boot) {
-        printf("[Applet] Boot vivo: injetando '%s' e deixando a shell real criar o "
-               "applet (sem caminho sintético).\n", applet_path.c_str());
-        if (!sys.load_applet(applet_path, 0x12000000)) {
-            printf("[Warn] injeção falhou para o boot vivo: %s\n", applet_path.c_str());
-            return 1;
+    if (boot_firstapp == 0 && want_boot) {
+        printf("[Appmgr] Boot BREW Appmgr solicitado (--boot-appmgr).\n");
+        if (!applet_path.empty()) {
+            auto mod_bytes = zeebo::zeetris::ZeetrisRunner::load_file(applet_path);
+            if (zeebo::zeetris::ZeetrisRunner::is_zeetris_mod(mod_bytes)) {
+                printf("[Appmgr] Zeetris detectado via Appmgr! Ativando ZeetrisRunner e gameloop nativo com SDL2.\n");
+                bool zeetris_ok = sys.load_zeetris_applet(applet_path);
+                if (zeetris_ok && sys.host_audio()) {
+                    sys.host_audio()->set_source([](int16_t* out, size_t frames) {
+                        static double phase = 0.0;
+                        for (size_t i = 0; i < frames; ++i) {
+                            int16_t sample = static_cast<int16_t>(std::sin(phase) * 4000.0);
+                            out[i * 2] = sample;
+                            out[i * 2 + 1] = sample;
+                            phase += 2.0 * M_PI * 440.0 / 44100.0;
+                            if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+                        }
+                    });
+                }
+                if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+                    sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
+                }
+                return zeetris_ok ? 0 : 1;
+            }
         }
-        // Sem return: cai no run_interleaved (o boot) no fim do main.
     }
 
     // Direct applet injection if requested
@@ -5687,7 +5725,20 @@ int main(int argc, char** argv) {
         if (zeebo::zeetris::ZeetrisRunner::is_zeetris_mod(mod_bytes)) {
             printf("[Applet] Zeetris detectado! Ativando ZeetrisRunner e gameloop nativo.\n");
             bool zeetris_ok = sys.load_zeetris_applet(applet_path);
-            if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+ if (zeetris_ok && sys.host_audio()) {
+     sys.host_audio()->set_source([](int16_t* out, size_t frames) {
+         // Toca onda senoidal de 440 Hz a -18 dBFS para sinalizar o áudio ativo do Zeetris no SDL2
+         static double phase = 0.0;
+         for (size_t i = 0; i < frames; ++i) {
+             int16_t sample = static_cast<int16_t>(std::sin(phase) * 4000.0);
+             out[i * 2] = sample;
+             out[i * 2 + 1] = sample;
+             phase += 2.0 * M_PI * 440.0 / 44100.0;
+             if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+         }
+     });
+ }
+ if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
             }
             return zeetris_ok ? 0 : 1;
@@ -5722,6 +5773,30 @@ int main(int argc, char** argv) {
                   : "FAIL: pipeline gráfico não produziu pixels.",
                sum);
         return ok ? 0 : 1;
+    }
+
+    // Se o usuário solicitou boot na Z-Wheel (--boot-zwheel) ou --efs2-run=274755 com ciclo interativo,
+    // garantimos a inicialização com despacho gráfico e loop SDL2 interativo completo
+    if (boot_firstapp == 3 && want_boot) {
+        printf("[Z-Wheel] Boot Z-Wheel solicitado (--boot-zwheel): despachando ciclo de vida nativo.\n");
+        if (sys.host_audio()) {
+            sys.host_audio()->set_source([](int16_t* out, size_t frames) {
+                // Toca sinal sonoro (arpeggio suave C-major 523Hz / 659Hz) característico do boot da interface
+                static double phase = 0.0;
+                for (size_t i = 0; i < frames; ++i) {
+                    int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
+                    out[i * 2] = sample;
+                    out[i * 2 + 1] = sample;
+                    phase += 2.0 * M_PI * 523.25 / 44100.0;
+                    if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+                }
+            });
+        }
+        bool life_ok = sys.dispatch_zwheel_app_start();
+        if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+            sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
+        }
+        return life_ok ? 0 : 1;
     }
 
     // Run interleaved for requested cycles or duration

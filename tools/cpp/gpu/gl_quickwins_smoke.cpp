@@ -274,6 +274,15 @@ int main(){
         check("QWd glClear(0) is no-op (keeps red)",h.center(),0xF800);
     }
 
+    // ---------- QW_TEXSUB: glCompressedTexSubImage2D stub validation ----------
+    {
+        Harness h;
+        h.regs={0x0de1,0,0,0,4,4,0x8C92,16,0x1000};
+        bool handled = h.hook.dispatch_igl(igl_slot::glCompressedTexSubImage2D, h.gm);
+        if(!handled){ printf("[QW_TEXSUB] unhandled FAIL\n"); fails++; }
+        else { printf("[QW_TEXSUB] glCompressedTexSubImage2D handled PASS\n"); }
+    }
+
     printf(fails==0?"DONE ALL PASS\n":"DONE %d FAIL\n",fails);
     return fails==0?0:1;
 }

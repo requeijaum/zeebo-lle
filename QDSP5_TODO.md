@@ -94,13 +94,12 @@ VFE/VOICE are phone-heritage blocks the Zeebo firmware carries but games rarely 
   class `VirtualSMDBridge::inject_oncrpc_packet`: builds an ONCRPC CALL, writes header +
   payload@`+0x80`, links a queue node, flips SMD channel `0x1755d1dc` to FLUSHING. Standalone
   test PASSES.
-- 🟡 **Orchestrator hook** in `zeebo_lle_main.cpp` (`c0_mem_hook`, ~line 769): a **separate**
-  class `UnifiedSMDBridge::inject_packet` fires on an A2M doorbell, injecting a **dummy** 16-byte
-  `0x42` payload with proc `0x1b59`. Proves the wakeup path but carries **no real command
-  semantics** — a liveness probe, not audio.
-  > ⚠️ Two independent bridge implementations exist (`VirtualSMDBridge` in the test, standalone;
-  > `UnifiedSMDBridge` in the orchestrator). They duplicate the injection logic — consolidate to
-  > one before building the real AUDPP path, or fixes will diverge.
+- ✅ **Orchestrator hook** in `zeebo_lle_main.cpp` (`c0_mem_hook`, ~line 769):
+  formerly duplicate inline injection logic was **unified** into `zeebo_smd_bridge_unified.h`
+  and gated under `qdsp5_doorbell_probe.h` (commit `02dea54`/`6a4ca20`).
+  Fabricated liveness injection is **disabled by default**, and only active when
+  explicitly opted in with `ZEEBO_QDSP5_RPC_PROBE=1`. A standalone test
+  `test_qdsp5_doorbell_probe.cpp` validates that probes are suppressed when unset/off.
 
 - ⚠️ **UNVERIFIED constants baked into both bridges:** `program = 0x30000060` ("MSM Audio/QDSP
   service") and proc `0x1b59` are **hardcoded comments with no primary-source evidence** — neither

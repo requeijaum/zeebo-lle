@@ -49,6 +49,15 @@ int main(int argc, char** argv) {
     uc_mem_write(uc, ZeetrisRunner::LOAD_VA, bytes.data(), bytes.size());
 
     ZeetrisContext ctx{};
+    // Liga o dispatcher IGL antes de setup_and_start para capturar slots de init (ex.: slot 16 glCompressedTexSubImage2D)
+    auto rast = zeebo::gpu::create_rasterizer(zeebo::gpu::Backend::SoftwareRef);
+    assert(rast);
+    assert(rast->init());
+    zeebo::gpu::IglHook igl_hook(*rast);
+    ctx.igl_dispatcher = [&igl_hook](int slot, zeebo::gpu::GuestMachine& gm) {
+        return igl_hook.dispatch_igl(slot, gm);
+    };
+
     std::printf("[test] Calling setup_and_start...\n");
     std::fflush(stdout);
     bool ok = ZeetrisRunner::setup_and_start(uc, ctx);
@@ -64,16 +73,6 @@ int main(int argc, char** argv) {
     bool release_ok = ZeetrisRunner::dispatch_key(uc, ctx, 0xE035, false);
     assert(release_ok);
 
-    // Liga a vtable IGL do guest ao rasterizador de software real: cada slot
-    // gl* despachado pelo jogo passa a virar geometria de verdade (glClear,
-    // glBindTexture, glEnable, glTexCoordPointer, glVertexPointer, glDrawArrays).
-    auto rast = zeebo::gpu::create_rasterizer(zeebo::gpu::Backend::SoftwareRef);
-    assert(rast);
-    assert(rast->init());
-    zeebo::gpu::IglHook igl_hook(*rast);
-    ctx.igl_dispatcher = [&igl_hook](int slot, zeebo::gpu::GuestMachine& gm) {
-        return igl_hook.dispatch_igl(slot, gm);
-    };
     rast->begin_frame();
     // CONTROLE POSITIVO DO INSTRUMENTO: pinta o framebuffer de vermelho (sentinela)
     // e em seguida deixa a cor de clear preta. Se o glClear do JOGO realmente

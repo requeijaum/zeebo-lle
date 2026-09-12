@@ -324,12 +324,20 @@ BLOQUEIO DE MONTANTE INTACTO (regra de ouro)
     buffer. gpu_smoke usa stream SINTÉTICO de propósito. Fase 0 (MAP_CONTROL)
     continua sendo o pré-requisito — não construir o telhado antes da parede.
 
-PENDÊNCIAS ABERTAS (não resolvidas nesta rodada)
-  - [ ] Confirmar tabela IT_OPCODE específica do Imageon 130 (vs A2xx) — precisa
-        de dump de ring buffer real OU doc Imageon (não localizado no corpus/web).
-  - [ ] Base real dos registradores do CP no MSM7201A (grep no corpus deu MDP
-        0xAA200000; CP/Adreno base ainda não fixada — checar zloader/msm7k).
-  - [ ] Coordenar interface com o outro agente ANTES de integrar ao build principal.
+═══════════════════════════════════════════════════════════════════════════════
+12. ATUALIZAÇÃO AUDITADA (2026-09-11) — Integração IGL Hook e Rasterizer
+═══════════════════════════════════════════════════════════════════════════════
+- Desenvolvimento em GPU liberado formalmente por Rafael (2026-09-11).
+- O IGL hook (`gpu/igl_hook.cpp`) está totalmente integrado no executável principal
+  e no runner do Zeetris (`zeebo_zeetris_runner.h`). A interceptação captura 80 slots
+  de OpenGL ES 1.1 da vtable do guest.
+- Comportamento de binding verificado: no Zeebo, `glVertexPointer` e correlatos
+  realizam o BIND do array no contexto do driver.
+- SoftRasterizer emite geometria real para o framebuffer (660 chamadas IGL por loop de
+  teste; geometria medida de 77.120 px / ~25.1% de cobertura de tela em `test-zeetris-runner`).
+- PENDÊNCIA IMEDIATA DA GPU: suporte à carga e decodificação de texturas (rotina
+  `0x120056fc` do Zeetris), atualmente não alcançada pela máquina de estados do jogo.
+
 
 ═══════════════════════════════════════════════════════════════════════════════
 11. EMULADORES NINTENDO vs Adreno 130 (quais servem) — 2026-09-07
