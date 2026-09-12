@@ -68,8 +68,17 @@ constexpr u32 UART_SR_TX_EMPTY = (1u << 3);
 constexpr u32 UART_SR_TX_READY = (1u << 2);
 constexpr u32 UART_ISR_TX_READY = (1u << 7);
 constexpr u32 UART_IMR_TXLEV = (1u << 0);
-constexpr u32 VIC_BASE      = 0xc0000000u;
-constexpr u32 VIC_SIZE      = 0x00200000u;   // 2MB: o VIC do MSM vai ate 0xc01xxxxx
+constexpr u32 VIC_BASE      = 0xc0000000u;   // PA do VIC (VA 0xE0000000 no iotable)
+constexpr u32 VIC_SIZE      = 0x00002000u;   // registradores do VIC (o CSR em
+                                             // 0xC0100000 vem logo depois e tem
+                                             // hook proprio)
+constexpr u32 PERIPH_BASE   = 0xc0000000u;   // VIC + GPT/DGT (0xC0100000)
+constexpr u32 PERIPH_SIZE   = 0x00020000u;
+// MDP/TVENC do MSM7x00: o driver de framebuffer (mdp.c) escreve nestes registradores.
+constexpr u32 MDP_BASE      = 0xaa200000u;   // MSM_MDP_PHYS
+constexpr u32 MDP_SIZE      = 0x000f0000u;
+constexpr u32 TVENC_BASE    = 0xaa400000u;
+constexpr u32 TVENC_SIZE    = 0x00001000u;
 
 // Onde o zImage ARM e tipicamente carregado: base da RAM + 0x8000.
 constexpr u32 KERNEL_LOAD   = APPS_RAM_PHYS + 0x8000u;
@@ -994,6 +1003,83 @@ static void sdl_shot_save() {
 }
 #endif  // ZEEBO_SDL
 
+// --- GPT/DGT do MSM7x00 (timer) --------------------------------------------
+// mach/msm_iomap-7x00.h: MSM_CSR_BASE = VA 0xE0001000 (PA 0xC0100000).
+// timer.c (cpu_is_msm7x01): event_base = MSM_CSR_BASE, source_base = +0x10;
+// registradores TIMER_MATCH_VAL=0x00, TIMER_COUNT_VAL=0x04, TIMER_ENABLE=0x08,
+// TIMER_CLEAR=0x0c; GPT_HZ=32768 no clockevent e o clock source e' o DGT a
+// 19200000>>5 = 600kHz (bate com "sched_clock: 27 bits at 600kHz" do log real).
+// INT_GP_TIMER_EXP = 7 (irqs-7x00.h).
+constexpr u32 CSR_BASE        = 0xE0001000u;
+constexpr u32 CSR_SIZE        = 0x00001000u;
+constexpr u32 CSR_PA          = 0xC0100000u;
+constexpr u32 TIMER_MATCH_VAL = 0x00u;
+constexpr u32 TIMER_COUNT_VAL = 0x04u;
+constexpr u32 TIMER_ENABLE    = 0x08u;
+constexpr u32 TIMER_CLEAR     = 0x0cu;
+constexpr u32 GPT_HZ          = 32768u;
+constexpr u32 DGT_HZ          = 19200000u;
+constexpr u32 INT_GP_TIMER    = 7u;
+
+// 1 segundo de tempo do guest = INSN_PER_SEC instrucoes emuladas.
+constexpr u64 INSN_PER_SEC = 1000000ull;
+
+static u32  g_gpt_match  = 0xffffffffu;
+static u32  g_gpt_enable = 0;
+static bool g_timer_log  = false;
+static bool g_timer_on   = false;   // ZEEBO_TIMER=1 liga o clockevent virtual
+
+static inline u32 gpt_count_now() {
+    return static_cast<u32>((g_icount * GPT_HZ) / INSN_PER_SEC);
+}
+static inline u32 dgt_count_now() {
+    return static_cast<u32>((g_icount * DGT_HZ) / INSN_PER_SEC);
+}
+
+// Reflete o estado do GPT na linha 7 do VIC (clockevent one-shot do kernel).
+static void timer_refresh_irq() {
+    if (!g_timer_on) return;
+    const u32 bit = 1u << INT_GP_TIMER;
+    if ((g_gpt_enable & 1u) && gpt_count_now() >= g_gpt_match) g_vic_pending[0] |= bit;
+    else                                                     g_vic_pending[0] &= ~bit;
+}
+
+void on_csr_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                  int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
+                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
+    if (off == 0xffffffffu) return;
+    const u32 v = static_cast<u32>(value);
+    if (off == TIMER_MATCH_VAL)      g_gpt_match = v;
+    else if (off == TIMER_ENABLE)    g_gpt_enable = v;
+    else if (off == TIMER_CLEAR)     g_gpt_enable = 0;
+    if (g_timer_log)
+        std::printf("[gpt] W off=0x%02x val=0x%08x (match=0x%x en=%u cnt=%u)\n",
+                    off, v, g_gpt_match, g_gpt_enable, gpt_count_now());
+    if (off == TIMER_MATCH_VAL || off == TIMER_ENABLE || off == TIMER_CLEAR)
+        timer_refresh_irq();
+}
+
+void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                 int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
+                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
+    if (off == 0xffffffffu) return;
+    u32 val = 0;
+    if (off == TIMER_MATCH_VAL)          val = g_gpt_match;
+    else if (off == TIMER_COUNT_VAL)     val = gpt_count_now();
+    else if (off == TIMER_ENABLE)        val = g_gpt_enable;
+    else if (off == TIMER_COUNT_VAL + 0x10u) val = dgt_count_now();   // DGT
+    if (g_timer_log)
+        std::printf("[gpt] R off=0x%02x -> 0x%08x\n", off, val);
+    // O guest le atraves da MMU: o valor tem de estar no PA, nao no VA do hook.
+    uc_mem_write(uc, CSR_PA + off, &val, 4);
+}
+
 static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
     (void)ud;
     u32 cpsr = 0, pc = 0;
@@ -1081,21 +1167,27 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
     ++g_icount;
     g_last_pc = static_cast<u32>(addr);
+    // Timer: o clockevent one-shot do kernel (GPT, irq 7). Reflete o estado na
+    // linha do VIC; a entrega de IRQ logo abaixo encontra o bit pendente.
+    if ((g_icount & 0x3Fu) == 0u) timer_refresh_irq();
     // Entrega de IRQ ao guest: o Unicorn nao faz a entrada de excecao de IRQ,
     // entao o handler do kernel (handle_IRQ -> ISR da UART) nunca roda.
     if ((g_vic_pending[0] & g_vic_en[0]) != 0u && !g_irq_in_service) {
-        u32 cpsr = 0;
+        u32 cpsr = 0, pc_va = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        // O parametro 'addr' do hook e' o endereco FISICO; o LR do IRQ tem de ser
+        // o PC arquitetural (VA), senao o kernel volta para um VA inexistente.
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc_va);
         if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
             g_irq_in_service = true;
             ++g_irq_delivered;
             const u32 nr = (u32)__builtin_ctz(g_vic_pending[0] & g_vic_en[0]);
             if (g_irq_log || g_irq_delivered <= 8u) {
-                std::printf("[irq] entregando IRQ %u em pc=0x%08x cpsr=0x%08x\n",
-                            nr, static_cast<u32>(addr), cpsr);
+                std::printf("[irq] entregando IRQ %u em pc=0x%08x (hook=0x%08x) cpsr=0x%08x\n",
+                            nr, pc_va, static_cast<u32>(addr), cpsr);
                 std::fflush(stdout);
             }
-            const u32 lr_ret = static_cast<u32>(addr) + 4u;
+            const u32 lr_ret = pc_va + 4u;
             u32 irq_cpsr = (cpsr & ~0x3fu) | 0x12u | 0x80u;   // modo IRQ, I=1
             uc_reg_write(uc, UC_ARM_REG_CPSR, &irq_cpsr);
             uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
@@ -1464,9 +1556,30 @@ int main(int argc, char** argv) {
     // O Unicorn host uc_mem_read/write requer mapeamento para VAs quando a MMU do Unicorn
     // nao estiver fazendo walk completo no modo interpretado para o host API.
     // uc_mem_map(uc, 0x00000000u, 0x10000000u, UC_PROT_ALL); // 256MB user space
-    uc_mem_map(uc, 0xc0000000u, APPS_RAM_SIZE, UC_PROT_ALL);
+    // (espelho de 96MB em 0xc0000000 removido -- ver comentario do GPT/CSR abaixo)
+    // Mas o espaco de PERIFERICOS fisicos 0xC0000000+ precisa de memoria de host:
+    // o VIC fica em PA 0xC0000000 (VA 0xE0000000) e o GPT/DGT em PA 0xC0100000.
+    uc_mem_map(uc, PERIPH_BASE, PERIPH_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, 0x9c000000u, 0x100000u, UC_PROT_ALL); // ioremap virtual region
     uc_mem_map(uc, 0xffff0000u, 0x10000u, UC_PROT_ALL); // High vectors page (64KB)
+    // MDP/TVENC: o driver de framebuffer escreve nos registradores do MDP. Sem
+    // este mapeamento o acesso vira UC_ERR_MAP e mata o boot (visto em
+    // 0xaa200060). O espaco de FB memoria fica em PA 0x15000000 (dentro da RAM
+    // mapeada de 96MB, fora dos 64MB que o kernel gerencia).
+    uc_mem_map(uc, MDP_BASE, MDP_SIZE, UC_PROT_ALL);
+    uc_mem_map(uc, TVENC_BASE, TVENC_SIZE, UC_PROT_ALL);
+    // NAO mapear espelho de 0xc0000000+: os hooks do Unicorn reportam o endereco
+    // FISICO dos acessos do guest, e 0xC0100000 (PA do GPT) cai exatamente ali --
+    // mapear/hookar esse espaco corromperia RAM do kernel. O dump do log do kernel
+    // nao depende dele: guest_read_bytes percorre as tabelas de pagina na mao.
+    // GPT/DGT em PA 0xC0100000 (VA 0xE0001000 no iotable). O hook ve o PA.
+    uc_mem_map(uc, CSR_PA, CSR_SIZE, UC_PROT_ALL);
+    uc_mem_map(uc, CSR_BASE, CSR_SIZE, UC_PROT_ALL);
+    g_timer_log = (std::getenv("ZEEBO_TIMER_LOG") != nullptr);
+    g_timer_on  = (std::getenv("ZEEBO_TIMER") != nullptr);   // clockevent virtual (experimental)
+    uc_hook hcw = 0, hcr = 0;
+    uc_hook_add(uc, &hcw, UC_HOOK_MEM_WRITE, (void*)on_csr_write, nullptr, CSR_PA, CSR_PA + CSR_SIZE);
+    uc_hook_add(uc, &hcr, UC_HOOK_MEM_READ, (void*)on_csr_read, nullptr, CSR_PA, CSR_PA + CSR_SIZE);
     for (u32 ub : UART_BASES) uc_mem_map(uc, ub, UART_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, VIC_BASE, VIC_SIZE, UC_PROT_ALL);
     // MSM MMIO ranges: atencao: UART1_BASE = 0xa9a00000 (size 4KB) ja foi mapeada acima.
