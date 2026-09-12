@@ -575,6 +575,18 @@ test-gpu: gpu
 test-qdsp5:
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 test
 
+# QDSP5 doorbell RPC-probe gate: proves production doorbells do NOT mutate the
+# AMSS ONCRPC queue with the probe OFF (default), and inject only when the
+# opt-in ZEEBO_QDSP5_RPC_PROBE diagnostic is ON. See QDSP5_TODO.md Q1.5.
+test_qdsp5_doorbell_probe: test_qdsp5_doorbell_probe.cpp zeebo_smd_bridge_unified.h qdsp5_doorbell_probe.h
+	$(CXX) $(CXXFLAGS) -o $@ test_qdsp5_doorbell_probe.cpp -lunicorn
+
+test-qdsp5-doorbell-probe: test_qdsp5_doorbell_probe
+	./test_qdsp5_doorbell_probe
+
+clean-qdsp5-doorbell-probe:
+	rm -f test_qdsp5_doorbell_probe
+
 # Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
 # sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em
 # [applet+0x2c] → SoftRasterizer/IglGuestBridge.
@@ -892,10 +904,11 @@ clean:
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
 	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner *.o
 	rm -rf testkit/build
+	rm -f test_qdsp5_doorbell_probe
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle
+.PHONY: all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
