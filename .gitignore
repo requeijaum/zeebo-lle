@@ -83,3 +83,16 @@ refs/okl4-arm-build/arm-kernel.elf
 
 # Firmware de terceiros compilado (OpenZeebo)
 firmware/*.bin
+
+# Test executables are extensionless; keep every source/script visible.
+tools/cpp/test_*
+!tools/cpp/test_*.cpp
+!tools/cpp/test_*.h
+!tools/cpp/test_*.py
+!tools/cpp/test_*.sh
+tools/cpp/gpu/*_test
+tools/cpp/gpu/*_smoke
+!tools/cpp/gpu/*_test.cpp
+!tools/cpp/gpu/*_smoke.cpp
+tools/cpp/qdsp5/*_test
+!tools/cpp/qdsp5/*_test.cpp
