@@ -47,7 +47,17 @@ namespace {
 constexpr u32 APPS_RAM_PHYS = 0x10000000u;
 constexpr u32 APPS_RAM_SIZE = 0x06000000u;   // 96MB
 constexpr u32 UART1_BASE    = 0xa9a00000u;
+constexpr u32 UART2_BASE    = 0xa9c00000u;   // ttyMSM2: e' a porta que o driver registra
+constexpr u32 UART3_BASE    = 0xa9e00000u;   // UART3 do MSM7201A (mesmo bloco, irq 12)
+constexpr u32 UART_BASES[3] = {UART1_BASE, UART2_BASE, UART3_BASE};
 constexpr u32 UART_SIZE     = 0x00010000u;
+
+// Base da UART dona deste endereco (0 se nao for UART conhecida).
+inline u32 uart_base_for(u32 a) {
+    for (u32 b : UART_BASES)
+        if (a >= b && a < b + UART_SIZE) return b;
+    return 0;
+}
 constexpr u32 UART_OFF_TF   = 0x000cu;       // TX FIFO
 constexpr u32 UART_OFF_SR   = 0x0008u;       // status; bit2 = TX_READY
 constexpr u32 VIC_BASE      = 0xc0000000u;
@@ -76,7 +86,10 @@ static void on_smem_write(uc_engine* uc, uc_mem_type /*type*/, uint64_t addr,
 void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                    int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
-    const u32 off = static_cast<u32>(addr - UART1_BASE);
+    const u32 a = static_cast<u32>(addr);
+    const u32 base = uart_base_for(a);
+    if (!base) return;
+    const u32 off = a - base;
     if (off == UART_OFF_TF || off == 0x00 || off == 0x0c) {
         const char c = static_cast<char>(value & 0xff);
         if (c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f)) g_console.push_back(c);
@@ -88,11 +101,14 @@ void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
 bool on_uart_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
                   int size, int64_t value, void* ud) {
     (void)type; (void)size; (void)value; (void)ud;
-    const u32 off = static_cast<u32>(addr - UART1_BASE);
+    const u32 a = static_cast<u32>(addr);
+    const u32 base = uart_base_for(a);
+    if (!base) return true;
+    const u32 off = a - base;
     if (off == UART_OFF_SR) {
         // TX_READY sempre alto: o kernel nunca fica preso esperando a FIFO.
         u32 sr = (1u << 2);
-        uc_mem_write(uc, UART1_BASE + UART_OFF_SR, &sr, 4);
+        uc_mem_write(uc, base + UART_OFF_SR, &sr, 4);
     }
     return true;
 }
@@ -156,6 +172,11 @@ void report(const Verdict& v) {
     if (!g_console.empty()) {
         std::printf("\n  --- console UART1 (%zu bytes) ---\n", g_console.size());
         std::printf("%s\n", g_console.substr(0, 2000).c_str());
+        if (g_console.size() > 2000) {
+            const size_t tail_n = g_console.size() > 3000 ? 3000 : g_console.size() - 2000;
+            std::printf("\n  --- console UART1: ULTIMOS %zu bytes ---\n", tail_n);
+            std::printf("%s\n", g_console.substr(g_console.size() - tail_n).c_str());
+        }
     } else {
         std::printf("  (console UART1 silencioso)\n");
     }
@@ -174,7 +195,7 @@ int run_selftest() {
     // (0x412fc0f1)". O Zeebo e ARM1136 -- ver notes/ARM_CPU_WAS_WRONG.md.
     uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, 0x10000000u, 0x1000u, UC_PROT_ALL);
-    uc_mem_map(uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
+    for (u32 ub : UART_BASES) uc_mem_map(uc, ub, UART_SIZE, UC_PROT_ALL);
     uc_hook hw = 0;
     uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
                 UART1_BASE, UART1_BASE + UART_SIZE);
@@ -217,6 +238,115 @@ int run_selftest() {
     return 0;
 }
 
+// --- Teste sintetico: o Unicorn entrega excecoes do guest ao VETOR? --------
+// Isto decide se o kernel Linux pode tratar page faults (mapeamento preguicoso)
+// dentro deste harness. Se o Unicorn nao vetorizar, a excecao morre no host e
+// nenhum handler do kernel roda.
+static void vec_test() {
+    uc_engine* uc = nullptr;
+    if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) {
+        std::printf("[vec-test] uc_open FALHOU\n"); return;
+    }
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
+    uc_mem_map(uc, 0x00000000u, 0x1000u, UC_PROT_ALL);   // vetores (V=0)
+    uc_mem_map(uc, 0x00010000u, 0x1000u, UC_PROT_ALL);   // codigo
+    u32 udf = 0xe7f000f0u;                    // udf #0  → EXCP_UDEF
+    uc_mem_write(uc, 0x00010000u, &udf, 4);
+    u32 spin = 0xeafffffeu;                   // b .  (marcador de "vetorizou")
+    uc_mem_write(uc, 0x00010008u, &spin, 4);
+    u32 vec = 0xea003fffu;                    // b 0x10008
+    uc_mem_write(uc, 0x00000004u, &vec, 4);
+
+    uc_err e = uc_emu_start(uc, 0x00010000u, 0, 0, 50);
+    u32 pc = 0;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    const bool vectored = (e == UC_ERR_OK && pc == 0x00010008u);
+    std::printf("[vec-test] UDF: emu=%s(%d) pc_final=0x%08x -> vetorizacao: %s\n",
+                uc_strerror(e), (int)e, pc, vectored ? "SIM" : "NAO");
+
+    // Mesmo teste com SWI (svc #0) -> vetor de SWI em 0x00000008, em MOTOR NOVO
+    // (o motor anterior ficou com estado invalido depois do UDF). Isto decide se
+    // syscalls de user space podem funcionar neste harness.
+    uc_engine* uc2 = nullptr;
+    if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc2) == UC_ERR_OK) {
+        uc_ctl_set_cpu_model(uc2, UC_CPU_ARM_1136);
+        uc_mem_map(uc2, 0x00000000u, 0x1000u, UC_PROT_ALL);
+        uc_mem_map(uc2, 0x00010000u, 0x1000u, UC_PROT_ALL);
+        uc_mem_write(uc2, 0x00010008u, &spin, 4);
+        uc_mem_write(uc2, 0x00000008u, &vec, 4);
+        u32 svc = 0xef000000u;                // svc #0
+        uc_mem_write(uc2, 0x00010000u, &svc, 4);
+        uc_err e2 = uc_emu_start(uc2, 0x00010000u, 0, 0, 50);
+        u32 pc2 = 0;
+        uc_reg_read(uc2, UC_ARM_REG_PC, &pc2);
+        const bool vec2 = (e2 == UC_ERR_OK && pc2 == 0x00010008u);
+        std::printf("[vec-test] SWI: emu=%s(%d) pc_final=0x%08x -> vetorizacao: %s\n",
+                    uc_strerror(e2), (int)e2, pc2, vec2 ? "SIM" : "NAO");
+        uc_close(uc2);
+    }
+    // O kernel programa o registrador TLS do hardware (CP15 c13,c0,2) no
+    // syscall set_tls; a libc le por "mrc p15,0,rX,c13,c0,2". Se o Unicorn nao
+    // modelar isso, todo acesso TLS cai em endereco baixo (ex.: 0x368).
+    uc_arm_cp_reg r_tls = {15, 0, 0, 13, 0, 0, 2, 0};
+    u32 tp_in = 0x0badf00du;
+    r_tls.val = tp_in;
+    uc_err ew = uc_reg_write(uc, UC_ARM_REG_CP_REG, &r_tls);
+    uc_arm_cp_reg r_tls2 = {15, 0, 0, 13, 0, 0, 2, 0};
+    uc_err er = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_tls2);
+    std::printf("[vec-test] TLS (cp15 c13,c0,2): write=%s(%d) read=%s(%d) valor=0x%08x -> modelado: %s\n",
+                uc_strerror(ew), (int)ew, uc_strerror(er), (int)er, (u32)r_tls2.val,
+                (ew == UC_ERR_OK && er == UC_ERR_OK && (u32)r_tls2.val == tp_in) ? "SIM" : "NAO");
+
+    // O kernel escreve TPIDRURW (c13,c0,2) e a libc le TPIDRURO (c13,c0,3) pelo
+    // helper __kuser_get_tls. Na ARMv6 o segundo espelha o primeiro; se o
+    // Unicorn nao espelhar, a libc recebe TP=0 e todo acesso TLS vira lixo.
+    {
+        uc_arm_cp_reg ro = {15, 0, 0, 13, 0, 0, 3, 0};
+        uc_err ero = uc_reg_read(uc, UC_ARM_REG_CP_REG, &ro);
+        std::printf("[vec-test] TLS mirror: c13,c0,3 le 0x%08x (err=%d) -> espelha c13,c0,2: %s\n",
+                    (u32)ro.val, (int)ero, ((u32)ro.val == tp_in) ? "SIM" : "NAO");
+    }
+
+    // O kernel salva/restaura o SP de user space com LDM/STM modo-usuario ("^")
+    // (ldmdb r8, {sp, lr}^ / ldmia sp, {r0 - lr}^). Se o Unicorn nao honrar o
+    // "^", o SP do usuario volta errado depois de CADA syscall. Teste direto:
+    // em modo SVC grava {sp,lr}^ e confere se o valor gravado e' o do banco USR.
+    {
+        uc_engine* u3 = nullptr;
+        if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &u3) == UC_ERR_OK) {
+            uc_mem_map(u3, 0x00000000u, 0x1000u, UC_PROT_ALL);
+            uc_mem_map(u3, 0x00010000u, 0x1000u, UC_PROT_ALL);
+            uc_mem_map(u3, 0x00030000u, 0x1000u, UC_PROT_ALL);
+            u32 prog[2] = {0xe8c06000u, 0xeafffffeu};   // stmia r0, {sp, lr}^ ; b .
+            uc_mem_write(u3, 0x00010000u, prog, sizeof(prog));
+            u32 r0 = 0x00030000u;
+            uc_reg_write(u3, UC_ARM_REG_R0, &r0);
+            // banco USR: sp=0x1111, lr=0x2222
+            u32 usr_cpsr = 0x10u;
+            uc_reg_write(u3, UC_ARM_REG_CPSR, &usr_cpsr);
+            u32 sp_usr = 0x00001111u, lr_usr = 0x00002222u;
+            uc_reg_write(u3, UC_ARM_REG_SP, &sp_usr);
+            uc_reg_write(u3, UC_ARM_REG_LR, &lr_usr);
+            // banco SVC: sp=0x3333
+            u32 svc_cpsr = 0x13u;
+            uc_reg_write(u3, UC_ARM_REG_CPSR, &svc_cpsr);
+            u32 sp_svc = 0x00003333u;
+            uc_reg_write(u3, UC_ARM_REG_SP, &sp_svc);
+            uc_emu_start(u3, 0x00010000u, 0, 0, 4);
+            u32 w0 = 0, w1 = 0;
+            uc_mem_read(u3, 0x00030000u, &w0, 4);
+            uc_mem_read(u3, 0x00030004u, &w1, 4);
+            std::printf("[vec-test] banco USR via '^': gravou sp=0x%08x lr=0x%08x "
+                        "(esperado 0x1111/0x2222) -> LDM/STM modo-usuario: %s\n",
+                        w0, w1, (w0 == 0x1111u && w1 == 0x2222u) ? "OK" : "QUEBRADO");
+            uc_close(u3);
+        }
+    }
+
+    std::fflush(stdout);
+    uc_close(uc);
+}
+
 }  // namespace
 
 
@@ -245,6 +375,9 @@ static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
     (void)uc;(void)t;(void)size;(void)value;(void)user;
     if (!g_probe) return;
     u32 a = static_cast<u32>(addr);
+    if (a >= 0xffff0000u) {
+        std::printf("[WRITE HIGH VEC] addr=0x%08x val=0x%llx size=%d\n", a, (unsigned long long)value, size);
+    }
     // fora da RAM de aplicacao: candidato a MMIO
     if (a < APPS_RAM_PHYS || a >= APPS_RAM_PHYS + APPS_RAM_SIZE)
         g_hi_writes[a & 0xFFFFF000u]++;
@@ -256,10 +389,443 @@ static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
 static std::map<u32,long> g_pc_hist;
 static u64 g_icount = 0;
 static u32 g_last_pc = 0;
+// --- Diagnostico do primeiro retorno a user space -------------------------
+// Descobre ONDE o ELF do /init foi carregado na RAM fisica e QUAL tabela de
+// nivel 1 o mapeia em 0x8000 (texto). Responde a pergunta decisiva: o kernel
+// chegou a mapear o texto do init na mm do processo?
+static void dump_boot_mmu_diag(uc_engine* uc) {
+    const u32 lo = APPS_RAM_PHYS, hi = APPS_RAM_PHYS + APPS_RAM_SIZE;
+    u8 hdr[64];
+    std::vector<u32> elf_pa;
+    for (u32 pa = lo; pa + 0x1000 <= hi; pa += 0x1000) {
+        if (uc_mem_read(uc, pa, hdr, sizeof(hdr)) != UC_ERR_OK) continue;
+        if (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F')
+            elf_pa.push_back(pa);
+    }
+    std::printf("[mmu] cabecalhos ELF na RAM fisica: %zu\n", elf_pa.size());
+    for (size_t i = 0; i < elf_pa.size() && i < 6; ++i) {
+        u32 e_entry = 0;
+        uc_mem_read(uc, elf_pa[i] + 24, &e_entry, 4);
+        std::printf("[mmu]   PA 0x%08x entry=0x%08x\n", elf_pa[i], e_entry);
+    }
+
+    // Resolve VA -> PA dado o descritor de nivel 1 (secao ou tabela grossa).
+    auto va_to_pa = [&](u32 va, u32 l1e) -> u32 {
+        if ((l1e & 3u) == 0u) return 0;
+        if ((l1e & 3u) == 2u) {                       // secao de 1MB
+            if ((va & 0xfff00000u) != (l1e & 0xfff00000u)) return 0;
+            return (l1e & 0xfff00000u) | (va & 0xfffffu);
+        }
+        u32 l2 = l1e & 0xfffffc00u, pte = 0;
+        if (uc_mem_read(uc, l2 + ((va >> 12) & 0xffu) * 4, &pte, 4) != UC_ERR_OK) return 0;
+        if ((pte & 3u) != 2u) return 0;               // small page
+        return (pte & 0xfffff000u) | (va & 0xfffu);
+    };
+
+    int shown = 0;
+    for (u32 l1 = lo; l1 + 0x4000 <= hi && shown < 6; l1 += 0x4000) {
+        u32 e0 = 0, e2 = 0;
+        if (uc_mem_read(uc, l1, &e0, 4) != UC_ERR_OK) continue;
+        uc_mem_read(uc, l1 + 8, &e2, 4);
+        if ((e0 & 3u) == 0u) continue;
+        u32 pa_txt = va_to_pa(0x8000u, e0);
+        if (!pa_txt) continue;                        // tambem cobre secao
+        u32 magic = 0;
+        if (uc_mem_read(uc, pa_txt, &magic, 4) != UC_ERR_OK) continue;
+        if (magic != 0x464c457fu) continue;           // so mapeamentos do proprio ELF
+        ++shown;
+        std::printf("[mmu] tabela 0x%08x: e[0]=0x%08x e[2]=0x%08x -> VA0x8000=PA0x%08x <- CABECALHO ELF\n",
+                    l1, e0, e2, pa_txt);
+        u32 ep = 0;
+        uc_mem_read(uc, pa_txt + 24, &ep, 4);
+        std::printf("[mmu]   entry no mapeamento = 0x%08x\n", ep);
+    }
+    if (!shown) std::printf("[mmu] NENHUMA tabela de nivel 1 mapeia o cabecalho do ELF (VA 0x8000)\n");
+    std::fflush(stdout);
+}
+
+// --- Entrada de excecao ABORT (o Unicorn NAO vetoriza aborts no guest) ------
+// O hardware ARM1136, ao levar um abort, salva o CPSR em SPSR_abt, poe
+// LR_abt = PC+4 (prefetch) / PC+8 (data), muda para modo ABT e salta para o
+// vetor (0xffff000c / 0xffff0010). O Unicorn nao faz isso: o fault morre no
+// host e o handler do Linux nunca roda. Completamos o modelo da CPU aqui --
+// quem decide o destino do acesso continua sendo o do_page_fault do kernel.
+struct PendingAbort { u32 addr; u32 fsr; u32 kind; };  // kind: 0=pabt, 1=dabt
+static std::vector<PendingAbort> g_pending_aborts;
+static u32 g_abort_count = 0;
+
+static bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
+                           i64 value, void* user) {
+    (void)size; (void)value; (void)user;
+    const bool is_fetch = (type == UC_MEM_FETCH_UNMAPPED);
+    u32 cpsr = 0, pc = 0;
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    // FSR de translation fault em pagina; bit 10 (0x400) = escrita
+    u32 fsr = 0x7u | (is_fetch ? 0u : (type == UC_MEM_WRITE_UNMAPPED ? 0x400u : 0u));
+    g_pending_aborts.push_back({(u32)addr, fsr, is_fetch ? 0u : 1u});
+    if (g_pending_aborts.size() > 8) g_pending_aborts.erase(g_pending_aborts.begin());
+    if (++g_abort_count <= 25) {
+        std::printf("[abort] #%u %s addr=0x%08x pc=0x%08x cpsr=0x%08x fsr=0x%x\n",
+                    g_abort_count, is_fetch ? "PABT" : "DABT", (u32)addr, pc, cpsr, fsr);
+        std::fflush(stdout);
+    }
+    if (g_abort_count > 20000u) {
+        std::printf("[abort] limite de faults (20000) atingido; parando\n");
+        uc_emu_stop(uc);
+        return true;
+    }
+    // Entrada de excecao do hardware: CPSR -> SPSR_abt, modo ABT, I=F=1, PC=vetor
+    u32 lr_ret = pc + (is_fetch ? 4u : 8u);
+    u32 abt_cpsr = (cpsr & ~0x3fu) | 0x17u | 0x80u | 0x40u;
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &abt_cpsr);
+    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
+    uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
+    u32 vec = 0xffff0000u + (is_fetch ? 0x0cu : 0x10u);
+    uc_reg_write(uc, UC_ARM_REG_PC, &vec);
+    return true;   // o acesso foi "tratado": retomamos no vetor
+}
+
+// Unicorn NAO entrega excecoes do guest ao vetor do guest (provado no vec-test):
+// UDF -> UC_ERR_INSN_INVALID, SVC -> UC_ERR_EXCEPTION, abort -> INTR sem saltar
+// para 0xffff000c. O host tem que fazer a ENTRADA DE EXCECAO que o hardware faz.
+// Isto e' o mesmo trabalho que o QEMU faz internamente; sem ele o Linux nao
+// consegue tratar page fault (mapeamento preguicoso) nem executar syscall (SWI).
+static u32 g_pabt = 0, g_dabt = 0, g_swi = 0, g_pf_c = 0;
+
+// --- Leitura de memoria do GUEST (uc_mem_read NAO traduz a MMU) ------------
+static bool guest_read_u32(uc_engine* uc, u32 va, u32* out) {
+    uc_arm_cp_reg r0 = {15, 0, 0, 2, 0, 0, 0, 0};
+    uc_arm_cp_reg r1 = {15, 0, 0, 2, 0, 0, 1, 0};
+    uc_arm_cp_reg rc = {15, 0, 0, 2, 0, 0, 2, 0};
+    if (uc_reg_read(uc, UC_ARM_REG_CP_REG, &r0) != UC_ERR_OK) return false;
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r1);
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &rc);
+    const u32 ttbr0 = (u32)r0.val, ttbr1 = (u32)r1.val, ttbcr = (u32)rc.val;
+    const u32 n = ttbcr & 7u;
+    // ARM: split = 2^(32-N). N=0 => TTBR0 vale para TODO o espaco (TTBR1 nao e'
+    // usado). Com N>0, TTBR0 cobre [0, split) e TTBR1 o resto. O kernel aqui usa
+    // TTBCR=0 (mesmo pgd para user e kernel), entao o stack de user em
+    // 0xbe9c1xxx tambem esta no TTBR0.
+    const u32 split = (n == 0u) ? 0u : (0x80000000u >> (n - 1u));
+    const u32 pgdb = ((n == 0u || va < split) ? ttbr0 : ttbr1) & 0xffffc000u;
+    u32 l1 = 0;
+    if (uc_mem_read(uc, pgdb + ((va >> 20) & 0xfffu) * 4u, &l1, 4) != UC_ERR_OK) return false;
+    if ((l1 & 3u) == 0u) return false;
+    if ((l1 & 3u) == 2u)
+        return uc_mem_read(uc, (l1 & 0xfff00000u) | (va & 0xfffffu), out, 4) == UC_ERR_OK;
+    const u32 l2 = l1 & 0xfffffc00u;
+    u32 pte = 0;
+    if (uc_mem_read(uc, l2 + ((va >> 12) & 0xffu) * 4u, &pte, 4) != UC_ERR_OK) return false;
+    if ((pte & 3u) == 2u)
+        return uc_mem_read(uc, (pte & 0xfffff000u) | (va & 0xfffu), out, 4) == UC_ERR_OK;
+    if ((pte & 3u) == 3u)   // ARMv6: pagina pequena ESTENDIDA (subpaginas) — base em [31:12]
+        return uc_mem_read(uc, (pte & 0xfffff000u) | (va & 0xfffu), out, 4) == UC_ERR_OK;
+    if ((pte & 3u) == 1u)   // pagina grande de 64KB
+        return uc_mem_read(uc, (pte & 0xffff0000u) | (va & 0xffffu), out, 4) == UC_ERR_OK;
+    return false;
+}
+
+// Endereco efetivo do acesso de dado que abortou: o Unicorn nao modela o FAR
+// (leitura devolve 0), entao decodificamos a instrucao que falhou.
+static u32 arm_ls_fault_addr(uc_engine* uc, u32 pc, bool* decoded, bool* is_write) {
+    *decoded = false;
+    if (is_write) *is_write = false;
+    u32 insn = 0;
+    if (!guest_read_u32(uc, pc, &insn)) return 0;
+    // bit 20 (L) = 0 -> store: o page fault e' de ESCRITA (FSR bit 10)
+    if (is_write) *is_write = (((insn >> 20) & 1u) == 0u);
+    // O enum de registradores do Unicorn NAO e' contiguo: R13/SP e R14/LR sao
+    // valores proprios. "UC_ARM_REG_R0 + 13" devolvia lixo, entao qualquer
+    // fault com base em sp/lr (ex.: "push {...}") calculava endereco errado.
+    static const uc_arm_reg kRegs[15] = {
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,  UC_ARM_REG_R3,  UC_ARM_REG_R4,
+        UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,  UC_ARM_REG_R8,  UC_ARM_REG_R9,
+        UC_ARM_REG_R10, UC_ARM_REG_R11, UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR
+    };
+    u32 regs[15] = {0};
+    for (int i = 0; i < 15; ++i) uc_reg_read(uc, kRegs[i], &regs[i]);
+    const int rn = (int)((insn >> 16) & 0xfu);
+    const bool U = ((insn >> 23) & 1u) != 0;
+    const bool P = ((insn >> 24) & 1u) != 0;
+    // rn == 15 e' LDR/STR PC-relativo (pool de literais): o valor do PC na
+    // instrucao ARM e' endereco+8. Sem isto o endereco calculado sai errado
+    // (ex.: 0x368 em vez de 0x137288) e o kernel mata o init com SIGSEGV.
+    const u32 base = (rn == 15) ? (pc + 8u) : regs[rn];
+    const u32 stype = (insn >> 5) & 3u;
+    auto apply_shift = [](u32 v, u32 type, u32 sh) -> u32 {
+        sh &= 31u;
+        if (sh == 0) return v;
+        switch (type) {
+            case 0: return v << sh;
+            case 1: return v >> sh;
+            case 2: return (u32)((int)v >> (int)sh);
+            default: return (v >> sh) | (v << (32 - sh));
+        }
+    };
+    const u32 cls = insn & 0x0e000000u;
+    if (cls == 0x04000000u) {                        // single data transfer, offset imediato
+        const u32 off = insn & 0xfffu;
+        *decoded = true;
+        return P ? (U ? base + off : base - off) : base;
+    }
+    if (cls == 0x06000000u) {                        // single data transfer, offset registrador
+        // bit25=1 => offset por registrador. Bit 4 seleciona o deslocamento:
+        // 0 = imediato em bits[11:7]; 1 = por registrador (Rs = bits[11:8]).
+        u32 off;
+        if (insn & 0x10u) {
+            const u32 rs = (insn >> 8) & 0xfu;
+            off = apply_shift(regs[insn & 0xfu], stype, regs[rs] & 0xffu);
+        } else {
+            off = apply_shift(regs[insn & 0xfu], stype, (insn >> 7) & 0x1fu);
+        }
+        *decoded = true;
+        return P ? (U ? base + off : base - off) : base;
+    }
+    if (cls == 0x00000000u && (insn & 0x90u) == 0x90u) {   // halfword / signed transfer
+        const bool I = ((insn >> 22) & 1u) != 0;
+        const u32 off = I ? (((insn >> 4) & 0xf0u) | (insn & 0xfu)) : regs[insn & 0xfu];
+        *decoded = true;
+        return P ? (U ? base + off : base - off) : base;
+    }
+    if (cls == 0x08000000u) {                        // LDM/STM (IA/IB/DA/DB)
+        const u32 nregs = (u32)__builtin_popcount(insn & 0xffffu);
+        *decoded = true;
+        if (U) return P ? (base + 4u) : base;                    // IB / IA
+        return base - 4u * (P ? nregs : (nregs ? nregs - 1u : 0u));  // DB / DA
+    }
+    if ((insn & 0x0fb00ff0u) == 0x01000090u) {       // SWP
+        *decoded = true;
+        return base;
+    }
+    if ((insn & 0x0e0000f0u) == 0x000000d0u) {       // LDRD/STRD
+        const bool I = ((insn >> 22) & 1u) != 0;
+        const u32 off = I ? (((insn >> 4) & 0xf0u) | (insn & 0xfu)) : regs[insn & 0xfu];
+        *decoded = true;
+        return P ? (U ? base + off : base - off) : base;
+    }
+    return base;                                     // melhor esforco
+}
+
+// --- Leitura de bytes do GUEST (via walk manual; atravessa paginas) --------
+static bool guest_read_bytes(uc_engine* uc, u32 va, u32 len, std::string& out) {
+    out.clear();
+    for (u32 i = 0; i < len; i += 4) {
+        u32 w = 0;
+        if (!guest_read_u32(uc, va + i, &w)) return false;
+        for (int b = 0; b < 4 && i + (u32)b < len; ++b)
+            out.push_back((char)((w >> (8 * b)) & 0xffu));
+    }
+    return true;
+}
+
+// O console do kernel nao esta saindo na UART do harness, mas o texto que o
+// kernel escreveu continua em __log_buf. Este dump e' a fonte primaria do
+// motivo real (inclusive a mensagem de panic).
+static void dump_kernel_log(uc_engine* uc, const char* label) {
+    const u32 buf_va = 0xc03cdc68u;   // __log_buf
+    const u32 len    = 0x20000u;      // 128KB
+    std::string raw;
+    std::printf("\n=== __log_buf (%s) ===\n", label);
+    if (!guest_read_bytes(uc, buf_va, len, raw)) {
+        std::printf("(nao consegui ler o log buffer)\n");
+        std::fflush(stdout);
+        return;
+    }
+    std::string txt;
+    txt.reserve(raw.size());
+    for (char c : raw) txt.push_back((c >= 32 && c < 127) || c == '\n' ? c : '.');
+    int printed = 0;
+    size_t i = 0;
+    while (i < txt.size()) {
+        if (txt[i] != '.') {
+            size_t j = i;
+            while (j < txt.size() && txt[j] != '.') ++j;
+            if (j - i >= 8) {
+                std::printf("%s\n", txt.substr(i, j - i).c_str());
+                if (++printed > 300) { std::printf("(log truncado)\n"); break; }
+            }
+            i = j;
+        } else ++i;
+    }
+    if (!printed) std::printf("(log buffer vazio / sem texto)\n");
+    std::fflush(stdout);
+}
+
+// Anel com os ultimos PCs de user space (para reconstruir o caminho ate a falha).
+static u32 g_upc_ring[48];
+static u32 g_upc_pos = 0;
+static u32 g_swi_ring[24];      // numeros de syscall (r7)
+static u32 g_swi_pc[24];
+static u32 g_swi_pos = 0;
+
+static void dump_user_trace(const char* label) {
+    std::printf("\n=== trilha de user space (%s) ===\n", label);
+    std::printf("ultimos PCs (mais antigo -> mais novo):\n ");
+    for (u32 i = 0; i < 48; ++i) {
+        const u32 v = g_upc_ring[(g_upc_pos + i) % 48];
+        if (v) std::printf(" 0x%08x", v);
+    }
+    std::printf("\nultimos syscalls (nr@pc):");
+    for (u32 i = 0; i < 24; ++i) {
+        const u32 k = (g_swi_pos + i) % 24;
+        if (g_swi_pc[k]) std::printf(" %u@0x%08x", g_swi_ring[k], g_swi_pc[k]);
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
+// Relatorio do caminho de traducao de um VA (para saber se o kernel mapeou).
+static void walk_report(uc_engine* uc, u32 va) {
+    uc_arm_cp_reg r0 = {15, 0, 0, 2, 0, 0, 0, 0};
+    uc_arm_cp_reg r1 = {15, 0, 0, 2, 0, 0, 1, 0};
+    uc_arm_cp_reg rc = {15, 0, 0, 2, 0, 0, 2, 0};
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r0);
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r1);
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &rc);
+    const u32 ttbr0 = (u32)r0.val, ttbr1 = (u32)r1.val, ttbrcr = (u32)rc.val;
+    const u32 n = ttbrcr & 7u;
+    const u32 split = (n == 0u) ? 0u : (0x80000000u >> (n - 1u));
+    const u32 pgdb = ((n == 0u || va < split) ? ttbr0 : ttbr1) & 0xffffc000u;
+    u32 l1 = 0, pte = 0;
+    uc_mem_read(uc, pgdb + ((va >> 20) & 0xfffu) * 4u, &l1, 4);
+    if ((l1 & 3u) == 1u)
+        uc_mem_read(uc, (l1 & 0xfffffc00u) + ((va >> 12) & 0xffu) * 4u, &pte, 4);
+    std::printf("[walk] va=0x%08x ttbr0=0x%08x ttbcr=0x%x pgdb=0x%08x l1=0x%08x pte=0x%08x\n",
+                va, ttbr0, ttbrcr, pgdb, l1, pte);
+}
+
+// Detector de fault repetido no MESMO (pc, endereco): significa que o kernel
+// "tratou" o fault mas a traducao continua faltando.
+static void check_repeat_fault(uc_engine* uc, u32 pc, u32 addr, bool is_pabt) {
+    static u32 lpc = 0, laddr = 0;
+    static u32 rep = 0;
+    if (is_pabt) return;
+    if (pc == lpc && addr == laddr) ++rep; else { lpc = pc; laddr = addr; rep = 0; }
+    if (rep != 3u) return;
+    u32 r[13] = {0};
+    for (int i = 0; i < 13; ++i) uc_reg_read(uc, (uc_arm_reg)(UC_ARM_REG_R0 + i), &r[i]);
+    std::printf("[loop] fault repetido pc=0x%08x addr=0x%08x (3a vez)\n", pc, addr);
+    std::printf("[loop]   r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x r4=0x%08x r5=0x%08x r6=0x%08x "
+                "r7=0x%08x r8=0x%08x r9=0x%08x r10=0x%08x r11=0x%08x r12=0x%08x\n",
+                r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12]);
+    walk_report(uc, addr);
+    u32 w = 0;
+    const bool ok = guest_read_u32(uc, addr, &w);
+    std::printf("[loop]   leitura de 0x%08x pelo walk: %s valor=0x%08x\n",
+                addr, ok ? "OK" : "FALHOU", w);
+    std::fflush(stdout);
+}
+
+static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
+    (void)ud;
+    u32 cpsr = 0, pc = 0;
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    if (intno != 2u && intno != 3u && intno != 4u) {
+        std::printf("[INTR %u] pc=0x%08x cpsr=0x%08x (nao tratado)\n", intno, pc, cpsr);
+        std::fflush(stdout);
+        return;
+    }
+    // Ler DFAR/DFSR (data abort) para descobrir o endereco que falhou.
+    u32 far = 0, fsr = 0;
+    uc_arm_cp_reg r_far = {15, 0, 0, 6, 0, 0, 0, 0};   // DFAR
+    uc_arm_cp_reg r_fsr = {15, 0, 0, 5, 0, 0, 0, 0};   // DFSR
+    uc_err ef = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_far);
+    uc_err es = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_fsr);
+    if (ef == UC_ERR_OK) far = (u32)r_far.val;
+    if (es == UC_ERR_OK) fsr = (u32)r_fsr.val;
+
+    const bool is_swi  = (intno == 2u);
+    const bool is_pabt = (intno == 3u);
+    bool dec = false, is_wr = false;
+    const u32 fault_addr = is_pabt ? pc : (far ? far : arm_ls_fault_addr(uc, pc, &dec, &is_wr));
+    // FSR do ARM1136 (VMSA curta): status 0b0111 = translation fault em pagina;
+    // WnR e' o bit 11 (FSR_WRITE no Linux: 1<<11). O bit 10 (0x400) e' FSR4 e
+    // manda o kernel para o indice "unknown 23" (do_bad -> SIGBUS -> mata o
+    // init). Com 0x807 o kernel cai em do_page_fault("page translation fault").
+    const u32 fsr_use = is_pabt ? 0x7u : (0x7u | (is_wr ? 0x800u : 0u));
+    if (is_pabt && ++g_pabt <= 12u) {
+        std::printf("[exc] PABT pc=0x%08x (alvo=0x%08x) cpsr=0x%08x\n", pc, pc, cpsr);
+        std::fflush(stdout);
+    }
+    if (!is_pabt && !is_swi) {
+        if (++g_dabt <= 40u) {
+            u32 insn = 0;
+            guest_read_u32(uc, pc, &insn);
+            std::printf("[exc] DABT pc=0x%08x insn=0x%08x far=0x%08x -> addr=0x%08x fsr=0x%x%s%s\n",
+                        pc, insn, far, fault_addr, fsr_use,
+                        dec ? " (decodificado)" : "",
+                        is_wr ? " ESCRITA" : "");
+            if (fault_addr < 0x10000u) {          // endereco "wild": dump dos registradores
+                u32 r[13] = {0};
+                for (int i = 0; i < 13; ++i)
+                    uc_reg_read(uc, (uc_arm_reg)(UC_ARM_REG_R0 + i), &r[i]);
+                std::printf("[exc]   r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x r4=0x%08x r5=0x%08x "
+                            "r6=0x%08x r7=0x%08x r8=0x%08x r9=0x%08x r10=0x%08x r11=0x%08x r12=0x%08x\n",
+                            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12]);
+            }
+            std::fflush(stdout);
+        }
+    }
+    if (is_swi && ++g_swi <= 5u) {
+        std::printf("[exc] SWI pc=0x%08x cpsr=0x%08x\n", pc, cpsr);
+        std::fflush(stdout);
+    }
+    if (is_swi) {
+        u32 nr = 0;
+        uc_reg_read(uc, UC_ARM_REG_R7, &nr);
+        const u32 k = g_swi_pos++ % 24u;
+        g_swi_ring[k] = nr;
+        g_swi_pc[k] = pc;
+    }
+    if (g_pabt + g_dabt > 20000u) { std::printf("[exc] limite de aborts atingido\n"); uc_emu_stop(uc); return; }
+    if (g_dabt <= 60u) check_repeat_fault(uc, pc, fault_addr, is_pabt);
+
+    // --- entrada de excecao do hardware ---
+    u32 mode, vec, lr_ret;
+    // SWI: o Unicorn ja avancou o PC para a instrucao SEGUINTE, que e' exatamente
+    // o LR_svc que o hardware deixaria. Somar 4 aqui pulava uma instrucao (o
+    // "pop {r7}" do stub de syscall em libc), desalinhando a pilha em 4 bytes.
+    if (is_swi)        { mode = 0x13u; vec = 0xffff0000u + 0x08u; lr_ret = pc; }
+    else if (is_pabt)  { mode = 0x17u; vec = 0xffff0000u + 0x0cu; lr_ret = pc + 4u; }
+    else               { mode = 0x17u; vec = 0xffff0000u + 0x10u; lr_ret = pc + 8u; }
+    u32 new_cpsr = (cpsr & ~0x3fu) | mode | 0x80u | 0x40u;
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &new_cpsr);   // troca de banco de registradores
+    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);       // SPSR_<modo> = CPSR anterior
+    uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);       // LR_<modo> = retorno
+    uc_reg_write(uc, UC_ARM_REG_PC, &vec);          // salta para o vetor
+    if (is_pabt || !is_swi) {
+        g_pending_aborts.push_back({fault_addr, fsr_use, is_pabt ? 0u : 1u});
+        if (g_pending_aborts.size() > 8) g_pending_aborts.erase(g_pending_aborts.begin());
+    }
+}
 static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
     ++g_icount;
     g_last_pc = static_cast<u32>(addr);
+    if (addr < 0x01000000u) {
+        g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
+        static int ucount = 0;
+        if (ucount++ < 20) {
+            u32 cur_cpsr = 0, cur_sp = 0;
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cur_cpsr);
+            uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
+            std::printf("[USER-PC #%d] pc=0x%08x sp=0x%08x cpsr=0x%08x\n", ucount, static_cast<u32>(addr), cur_sp, cur_cpsr);
+            std::fflush(stdout);
+        }
+    }
+    if (addr < 0x40u || (addr >= 0xffff0000u && addr < 0xffff0100u)) {
+        static int vcount = 0;
+        if (vcount++ < 40) {
+            u32 cpsr = 0, lr = 0;
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            std::printf("[VEC] pc=0x%08x lr=0x%08x cpsr=0x%08x\n",
+                        static_cast<u32>(addr), lr, cpsr);
+            std::fflush(stdout);
+        }
+    }
     if (addr == 0xc004b3a8u) {
         // cmpxchg_futex_value_locked: ldrt r2, [r5]
         u32 cur_r5 = 0;
@@ -275,38 +841,71 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     }
     if (addr == 0xc000936cu) {
         // movs pc, lr (retorno para user-space)
-        u32 cur_cpsr = 0;
-        uc_reg_read(uc, UC_ARM_REG_CPSR, &cur_cpsr);
-        // Só dispara quando estiver voltando para user-space (modo 0x10)
         u32 spsr = 0;
         uc_reg_read(uc, UC_ARM_REG_SPSR, &spsr);
+        u32 user_pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_LR, &user_pc);
+        std::printf("[trace 0xc000936c] LR=0x%08x SPSR=0x%08x\n", user_pc, spsr);
         if ((spsr & 0x1f) == 0x10) {
-            u32 user_pc = 0;
-            uc_reg_read(uc, UC_ARM_REG_LR, &user_pc);
-            std::printf("[ret_to_user] Saltando para /init no user space! LR=0x%08x SPSR=0x%08x\n", user_pc, spsr);
-            g_console += "\n[zeebo-rootfs] /init executado com sucesso!\n";
-            uc_emu_stop(uc);
+            static bool user_seen = false;
+            if (!user_seen) {
+                user_seen = true;
+                std::printf("\n[ret_to_user] Saltando para /init no user space! LR=0x%08x SPSR=0x%08x\n", user_pc, spsr);
+
+                // Diagnostico completo de MMU/mapeamento do init
+                dump_boot_mmu_diag(uc);
+
+                u32 ttbr0 = 0, ttbr1 = 0, ttbcr = 0;
+                uc_arm_cp_reg r_ttbr0 = {15, 0, 0, 2, 0, 0, 0, 0};
+                uc_arm_cp_reg r_ttbr1 = {15, 0, 0, 2, 0, 0, 1, 0};
+                uc_arm_cp_reg r_ttbcr = {15, 0, 0, 2, 0, 0, 2, 0};
+                uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_ttbr0);
+                uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_ttbr1);
+                uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_ttbcr);
+                ttbr0 = (u32)r_ttbr0.val;
+                ttbr1 = (u32)r_ttbr1.val;
+                ttbcr = (u32)r_ttbcr.val;
+                std::printf("[MMU regs] TTBR0=0x%08x TTBR1=0x%08x TTBCR=0x%08x\n", ttbr0, ttbr1, ttbcr);
+                {
+                    uc_arm_cp_reg r_sctlr = {15, 0, 0, 1, 0, 0, 0, 0};
+                    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_sctlr);
+                    u32 sctlr = (u32)r_sctlr.val;
+                    std::printf("[MMU] SCTLR=0x%08x  V(bit13)=%u  M(bit0)=%u\n",
+                                sctlr, (sctlr >> 13) & 1u, sctlr & 1u);
+                }
+                {
+                    u32 pgdb = ttbr0 & 0xffffc000u;
+                    u32 v_low = 0, v_high = 0, e2048 = 0;
+                    uc_mem_read(uc, pgdb, &v_low, 4);            // VA 0x00000000
+                    uc_mem_read(uc, pgdb + 2048 * 4, &e2048, 4); // VA 0x80000000
+                    uc_mem_read(uc, pgdb + 4095 * 4, &v_high, 4); // VA 0xffff0000
+                    std::printf("[MMU] pgd: e[0]=0x%08x e[2048]=0x%08x e[4095]=0x%08x\n",
+                                v_low, e2048, v_high);
+                    // conteudo dos vetores, se mapeado
+                    u32 vec_lo = 0, vec_hi = 0;
+                    uc_mem_read(uc, 0x0000000cu, &vec_lo, 4);
+                    uc_mem_read(uc, 0xffff000cu, &vec_hi, 4);
+                    std::printf("[MMU] vetor pabt: low(0x0c)=0x%08x high(0xffff000c)=0x%08x\n",
+                                vec_lo, vec_hi);
+                }
+
+                std::fflush(stdout);
+            }
             return;
         }
     }
     if (addr == 0xc00f5edc) {
-        // strbt r2, [r0], #1
-        u32 cur_r0 = 0, cur_r1 = 0;
-        uc_reg_read(uc, UC_ARM_REG_R0, &cur_r0);
-        uc_reg_read(uc, UC_ARM_REG_R1, &cur_r1);
-        if (cur_r1 > 0 && cur_r0 < 0xc0000000u) {
-            std::vector<u8> z(cur_r1, 0);
-            uc_mem_write(uc, cur_r0, z.data(), cur_r1);
+        // strbt r2, [r0], #1  (__clear_user_std)
+        // HACK REMOVIDO: agora que a entrada de excecao abort funciona no host,
+        // o kernel executa isso de verdade (page fault do BSS -> do_page_fault).
+        static int cu = 0;
+        if (cu++ < 5) {
+            u32 cur_r0 = 0, cur_r1 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &cur_r0);
+            uc_reg_read(uc, UC_ARM_REG_R1, &cur_r1);
+            std::printf("[clear_user] r0=0x%08x r1=%u (executando de verdade)\n", cur_r0, cur_r1);
+            std::fflush(stdout);
         }
-        u32 zero = 0;
-        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
-        u32 cur_lr = 0;
-        uc_reg_read(uc, UC_ARM_REG_LR, &cur_lr);
-        u32 cur_sp = 0;
-        uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
-        cur_sp += 8;
-        uc_reg_write(uc, UC_ARM_REG_SP, &cur_sp);
-        uc_reg_write(uc, UC_ARM_REG_PC, &cur_lr);
         return;
     }
     if (addr == 0xc0013cac) {
@@ -327,12 +926,195 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
         u32 done = 1;
         uc_reg_write(uc, UC_ARM_REG_R3, &done);
     }
+    // --- instrumentacao do caminho exec() (binfmt_elf) ---------------------
+    if (addr == 0xc00d2948u) {          // load_elf_binary
+        std::printf("[exec] load_elf_binary ENTRADA\n"); std::fflush(stdout);
+    }
+    if (addr == 0xc009322cu) {          // search_binary_handler
+        u32 b = 0; uc_reg_read(uc, UC_ARM_REG_R0, &b);
+        std::printf("[exec] search_binary_handler bprm=0x%08x\n", b); std::fflush(stdout);
+    }
+    if (addr == 0xc00922ecu) {          // setup_arg_pages
+        std::printf("[exec] setup_arg_pages\n"); std::fflush(stdout);
+    }
+    if (addr == 0xc00d283cu) {          // elf_map(filep, addr, eppnt, prot, type, total_size)
+        u32 f = 0, a = 0, ph = 0, pr = 0, ty = 0, ts = 0, sp = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &f); uc_reg_read(uc, UC_ARM_REG_R1, &a);
+        uc_reg_read(uc, UC_ARM_REG_R2, &ph); uc_reg_read(uc, UC_ARM_REG_R3, &pr);
+        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+        if (sp) { uc_mem_read(uc, sp, &ty, 4); uc_mem_read(uc, sp + 4, &ts, 4); }
+        u32 p_vaddr = 0, p_off = 0, p_filesz = 0, p_memsz = 0;
+        if (ph) {
+            uc_mem_read(uc, ph + 4, &p_off, 4);
+            uc_mem_read(uc, ph + 8, &p_vaddr, 4);
+            uc_mem_read(uc, ph + 16, &p_filesz, 4);
+            uc_mem_read(uc, ph + 20, &p_memsz, 4);
+        }
+        std::printf("[exec] elf_map(file=0x%08x addr=0x%08x prot=0x%x type=0x%x "
+                    "phdr{vaddr=0x%08x off=0x%x filesz=0x%x memsz=0x%x} total=0x%x\n",
+                    f, a, pr, ty, p_vaddr, p_off, p_filesz, p_memsz, ts);
+        std::fflush(stdout);
+    }
+    if (addr == 0xc00d28ecu || addr == 0xc00d2928u) {   // retorno de do_mmap dentro de elf_map
+        u32 r = 0; uc_reg_read(uc, UC_ARM_REG_R0, &r);
+        std::printf("[exec] elf_map: do_mmap -> r0=0x%08x %s\n", r,
+                    (r > 0xffff0fffu) ? "(ERRO)" : "(mapeado)");
+        std::fflush(stdout);
+    }
+    if (addr == 0xc00d2614u) {          // padzero
+        u32 b = 0, n = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &b); uc_reg_read(uc, UC_ARM_REG_R1, &n);
+        std::printf("[exec] padzero(bss=0x%08x len=0x%x)\n", b, n); std::fflush(stdout);
+    }
+    // --- traco do caminho de page fault do kernel -------------------------
+    if (addr == 0xc000e950u && g_pf_c < 15u) {          // do_page_fault(addr, fsr, regs)
+        u32 a = 0, f = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &a);
+        uc_reg_read(uc, UC_ARM_REG_R1, &f);
+        std::printf("[pf] do_page_fault addr=0x%08x fsr=0x%x\n", a, f);
+        std::fflush(stdout);
+    }
+    if (addr == 0xc000e7c0u) {                          // __do_user_fault(tsk, addr, fsr, sig, code, regs)
+        static int uf = 0;
+        u32 t = 0, a = 0, f = 0, sig = 0, code = 0, sp = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &t);
+        uc_reg_read(uc, UC_ARM_REG_R1, &a);
+        uc_reg_read(uc, UC_ARM_REG_R2, &f);
+        uc_reg_read(uc, UC_ARM_REG_R3, &sig);
+        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+        if (sp) uc_mem_read(uc, sp, &code, 4);
+        if (uf++ < 12) {
+            std::printf("[pf] __do_user_fault addr=0x%08x fsr=0x%x sig=%u code=%u (1=MAPERR 2=ACCERR)\n",
+                        a, f, sig, code);
+            std::fflush(stdout);
+        }
+    }
+    if (addr == 0xc00795e8u && g_pf_c < 40u) {          // find_vma(mm, addr) -> r1=addr
+        u32 a = 0;
+        uc_reg_read(uc, UC_ARM_REG_R1, &a);
+        std::printf("[pf]   find_vma(addr=0x%08x)\n", a);
+        std::fflush(stdout);
+    }
+    if (addr == 0xc0076460u && g_pf_c < 15u) {          // handle_mm_fault(mm, vma, addr, flags)
+        u32 a = 0, fl = 0;
+        uc_reg_read(uc, UC_ARM_REG_R2, &a);
+        uc_reg_read(uc, UC_ARM_REG_R3, &fl);
+        ++g_pf_c;
+        std::printf("[pf] handle_mm_fault addr=0x%08x flags=0x%x\n", a, fl);
+        std::fflush(stdout);
+    }
+    if (addr == 0xc0073828u && g_pf_c < 15u) {          // vm_normal_page(vma, addr, pte)
+        u32 a = 0, pte = 0;
+        uc_reg_read(uc, UC_ARM_REG_R1, &a);
+        uc_reg_read(uc, UC_ARM_REG_R2, &pte);
+        std::printf("[pf]   vm_normal_page addr=0x%08x pte=0x%08x\n", a, pte);
+        std::fflush(stdout);
+    }
+    // Diagnostico do salto para 0: em 0xa6c8 ha "pop {r4-r9,sl,pc}". Se o slot
+    // do PC na pilha estiver zerado, o LR salvo pelo chamador estava 0 (ou a
+    // pilha foi sobrescrita). Dumpamos a pilha antes do pop.
+    if (addr == 0xa40cu) {          // entrada da funcao
+        static int e1 = 0;
+        u32 sp = 0, lr = 0;
+        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        if (e1++ < 6) { std::printf("[stk] 0xa40c ENTRADA sp=0x%08x lr=0x%08x\n", sp, lr); std::fflush(stdout); }
+    }
+    if (addr == 0xa6c8u) {          // pop {r4-r9, sl, pc}
+        static int e2 = 0;
+        if (e2++ < 6) {
+            u32 sp = 0;
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            std::printf("[stk] 0xa6c8 POP sp=0x%08x slots:", sp);
+            for (int i = 0; i < 8; ++i) {
+                u32 w = 0;
+                if (!guest_read_u32(uc, sp + (u32)i * 4u, &w)) { std::printf(" (leitura falhou em +%d)", i * 4); break; }
+                std::printf(" [%d]=0x%08x", i * 4, w);
+            }
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+    }
+    // Rastreio de SP nos pontos-chave (para achar o desalinhamento de 4 bytes).
+    {
+        static const u32 kSpProbes[] = {0xa414u, 0xa418u, 0x14d398u, 0x14d3a4u, 0x14d3a8u, 0xa6c4u, 0xa6c8u};
+        for (u32 k = 0; k < sizeof(kSpProbes) / sizeof(kSpProbes[0]); ++k) {
+            if (static_cast<u32>(addr) != kSpProbes[k]) continue;
+            static int spc = 0;
+            if (spc++ < 40) {
+                u32 sp = 0, lr = 0;
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                std::printf("[sp] pc=0x%08x sp=0x%08x lr=0x%08x\n", kSpProbes[k], sp, lr);
+                std::fflush(stdout);
+            }
+            break;
+        }
+    }
+    if (addr == 0xc01fce80u) {          // panic()
+        static bool panicked = false;
+        if (!panicked) {
+            panicked = true;
+            std::printf("\n*** [PANIC] o kernel entrou em panic() — despejando o log ***\n");
+            std::fflush(stdout);
+            dump_user_trace("no panic");
+            dump_kernel_log(uc, "no panic");
+        }
+    }
+    if (addr == 0xc00f6744u) {          // __delay(loops) — quem chama e com qual valor?
+        static u32 dcount = 0;
+        ++dcount;
+        if (dcount <= 20) {
+            u32 loops = 0, lr = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &loops);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            std::printf("[delay] #%u loops=%u (0x%x) lr=0x%08x\n", dcount, loops, loops, lr);
+            std::fflush(stdout);
+        } else if (dcount == 21) {
+            std::printf("[delay] ... (mais chamadas; suprimido)\n");
+            std::fflush(stdout);
+        }
+    }
+    // __kuser_get_tls em 0xffff0fe0 ("mrc p15,0,r0,c13,c0,3" + "mov pc, lr").
+    // Se o espelho TPIDRURO nao existir no Unicorn, a libc recebe TP=0 e todo
+    // acesso TLS (TP+offset) cai em endereco baixo. Completamos o hardware.
+    if (addr == 0xffff0fe4u) {
+        uc_arm_cp_reg rw = {15, 0, 0, 13, 0, 0, 2, 0};
+        u32 tp = 0, got = 0;
+        if (uc_reg_read(uc, UC_ARM_REG_CP_REG, &rw) == UC_ERR_OK) tp = (u32)rw.val;
+        uc_reg_read(uc, UC_ARM_REG_R0, &got);
+        static int tls_c = 0;
+        if (tls_c++ < 8) {
+            std::printf("[tls] __kuser_get_tls -> 0x%08x (TPIDRURW=0x%08x)%s\n",
+                        got, tp, (got == 0 && tp != 0) ? "  [injetando TP]" : "");
+            std::fflush(stdout);
+        }
+        if (got == 0 && tp != 0) uc_reg_write(uc, UC_ARM_REG_R0, &tp);
+    }
+    if (addr == 0xc00083b0u || addr == 0xc000844cu) {   // do_DataAbort / do_PrefetchAbort
+        const bool is_fetch = (addr == 0xc000844cu);
+        const u32 want = is_fetch ? 0u : 1u;
+        for (size_t i = 0; i < g_pending_aborts.size(); ++i) {
+            if (g_pending_aborts[i].kind != want) continue;
+            u32 a = g_pending_aborts[i].addr, f = g_pending_aborts[i].fsr;
+            uc_reg_write(uc, UC_ARM_REG_R0, &a);
+            uc_reg_write(uc, UC_ARM_REG_R1, &f);
+            if (g_abort_count <= 25) {
+                std::printf("[abort] -> %s(addr=0x%08x, fsr=0x%x)\n",
+                            is_fetch ? "do_PrefetchAbort" : "do_DataAbort", a, f);
+                std::fflush(stdout);
+            }
+            g_pending_aborts.erase(g_pending_aborts.begin() + i);
+            break;
+        }
+    }
     if (!g_probe) return;
     if ((g_icount & 0xFFFF) == 0) g_pc_hist[static_cast<u32>(addr)]++;  // PC exato
 }
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
+    if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
 
     std::printf("=== Test boot de kernel Linux no MSM7201A (Zeebo) ===\n");
 
@@ -369,11 +1151,11 @@ int main(int argc, char** argv) {
     // PAGE_OFFSET = 0xc0000000, mapeando 64MB (0xc0000000 ate 0xc4000000)
     // O Unicorn host uc_mem_read/write requer mapeamento para VAs quando a MMU do Unicorn
     // nao estiver fazendo walk completo no modo interpretado para o host API.
-    uc_mem_map(uc, 0x00000000u, 0x10000000u, UC_PROT_ALL); // 256MB user space
+    // uc_mem_map(uc, 0x00000000u, 0x10000000u, UC_PROT_ALL); // 256MB user space
     uc_mem_map(uc, 0xc0000000u, APPS_RAM_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, 0x9c000000u, 0x100000u, UC_PROT_ALL); // ioremap virtual region
     uc_mem_map(uc, 0xffff0000u, 0x10000u, UC_PROT_ALL); // High vectors page (64KB)
-    uc_mem_map(uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
+    for (u32 ub : UART_BASES) uc_mem_map(uc, ub, UART_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, VIC_BASE, VIC_SIZE, UC_PROT_ALL);
     // MSM MMIO ranges: atencao: UART1_BASE = 0xa9a00000 (size 4KB) ja foi mapeada acima.
     // Nao sobrepor com UART1_BASE.
@@ -430,16 +1212,14 @@ int main(int argc, char** argv) {
     if (err) std::printf("uc_mem_map 0xe0000000 failed: %d\n", err);
 
     uc_hook hw = 0, hr = 0, hc = 0;
-    uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
-                UART1_BASE, UART1_BASE + UART_SIZE);
-    uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
-                UART1_BASE, UART1_BASE + UART_SIZE);
-    // Também mapear e hookar os outros canais UART (UART2 e UART3) caso o console mude
-    uc_mem_map(uc, 0xa9c00000u, 0x1000u, UC_PROT_ALL);
-    uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
-                0xa9c00000u, 0xa9c00000u + 0x1000u);
-    uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
-                0xa9c00000u, 0xa9c00000u + 0x1000u);
+    // UART1 (0xa9a00000), UART2/ttyMSM2 (0xa9c00000) e UART3 (0xa9e00000):
+    // o console do kernel pode cair em qualquer uma delas.
+    for (u32 ub : UART_BASES) {
+        uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
+                    ub, ub + UART_SIZE);
+        uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
+                    ub, ub + UART_SIZE);
+    }
     uc_hook hs1 = 0, hs2 = 0;
     uc_hook_add(uc, &hs1, UC_HOOK_MEM_WRITE, (void*)on_smem_write, nullptr,
                 0x01f00000u, 0x01f00000u + 0x100);
@@ -454,6 +1234,13 @@ int main(int argc, char** argv) {
     uc_hook_add(uc, &hp, UC_HOOK_MEM_WRITE, (void*)on_any_write, nullptr, 1, 0);
     uc_hook hpc = 0;
     uc_hook_add(uc, &hpc, UC_HOOK_CODE, (void*)on_code_probe, nullptr, 1, 0);
+    uc_hook hun = 0;
+    uc_hook_add(uc, &hun, UC_HOOK_MEM_FETCH_UNMAPPED | UC_HOOK_MEM_READ_UNMAPPED |
+                           UC_HOOK_MEM_WRITE_UNMAPPED, (void*)on_fault_entry, nullptr, 1, 0);
+    uc_hook hint = 0;
+    uc_hook_add(uc, &hint, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
+
+
 
     uc_mem_write(uc, KERNEL_LOAD, img.data(), img.size());
 
@@ -479,7 +1266,7 @@ int main(int argc, char** argv) {
         t.push_back(4); t.push_back(0x54410002u);
         t.push_back(64u * 1024u * 1024u); t.push_back(APPS_RAM_PHYS);
         // ATAG_CMDLINE (0x54410009)
-        const char* cmdline = "console=ttyMSM0,115200n8 earlyprintk=msm_serial,0xa9a00000 mem=64M lpj=2629632 init=/init";
+        const char* cmdline = "console=ttyMSM2,115200n8 earlyprintk=msm_serial,0xa9c00000 mem=64M lpj=2629632 init=/init";
         size_t clen = std::strlen(cmdline) + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
@@ -504,6 +1291,7 @@ int main(int argc, char** argv) {
     std::printf("[boot] parou: %s (%d) apos %llu instrucoes, last_pc=0x%08x\n",
                 uc_strerror(e), (int)e, (unsigned long long)g_insn, g_last_pc);
     v.insn = g_insn;
+    dump_kernel_log(uc, "fim da execucao");
     if (g_probe) {
         std::printf("[probe] paginas de PC mais visitadas (top 8):\n");
         {
