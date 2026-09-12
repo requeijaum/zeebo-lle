@@ -1410,6 +1410,10 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
         if (!sdl_draw_fb(uc)) sdl_present(g_console);
         if (g_sdl_quit) uc_emu_stop(uc);
     }
+    // A definicao de usb_async_poll esta' mais abaixo, junto do modelo do USB.
+    void usb_async_poll(uc_engine*);
+    static const bool usb_async_on = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
+    if (usb_async_on && (g_icount & 0x3FFFFu) == 0u) usb_async_poll(uc);
 #endif
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
@@ -1783,6 +1787,52 @@ static void on_usb_read(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64
     g_usb_regs[(off & 0x1ffu) >> 2] = v;
 }
 
+// ---------------------------------------------------------------------------
+// Lista assincrona do EHCI: o HCD deixa qH/qTD (48/32 bytes) na RAM do guest e o
+// hardware os executa. Sem isso o kernel fica em polling logo apos "new USB bus
+// registered". Aqui so' OBSERVAMOS: caminha a lista, imprime a transferencia ativa
+// (endpoint, PID, bytes, buffer) e o comeco do buffer -- e' o setup packet da
+// enumeracao, que diz o que emular em seguida.
+// Layout do qH: 0x00 link, 0x04 endpoint characteristics, 0x08 capabilities,
+// 0x0c current qTD, 0x10+ overlay (next/alt/token/buffer[5]); token: bit7 Active,
+// bits 8-9 PID (0=OUT 1=IN 2=SETUP), bits 16-30 total bytes.
+static bool g_usb_async_log = false;
+
+void usb_async_poll(uc_engine* uc) {
+    u32 list = g_usb_regs[(0x158u & 0x1ffu) >> 2] & ~0x1fu;   // ASYNCLISTADDR
+    if (!list) return;
+    u32 qh = list;
+    for (int i = 0; i < 4 && qh; i++) {
+        u32 epc = 0, token = 0, buf0 = 0, cur = 0;
+        if (uc_mem_read(uc, qh + 0x04, &epc, 4)   != UC_ERR_OK) break;
+        if (uc_mem_read(uc, qh + 0x0c, &cur, 4)   != UC_ERR_OK) break;
+        if (uc_mem_read(uc, qh + 0x18, &token, 4) != UC_ERR_OK) break;
+        if (uc_mem_read(uc, qh + 0x1c, &buf0, 4)  != UC_ERR_OK) break;
+        if (token & 0x80u) {                                   // Active
+            const char* pid = ((token >> 8) & 3) == 0 ? "OUT" : ((token >> 8) & 3) == 1 ? "IN" : "SETUP";
+            u32 bytes = (token >> 16) & 0x7fffu;
+            static u32 last_qh = 0, last_tok = 0;
+            if (qh != last_qh || token != last_tok) {
+                last_qh = qh; last_tok = token;
+                printf("[usb-async] qh=0x%08x ep=%u dev=%u %s bytes=%u buf=0x%08x cur=0x%08x\n",
+                       qh, epc & 0xf, (epc >> 8) & 0x7f, pid, bytes, buf0, cur);
+                if (bytes && buf0) {
+                    unsigned char b[16] = {0};
+                    if (uc_mem_read(uc, buf0, b, sizeof(b)) == UC_ERR_OK) {
+                        printf("[usb-async]   dados:");
+                        for (int k = 0; k < (int)(bytes < 16 ? bytes : 16); k++) printf(" %02x", b[k]);
+                        printf("\n");
+                    }
+                }
+            }
+        }
+        u32 next = 0;
+        if (uc_mem_read(uc, qh, &next, 4) != UC_ERR_OK) break;
+        qh = next & ~0x1fu;                                    // H bit limpo = proximo
+        if (qh == list) break;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
     if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
@@ -1838,6 +1888,7 @@ int main(int argc, char** argv) {
     // mapeamento o acesso vira UC_ERR_MAP e mata o boot (visto no MDP tambem).
     uc_mem_map(uc, 0xa0800000u, 0x1000u, UC_PROT_ALL);
     g_usb_log = (std::getenv("ZEEBO_USB_LOG") != nullptr);
+    g_usb_async_log = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
     uc_hook hu_w = 0, hu_r = 0;
     uc_hook_add(uc, &hu_w, UC_HOOK_MEM_WRITE, (void*)on_usb_write, nullptr, 0xa0800000u, 0xa0801000u);
     uc_hook_add(uc, &hu_r, UC_HOOK_MEM_READ,  (void*)on_usb_read,  nullptr, 0xa0800000u, 0xa0801000u);

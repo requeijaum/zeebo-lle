@@ -99,10 +99,22 @@ limpo (shell + framebuffer + SDL2) — verificado com o mesmo zImage commitado.
 
 ## Próximo passo (para enumerar o teclado HID)
 
-1. modelar a lista assíncrona do EHCI: ler os `qTD`/`qH` da RAM do guest, e
-   responder aos control transfers (device descriptor → set address →
-   config descriptor → HID report descriptor → interrupt IN);
-2. emular um teclado HID na porta 1: `PORTSC` com `CCS=1` + `ehci_hub_control`
-   respondendo ao reset/enable da porta;
-3. aí o `usbhid` faz o bind e o guest lista o dispositivo em
-   `/sys/bus/usb/devices` — que é o critério do objetivo.
+1. **entregar a IRQ 47 (INT_USB_HS)**: o modelo de VIC do harness só entrega IRQs
+   0-31, mas o USB HS usa a 47. O URB completion do EHCI depende do `ehci_irq`, então
+   isso casa com o sintoma observado (o boot para sem tocar em registrador USB
+   nenhum, o que é espera, não polling de MMIO). Primeiro passo concreto: estender a
+   entrega do VIC para a segunda palavra (IRQs 32-63) e ver se o root hub avança;
+2. instrumentar o que o kernel espera: com a 47 entregue, ver se aparecem qTD/qH na
+   RAM (o harness já tem o observador `ZEEBO_USB_ASYNC=1`, que caminha a lista
+   assíncrona e imprime endpoint/PID/bytes/buffer + os primeiros bytes). Hoje ele
+   imprime zero transferências ativas — ou seja, o HCD ainda não chegou a submeter;
+3. modelar aí a lista assíncrona: ler os `qTD`/`qH` da RAM do guest, completar as
+   transferências (device descriptor → set address → config descriptor → HID report
+   descriptor → interrupt IN) e emular o teclado HID na porta 1 (`PORTSC` com
+   `CCS=1` + reset/enable da porta). Aí o `usbhid` faz o bind e o guest lista o
+   dispositivo em `/sys/bus/usb/devices` — que é o critério do objetivo.
+
+Observador já pronto no harness (env `ZEEBO_USB_ASYNC=1`): caminha a lista
+assíncrona, imprime `ep/dev/PID/bytes/buffer` da transferência ativa e os primeiros
+16 bytes do buffer — é ele que vai mostrar o setup packet da enumeração quando o
+HCD começar a submeter.
