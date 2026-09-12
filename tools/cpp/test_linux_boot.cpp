@@ -35,9 +35,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <map>
+#include <algorithm>
 #include <unicorn/unicorn.h>
 
-using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t;
+using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; using i64 = int64_t;
 
 namespace {
 
@@ -49,7 +51,7 @@ constexpr u32 UART_SIZE     = 0x00010000u;
 constexpr u32 UART_OFF_TF   = 0x000cu;       // TX FIFO
 constexpr u32 UART_OFF_SR   = 0x0008u;       // status; bit2 = TX_READY
 constexpr u32 VIC_BASE      = 0xc0000000u;
-constexpr u32 VIC_SIZE      = 0x00100000u;
+constexpr u32 VIC_SIZE      = 0x00200000u;   // 2MB: o VIC do MSM vai ate 0xc01xxxxx
 
 // Onde o zImage ARM e tipicamente carregado: base da RAM + 0x8000.
 constexpr u32 KERNEL_LOAD   = APPS_RAM_PHYS + 0x8000u;
@@ -126,7 +128,7 @@ struct Verdict {
     bool all() const { return l1 && l2 && l3; }
 };
 
-constexpr u64 kInsnBudget = 100000;
+static const u64 kInsnBudget = [](){ const char* e = std::getenv("ZEEBO_BUDGET"); return e ? std::strtoull(e, nullptr, 0) : 100000ull; }();
 
 void report(const Verdict& v) {
     std::printf("\n--- veredito: boot de kernel Linux ---\n");
@@ -152,6 +154,10 @@ int run_selftest() {
     if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) {
         std::printf("FAIL: uc_open\n"); return 1;
     }
+    // MODELO DE CPU: sem isto o Unicorn usa o default (Cortex-A15, ARMv7),
+    // e o kernel aborta com "unrecognized/unsupported processor variant
+    // (0x412fc0f1)". O Zeebo e ARM1136 -- ver notes/ARM_CPU_WAS_WRONG.md.
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, 0x10000000u, 0x1000u, UC_PROT_ALL);
     uc_mem_map(uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
     uc_hook hw = 0;
@@ -198,6 +204,49 @@ int run_selftest() {
 
 }  // namespace
 
+
+// Diagnostico: reporta a PRIMEIRA falha de acesso a memoria (endereco e PC).
+static bool g_fault_seen = false;
+static u64  g_fault_addr = 0;
+static u32  g_fault_pc   = 0;
+static int  g_fault_type = 0;
+static bool on_mem_invalid(uc_engine* uc, uc_mem_type type, u64 addr,
+                           int size, i64 value, void* user) {
+    (void)size; (void)value; (void)user;
+    if (!g_fault_seen) {
+        g_fault_seen = true; g_fault_addr = addr; g_fault_type = (int)type;
+        uc_reg_read(uc, UC_ARM_REG_PC, &g_fault_pc);
+    }
+    return false; // nao continuar: queremos o erro honesto
+}
+
+
+// Instrumento (env ZEEBO_UART_PROBE=1): registra escritas em regioes altas,
+// para descobrir por qual VA o kernel fala com a UART depois de ligar a MMU.
+static bool g_probe = false;
+static std::map<u32,int> g_hi_writes;
+static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
+                         i64 value, void* user) {
+    (void)uc;(void)t;(void)size;(void)value;(void)user;
+    if (!g_probe) return;
+    u32 a = static_cast<u32>(addr);
+    // fora da RAM de aplicacao: candidato a MMIO
+    if (a < APPS_RAM_PHYS || a >= APPS_RAM_PHYS + APPS_RAM_SIZE)
+        g_hi_writes[a & 0xFFFFF000u]++;
+}
+
+
+// Instrumento (ZEEBO_UART_PROBE): amostra o PC ao longo da execucao para
+// distinguir "progredindo" de "preso em laco".
+static std::map<u32,long> g_pc_hist;
+static u64 g_icount = 0;
+static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
+    (void)uc;(void)size;(void)user;
+    ++g_icount;
+    if (!g_probe) return;
+    if ((g_icount & 0xFFFF) == 0) g_pc_hist[static_cast<u32>(addr)]++;  // PC exato
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
 
@@ -227,6 +276,10 @@ int main(int argc, char** argv) {
     if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) {
         std::printf("FAIL: uc_open\n"); return 1;
     }
+    // MODELO DE CPU: sem isto o Unicorn usa o default (Cortex-A15, ARMv7),
+    // e o kernel aborta com "unrecognized/unsupported processor variant
+    // (0x412fc0f1)". O Zeebo e ARM1136 -- ver notes/ARM_CPU_WAS_WRONG.md.
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, APPS_RAM_PHYS, APPS_RAM_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, VIC_BASE, VIC_SIZE, UC_PROT_ALL);
@@ -237,11 +290,53 @@ int main(int argc, char** argv) {
     uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
                 UART1_BASE, UART1_BASE + UART_SIZE);
     uc_hook_add(uc, &hc, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
+    uc_hook hm = 0;
+    uc_hook_add(uc, &hm, UC_HOOK_MEM_INVALID, (void*)on_mem_invalid, nullptr, 1, 0);
+    g_probe = (std::getenv("ZEEBO_UART_PROBE") != nullptr);
+    uc_hook hp = 0;
+    if (g_probe)
+        uc_hook_add(uc, &hp, UC_HOOK_MEM_WRITE, (void*)on_any_write, nullptr, 1, 0);
+    uc_hook hpc = 0;
+    if (g_probe)
+        uc_hook_add(uc, &hpc, UC_HOOK_CODE, (void*)on_code_probe, nullptr, 1, 0);
 
     uc_mem_write(uc, KERNEL_LOAD, img.data(), img.size());
 
     // Contrato de boot ARM Linux: r0=0, r1=machine id, r2=ponteiro ATAGS/DTB.
-    u32 r0 = 0, r1 = 0, r2 = APPS_RAM_PHYS + 0x100u, sp = APPS_RAM_PHYS + 0x4000000u;
+    //
+    // MACHINE ID: o proprio kernel lista o que aceita quando r1 esta errado:
+    //   "ID (hex) NAME / 0000059f Halibut Board (QCT SURF7200A)"
+    // 0x59f = MACH_TYPE_HALIBUT, a mesma board do log de boot do TripleOxygen
+    // ("Machine: Zeebo" era um board custom derivado do halibut).
+    constexpr u32 MACH_TYPE_HALIBUT = 0x59fu;
+    const u32 atags = APPS_RAM_PHYS + 0x100u;
+
+    // ATAGs minimas: o kernel sem elas nao sabe quanta RAM existe.
+    // Formato: cada tag = {u32 size_em_words, u32 tag_id, payload...}.
+    // Valores vindos do log real: mem=64M na base fisica 0x10000000,
+    // console ttyMSM0,115200n8.
+    {
+        std::vector<u32> t;
+        // ATAG_CORE (0x54410001): flags, pagesize, rootdev
+        t.push_back(5); t.push_back(0x54410001u);
+        t.push_back(0); t.push_back(4096); t.push_back(0);
+        // ATAG_MEM (0x54410002): size, start  -- 64MB @ 0x10000000
+        t.push_back(4); t.push_back(0x54410002u);
+        t.push_back(64u * 1024u * 1024u); t.push_back(APPS_RAM_PHYS);
+        // ATAG_CMDLINE (0x54410009)
+        const char* cmdline = "console=ttyMSM0,115200n8 mem=64M rdinit=/bin/sh";
+        size_t clen = std::strlen(cmdline) + 1;
+        size_t cwords = (clen + 3) / 4;
+        t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
+        size_t base = t.size();
+        t.resize(base + cwords, 0);
+        std::memcpy(&t[base], cmdline, clen);
+        // ATAG_NONE (0x00000000) encerra a lista
+        t.push_back(0); t.push_back(0);
+        uc_mem_write(uc, atags, t.data(), t.size() * sizeof(u32));
+    }
+
+    u32 r0 = 0, r1 = MACH_TYPE_HALIBUT, r2 = atags, sp = APPS_RAM_PHYS + 0x4000000u;
     uc_reg_write(uc, UC_ARM_REG_R0, &r0);
     uc_reg_write(uc, UC_ARM_REG_R1, &r1);
     uc_reg_write(uc, UC_ARM_REG_R2, &r2);
@@ -252,6 +347,28 @@ int main(int argc, char** argv) {
 
     uc_err e = uc_emu_start(uc, KERNEL_LOAD, 0, 0, kInsnBudget);
     v.insn = g_insn;
+    if (g_probe) {
+        std::printf("[probe] paginas de PC mais visitadas (top 8):\n");
+        {
+            std::vector<std::pair<u32,long>> pv(g_pc_hist.begin(), g_pc_hist.end());
+            std::sort(pv.begin(), pv.end(),
+                      [](auto& a, auto& b){ return a.second > b.second; });
+            for (size_t i = 0; i < pv.size() && i < 8; ++i)
+                std::printf("   PC 0x%08x  %ld amostras\n", pv[i].first, pv[i].second);
+        }
+        std::printf("[probe] paginas MMIO escritas (top 12):\n");
+        std::vector<std::pair<u32,int>> v(g_hi_writes.begin(), g_hi_writes.end());
+        std::sort(v.begin(), v.end(),
+                  [](auto& a, auto& b){ return a.second > b.second; });
+        for (size_t i = 0; i < v.size() && i < 12; ++i)
+            std::printf("   0x%08x  %d escritas\n", v[i].first, v[i].second);
+    }
+    if (g_fault_seen) {
+        const char* tn = (g_fault_type == UC_MEM_WRITE_UNMAPPED) ? "WRITE" :
+                         (g_fault_type == UC_MEM_READ_UNMAPPED)  ? "READ"  : "FETCH";
+        std::printf("[falha] %s em 0x%08llx (PC=0x%08x) -- regiao nao mapeada\n",
+                    tn, (unsigned long long)g_fault_addr, g_fault_pc);
+    }
     std::printf("[boot] parou: %s (%d) apos %llu instrucoes\n",
                 uc_strerror(e), (int)e, (unsigned long long)g_insn);
 
