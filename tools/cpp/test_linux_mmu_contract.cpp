@@ -37,11 +37,12 @@
 // 3) MODELO DE CPU: ARM1136, NAO ARM1176
 //    "CPU: ARMv6-compatible processor [4117b362] revision 2 (ARMv6TEJ)"
 //    MIDR 0x4117b362 -> part 0xb36 (ARM1136), variant 1, revision 2.
-//    O nosso emulador usa 0x410FB767 (part 0xb76 = ARM1176) e
-//    UC_CPU_ARM_1176 em ~12 lugares. E divergencia de fato contra hardware.
-//    Este teste NAO altera o emulador (trocar o modelo de CPU no projeto
-//    inteiro merece decisao e medicao proprias); ele REGISTRA a divergencia de
-//    forma executavel para que ela nao se perca.
+//    O emulador usava 0x410FB767 (part 0xb76 = ARM1176) e UC_CPU_ARM_1176 em
+//    18 ocorrencias / 15 arquivos -- divergencia de fato contra o hardware.
+//    CORRIGIDO em 53d1a09: hoje usa UC_CPU_ARM_1136 / midr 0x4117b363.
+//    Ver notes/ARM_CPU_WAS_WRONG.md.
+//    Este teste nao altera o emulador; ele valida (M4) que o part number
+//    configurado casa com o do silicio.
 //
 // 4) SCTLR REAL NO MOMENTO DO BOOT: cr=00c5387f
 //    M=1 (MMU ligada), C=1 e I=1 (caches), W=1, Z=1 (branch pred),

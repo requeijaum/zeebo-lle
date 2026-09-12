@@ -700,11 +700,24 @@ não copiar). É o parente técnico mais próximo do zeebo-lle encontrado até a
   - Resultado: **idêntico em tudo** — mesma primeira divergência (#23726), mesmos valores
     (`r3 = 0x10090001` vs `0`), mesmas contagens (596.725 vs 1.168.764 instruções).
   - Conclusão: a escolha entre 1136 e 1176 **não influencia** o defeito do boot. O experimento foi
-    revertido (o código segue em `arm1176`, agora coerente nos dois backends). A pergunta de qual
-    é a CPU historicamente correta continua aberta, mas deixou de ser prioridade — não é o
-    caminho para destravar o boot.
+    revertido. A pergunta de qual é a CPU historicamente correta continua aberta, mas deixou de
+    ser prioridade — não é o caminho para destravar o boot.
+  - **ATUALIZAÇÃO (2026-09-12, `53d1a09`)**: a pergunta foi respondida — é **ARM1136** (MIDR
+    `0x4117b362` lido do silício). O código **não** segue mais em `arm1176`; foi alinhado ao
+    1136. A conclusão deste experimento permanece válida: a família de CPU não move a
+    divergência #23726. Ver `notes/ARM_CPU_WAS_WRONG.md`.
 
-- [ ] **Incoerência de identidade de CPU entre os dois backends (parcialmente resolvida)**:
+- [x] **Incoerência de identidade de CPU entre os dois backends — RESOLVIDA (`53d1a09`, 2026-09-12)**:
+  - **Resposta definitiva**: a CPU é **ARM1136**, não ARM1176. O log de boot do Linux 2.6.29-zeebo
+    do TripleOxygen imprime o MIDR lido do silício: `CPU: ARMv6-compatible processor [4117b362]
+    revision 2 (ARMv6TEJ)` → part `0xB36` (ARM1136), variant 1, revision 2. Isto **fecha** a
+    pergunta que este item deixava em aberto e confirma o que o TRM local já sugeria.
+  - Correção aplicada em 18 ocorrências / 15 arquivos; ambos os backends agora reportam
+    `0x4117b363` (`UC_CPU_ARM_1136` — erra só a revisão, 1 bit; o Unicorn não expõe variant 1 +
+    revision 2 simultaneamente). Relatório completo: **`notes/ARM_CPU_WAS_WRONG.md`**.
+  - Consistente com o experimento negativo abaixo: medido que a ISA observável de 1136 e 1176 é
+    idêntica (única diferença é o FPSID), então a correção **não** move a divergência do boot.
+  - Registro histórico do item, como estava antes:
   - Levantado ao investigar o que o QEMU teria a ensinar (o Unicorn é um **fork do QEMU**, então
     o modelo de CPU dele *é* o modelo do QEMU; ver seção de licença abaixo).
   - Medido: `MIDR` que cada modelo do QEMU/Unicorn reporta (`mrc p15,0,Rd,c0,c0,0`):
