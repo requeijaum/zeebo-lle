@@ -75,8 +75,10 @@ tools/cpp/test_jit_code_hook
 tools/cpp/test_jit_fault_report
 tools/cpp/test_jit_lockstep
 
-# TRMs convertidos por markitdown: derivados de PDFs de terceiros (ARM), uso local
-docs/remote/md/
+# Material remoto baixado para consulta (uso local, nao versionar):
+#  - docs/remote/md/: TRMs convertidos por markitdown (derivados de PDFs de terceiros/ARM)
+#  - docs/remote/openzeebo/: fonte de terceiros (projeto OpenZeebo: C/H/Makefiles)
+docs/remote/
 
 # Binário compilado de terceiro em refs/
 refs/okl4-arm-build/arm-kernel.elf
