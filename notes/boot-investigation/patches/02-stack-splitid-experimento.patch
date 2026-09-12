@@ -1,0 +1,144 @@
+diff --git a/tools/cpp/zeebo_lle_main.cpp b/tools/cpp/zeebo_lle_main.cpp
+index 0189256..fa515fd 100644
+--- a/tools/cpp/zeebo_lle_main.cpp
++++ b/tools/cpp/zeebo_lle_main.cpp
+@@ -2732,6 +2732,110 @@ private:
+ 
+ 
+ 
++        // [DIAG-ARG] argumentos na chamada f0016a9c -> f0003ae0 (bl)
++        {
++            static uc_hook h_arg;
++            uc_hook_add(core1_.uc, &h_arg, UC_HOOK_CODE,
++                        (void*)+[](uc_engine* uc, uint64_t addr, uint32_t, void* ud) {
++                            u32 a = (u32)addr;
++                            // entrada da funcao, o mov r8,r3 e o uso da mascara
++                            // r3 vem de: bic r3,r2,#0xf ; cmp r3,#0x10 ; se != ->
++                            // ldrhne r3,[sp,#0x3c] (halfword de r2 salvo) ; lsrne r3,r3,#4
++                            // ; andne r3,r3,#0x3f. Se == 0x10 -> addeq r3,r3,#0x10.
++                            // Com r2=b0000007: bic -> b0000000 != 0x10, entao pega o
++                            // caminho "ne" e r3 sai de bits 4..9 de 0x0007 = 0.
++                            // f0003b34 mov r8,r3 (r3 vem do preambulo) e f0003b54
++                            // ldrh r3,[sp,#0x38] -- outra leitura de PILHA.
++                            if (a != 0xf0003b34 && a != 0xf0003b54 && a != 0xf0003b58) return;
++                            { u32 sp2=0; uc_reg_read(uc, UC_ARM_REG_SP, &sp2);
++                              ZeeboLLESystem* S2 = (ZeeboLLESystem*)ud;
++                              u32 ea38=sp2+0x38, o38=ea38-REX_HEAP_VA_BASE, sh38=0, ram38=0;
++                              uc_mem_read(uc, ea38, &ram38, 4);
++                              if (o38+4 <= S2->rex_heap_shadow_.size())
++                                  memcpy(&sh38, &S2->rex_heap_shadow_[o38], 4);
++                              u32 q3=0,q8=0; uc_reg_read(uc, UC_ARM_REG_R3,&q3);
++                              uc_reg_read(uc, UC_ARM_REG_R8,&q8);
++                              fprintf(stderr, "[SP38] pc=%08x r3=%08x r8=%08x | ea=%08x RAM=%08x SHADOW=%08x\n",
++                                      a, q3, q8, ea38, ram38, sh38); }
++                            return;
++                            static int n = 0;
++                            if (++n > 15) return;
++                            { u32 q2=0,q8=0,qa=0,qfp=0,q5=0;
++                              uc_reg_read(uc, UC_ARM_REG_R2,  &q2);
++                              uc_reg_read(uc, UC_ARM_REG_R8,  &q8);
++                              uc_reg_read(uc, UC_ARM_REG_R10, &qa);
++                              uc_reg_read(uc, UC_ARM_REG_R11, &qfp);
++                              uc_reg_read(uc, UC_ARM_REG_R5,  &q5);
++                              u32 lim=0; uc_mem_read(uc, qfp+0x10, &lim, 4);
++                              fprintf(stderr, "[MASK] pc=%08x r8(shift)=%08x r2(mask)=%08x r5(VA)=%08x sl=%08x [fp+10]=%08x\n",
++                                      a, q8, q2, q5, qa, lim); }
++                            return;
++                            u32 v2 = 0, v3 = 0, ip = 0;
++                            uc_reg_read(uc, UC_ARM_REG_R2, &v2);
++                            uc_reg_read(uc, UC_ARM_REG_R3, &v3);
++                            uc_reg_read(uc, UC_ARM_REG_R12, &ip);
++                            u32 sp = 0; uc_reg_read(uc, UC_ARM_REG_SP, &sp);
++                            u32 m3c = 0; uc_mem_read(uc, sp + 0x3c, &m3c, 4);
++                            fprintf(stderr, "[R3] pc=%08x r2=%08x r3=%08x ip=%08x [sp+3c]=%08x\n",
++                                    a, v2, v3, ip, m3c);
++                            // A escrita foi para o shadow e a leitura veio da RAM (ou
++                            // vice-versa)? Compara os dois lados no mesmo endereco.
++                            if (a == 0xf0003afc) {
++                                ZeeboLLESystem* S = (ZeeboLLESystem*)ud;
++                                u32 ea = sp + 0x3c, off = ea - REX_HEAP_VA_BASE, sh = 0;
++                                if (off + 4 <= S->rex_heap_shadow_.size())
++                                    memcpy(&sh, &S->rex_heap_shadow_[off], 4);
++                                fprintf(stderr, "[R3] ea=%08x  RAM=%08x  SHADOW=%08x  split_id=%d\n",
++                                        ea, m3c, sh, (int)S->rex_split_id_);
++                            }
++                            u32 r2 = 0, r3 = 0, r5 = 0, r8 = 0;
++                            uc_reg_read(uc, UC_ARM_REG_R2, &r2);
++                            uc_reg_read(uc, UC_ARM_REG_R3, &r3);
++                            uc_reg_read(uc, UC_ARM_REG_R5, &r5);
++                            uc_reg_read(uc, UC_ARM_REG_R8, &r8);
++                            fprintf(stderr, "[ARG] pc=%08x r2=%08x r3=%08x r5=%08x r8=%08x\n",
++                                    a, r2, r3, r5, r8);
++                        }, this, 0, ~0ULL);
++        }
++
++        // [DIAG-VA] onde r10 (sl) passa a valer 0xb0000007 e quem chama o walk
++        {
++            static uc_hook h_va;
++            uc_hook_add(core1_.uc, &h_va, UC_HOOK_CODE,
++                        (void*)+[](uc_engine* uc, uint64_t addr, uint32_t, void* ud) {
++                            static u32 prev_sl = 0xffffffffu;
++                            static int trocas = 0;
++                            static u32 ring[16]; static int ri = 0;
++                            u32 a = (u32)addr;
++                            ring[ri] = a; ri = (ri + 1) % 16;
++                            u32 sl = 0; uc_reg_read(uc, UC_ARM_REG_R10, &sl);
++                            if (sl != prev_sl) {
++                                if (sl == 0xb0000007u && trocas < 3) {
++                                    trocas++;
++                                    u32 lr = 0, sp = 0;
++                                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
++                                    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
++                                    fprintf(stderr, "[VA] sl := b0000007 em pc=%08x lr=%08x sp=%08x\n", a, lr, sp);
++                                    // f0003b70: and sl, r5, r2 lsl r8  -> sl = VA & mascara
++                                    // r5 = VA de entrada, r8 = shift, r3 = nivel (cmp r3,#8)
++                                    u32 r1 = 0, r2 = 0, r3 = 0, r5 = 0, r8 = 0, fp = 0;
++                                    uc_reg_read(uc, UC_ARM_REG_R1, &r1);
++                                    uc_reg_read(uc, UC_ARM_REG_R2, &r2);
++                                    uc_reg_read(uc, UC_ARM_REG_R3, &r3);
++                                    uc_reg_read(uc, UC_ARM_REG_R5, &r5);
++                                    uc_reg_read(uc, UC_ARM_REG_R8, &r8);
++                                    uc_reg_read(uc, UC_ARM_REG_R11, &fp);
++                                    fprintf(stderr, "[VA] r5(VA_in)=%08x r8(shift)=%u r3(nivel)=%u r1=%08x r2=%08x fp=%08x\n",
++                                            r5, r8, r3, r1, r2, fp);
++                                    u32 fp10 = 0; uc_mem_read(uc, fp + 0x10, &fp10, 4);
++                                    fprintf(stderr, "[VA] [fp+0x10]=%08x (limite comparado com r8)\n", fp10);
++
++                                }
++                                prev_sl = sl;
++                            }
++                        }, this, 0, ~0ULL);
++        }
++
+         // Console do kernel OKL4 (Core1). O putchar do kernel (0xf000e6e0) grava
+         // byte a byte num ring buffer em 0xf001da68 com indice em 0xf001da64
+         // (`strb r0,[r2,r3]` / `str r1,[ip]`, wrap em 0x800). Espelhar essas
+@@ -3621,7 +3725,17 @@ private:
+         // ARM9 faria. Sem isto, rex_heap_init corromperia 0xf000a800/0xf000e6d4.
+         if (sys->rex_split_id_ && !sys->rex_heap_dirty_.empty()) {
+             u32 pc=(u32)ad;
+-            for (u32 w : sys->rex_heap_dirty_) sys->rex_restore_code(w, 4);
++            // EXPERIMENTO: nao restaurar a regiao de PILHA do kernel. A pilha vive
++            // dentro da janela do heap (sp ~ 0xf00196xx); restaura-la como "codigo"
++            // apaga os registradores salvos (medido: [f0019750] SHADOW=b0000007 mas
++            // RAM=0), e o walk recebe shift=0 -> laco infinito.
++            // A pilha do kernel vive na janela do heap. Restaurar essas words como
++            // "codigo" apaga o frame salvo. Marca-se a faixa da pilha uma vez (o
++            // maior sp observado define o topo) e nunca se restaura dentro dela.
++            for (u32 w : sys->rex_heap_dirty_) {
++                if (w >= sys->rex_stack_lo_ && w < sys->rex_stack_hi_) continue;
++                sys->rex_restore_code(w, 4);
++            }
+             sys->rex_heap_dirty_.clear();
+             if (rex_in_heap(pc)) uc_ctl_remove_cache(uc, pc, pc + (size?size:4));
+         }
+@@ -3928,6 +4042,9 @@ private:
+     std::vector<u8> rex_heap_pristine_;    // código pristino da janela (visão I)
+     std::vector<u8> rex_heap_shadow_;      // RAM de dados dedicada (visão D)
+     std::unordered_set<u32> rex_heap_dirty_; // words com dado, a restaurar no fetch
++    // Faixa de PILHA do kernel dentro da janela do heap: nunca restaurar como codigo.
++    u32 rex_stack_lo_ = 0xf0019000;
++    u32 rex_stack_hi_ = 0xf001a000;
+     bool rex_split_id_ = false;
+ 
+     static bool rex_in_heap(u32 a){ return a>=REX_HEAP_VA_BASE && a<REX_HEAP_VA_BASE+REX_HEAP_VA_SIZE; }

@@ -1,0 +1,18 @@
+{
+  "port": 49101,
+  "events": [],
+  "ping": {
+    "ok": true,
+    "pong": true
+  },
+  "final_state": {
+    "ok": true,
+    "cycle": 1095,
+    "c0_pc": 2952841020,
+    "c0_insns": 240988,
+    "c1_pc": 4026628240,
+    "c1_insns": 10950000,
+    "running": true
+  },
+  "page_cache_0xb0041284_final": "0x0"
+}

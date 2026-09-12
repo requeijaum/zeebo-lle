@@ -1,0 +1,214 @@
+[System] Mode: Headless (CLI/Test runner)
+[System] Boot target: BREW Appmgr (Jailbreak default) (FIRSTAPP:0)
+===================================================================
+  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          
+===================================================================
+[System] Initializing EBI2 NAND Controller and DMOV DMA...
+[System] Initializing MDDI Display, Adreno 130 GPU, and Host Video Sink...
+[System] Initialized SoftRasterizer, IglHook and IGL guest-vtable bridge on Core 0 memory space.
+[System] Initializing Core 0 (ARM1176JZ-S Apps Processor)...
+[System] Initializing Core 1 (ARM926EJ-S Modem Processor)...
+[System] APPS_RAM pool host-backed @0x10000000 (96 MB), VTLB LUT armada
+[KIP] Kernel Interface Page @ 0xf0f00000 (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000, PageInfo[0xc8]=0x01111006 min-page=4K)
+[System] Loading APPS via Hardware DMOV DMA from NAND copy (../../nand/1.1.2.bin)...
+[APPSBL] Emulating partition '0:APPS' lookup & EBI2 DMA handoff at 0x0de8...
+[APPSBL] Partition '0:APPS' opened successfully via DMA!
+[APPSBL] ELF Entrypoint resolved: 0x10000000, Segments: 14
+[APPSBL] Performing handoff jump: bx r2 -> 0x10000000
+[System] Loading APPS image (../../nand/1.1.2_APPS.bin) into Core 0...
+[System] APPS ELF Entrypoint: 0x10000000, Segments: 14
+[System] IglGuestBridge armado com 8 intervalos executáveis do APPS.bin (resolução determinística de gpIGL/gpIEGL)
+[System] Loading AMSS via Hardware DMOV DMA from NAND copy (../../nand/1.1.2.bin)...
+[System] Direct NAND DMA read verified AMSS ELF Header! (Entry: 0x00a00000)
+[System] Loading AMSS image (../../nand/1.1.2_AMSS.bin) into Core 1...
+[System] AMSS ELF Entrypoint (e_entry/PA): 0x00a00000, Segments: 18
+[System][Core1] Reset vector real (VA) = 0xf0000000  (e_entry PA 0x00a00000 traduzido)
+[System][Core1] Preambulo: CPSR=0xd3 (SVC,IRQ/FIQ off) SP=0x00a197f8
+[System][Core1] Tabela de regioes REX semeada @0x00a1d73c (base=0x00a00000 teto=0x00c00000 attr=0x0f) - checagem 0xf0017448 -> 0
+[System][Core1] Split I/D do heap REX armado: janela 0xf0000000+2048KB (código pristino preservado, dados -> shadow PA 0x00a00000)
+[Q0.1] capture hook instalado @ consumer=0x16e8cb96 dispatcher=0x16e8cba0
+[System] Initialization complete. Both cores ready.
+[System] Beginning interleaved execution: 250 cycles x 10000 insns...
+  [Cycle 00] Core0(ARM11): pc=0x100161c8 insns=10000 (ok) | Core1(ARM9): pc=0xf0017544 insns=10000 (ok)
+  [Cycle 01] Core0(ARM11): pc=0xf00124a4 insns=20000 (ok) | Core1(ARM9): pc=0xf0017890 insns=20000 (ok)
+  [Cycle 02] Core0(ARM11): pc=0xf000a734 insns=30000 (ok) | Core1(ARM9): pc=0xf0017890 insns=30000 (ok)
+  [Cycle 03] Core0(ARM11): pc=0xf0016980 insns=40000 (ok) | Core1(ARM9): pc=0xf0017890 insns=40000 (ok)
+  [Cycle 04] Core0(ARM11): pc=0xf0002e94 insns=50000 (ok) | Core1(ARM9): pc=0xf0017890 insns=50000 (ok)
+  [Cycle 10] Core0(ARM11): pc=0xf0007368 insns=110000 (ok) | Core1(ARM9): pc=0xf0017890 insns=110000 (ok)
+[Core0/CTZ] 0xb000d4a8 iter=1 r0(kip)=0xf0f00000 r2(scan)=0x00888800 r3(pageinfo)=0x01111006
+[Core0/CTZ] 0xb000d4a8 iter=2 r0(kip)=0xf0f00000 r2(scan)=0x00444400 r3(pageinfo)=0x00000001
+[Core0/CTZ] 0xb000d4a8 iter=4 r0(kip)=0xf0f00000 r2(scan)=0x00111100 r3(pageinfo)=0x00000003
+[Core0/CTZ] 0xb000d4a8 iter=8 r0(kip)=0xf0f00000 r2(scan)=0x00011110 r3(pageinfo)=0x00000007
+[Core0/CTZ] 0xb000d4a8 iter=16 r0(kip)=0xf0f00000 r2(scan)=0x00111100 r3(pageinfo)=0x0000000f
+[Core0/CTZ] 0xb000d4a8 iter=32 r0(kip)=0xf0f00000 r2(scan)=0x00011110 r3(pageinfo)=0x0000001f
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=6 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[Display/Sink] Rendered active video frame 17 (Adreno draws=32)
+[Core0/CTZ] 0xb000d4a8 iter=64 r0(kip)=0xf0f00000 r2(scan)=0x00111100 r3(pageinfo)=0x0000003f
+  [Cycle 20] Core0(ARM11): pc=0xb000c73c insns=119352 (ok) | Core1(ARM9): pc=0xf0017890 insns=210000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[Core0/CTZ] 0xb000d4a8 iter=128 r0(kip)=0xf0f00000 r2(scan)=0x00011110 r3(pageinfo)=0x0000007f
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 30] Core0(ARM11): pc=0xb000c73c insns=120485 (ok) | Core1(ARM9): pc=0xf0017890 insns=310000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[Core0/CTZ] 0xb000d4a8 iter=256 r0(kip)=0xf0f00000 r2(scan)=0x00111100 r3(pageinfo)=0x000000ff
+  [Cycle 40] Core0(ARM11): pc=0xb000c73c insns=121601 (ok) | Core1(ARM9): pc=0xf0017890 insns=410000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 50] Core0(ARM11): pc=0xb000c73c insns=122734 (ok) | Core1(ARM9): pc=0xf0017890 insns=510000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 60] Core0(ARM11): pc=0xb000c73c insns=123850 (ok) | Core1(ARM9): pc=0xf0017890 insns=610000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[Core0/CTZ] 0xb000d4a8 iter=512 r0(kip)=0xf0f00000 r2(scan)=0x00011110 r3(pageinfo)=0x000001ff
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 70] Core0(ARM11): pc=0xb000d6b8 insns=125018 (ok) | Core1(ARM9): pc=0xf0017890 insns=710000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 80] Core0(ARM11): pc=0xb000d6b8 insns=126151 (ok) | Core1(ARM9): pc=0xf0017890 insns=810000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 90] Core0(ARM11): pc=0xb000d6b8 insns=127284 (ok) | Core1(ARM9): pc=0xf0017890 insns=910000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 100] Core0(ARM11): pc=0xb000d6b8 insns=128417 (ok) | Core1(ARM9): pc=0xf0017890 insns=1010000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 110] Core0(ARM11): pc=0xb000d6b8 insns=129550 (ok) | Core1(ARM9): pc=0xf0017890 insns=1110000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[Core0/CTZ] 0xb000d4a8 iter=1024 r0(kip)=0xf0f00000 r2(scan)=0x00111100 r3(pageinfo)=0x000003ff
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 120] Core0(ARM11): pc=0xb000d6b8 insns=130683 (ok) | Core1(ARM9): pc=0xf0017890 insns=1210000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 130] Core0(ARM11): pc=0xb000d6b8 insns=131816 (ok) | Core1(ARM9): pc=0xf0017890 insns=1310000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 140] Core0(ARM11): pc=0xb000d6b8 insns=132949 (ok) | Core1(ARM9): pc=0xf0017890 insns=1410000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 150] Core0(ARM11): pc=0xb000d6b8 insns=134082 (ok) | Core1(ARM9): pc=0xf0017890 insns=1510000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 160] Core0(ARM11): pc=0xb000d6b8 insns=135215 (ok) | Core1(ARM9): pc=0xf0017890 insns=1610000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 170] Core0(ARM11): pc=0xb000d6b8 insns=136348 (ok) | Core1(ARM9): pc=0xf0017890 insns=1710000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 180] Core0(ARM11): pc=0xb000d6b8 insns=137481 (ok) | Core1(ARM9): pc=0xf0017890 insns=1810000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 190] Core0(ARM11): pc=0xb000d6b8 insns=138614 (ok) | Core1(ARM9): pc=0xf0017890 insns=1910000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 200] Core0(ARM11): pc=0xb000d6b8 insns=139747 (ok) | Core1(ARM9): pc=0xf0017890 insns=2010000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 210] Core0(ARM11): pc=0xb000d6b8 insns=140880 (ok) | Core1(ARM9): pc=0xf0017890 insns=2110000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 220] Core0(ARM11): pc=0xb000d6b8 insns=142013 (ok) | Core1(ARM9): pc=0xf0017890 insns=2210000 (ok)
+[Core0/CTZ] 0xb000d4a8 iter=2048 r0(kip)=0xf0f00000 r2(scan)=0x00011110 r3(pageinfo)=0x000007ff
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 230] Core0(ARM11): pc=0xb000d6b8 insns=143146 (ok) | Core1(ARM9): pc=0xf0017890 insns=2310000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0xb0d00000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+  [Cycle 240] Core0(ARM11): pc=0xb000d6b8 insns=144279 (ok) | Core1(ARM9): pc=0xf0017890 insns=2410000 (ok)
+[L4_MapControl] space=0x80000100 control=0x80000000 modify count=1
+  [ctl 0] whole-space op: va=0x00000000 phys=0x100000000 size=4294967296 rwx=0 -> address-space control (flush/perm), no RAM map
+[Syscall] L4_MapControl(sid=0x80000100, ctrl=0x80000000) via UTCB@0xdff00000 -> res=0x1
+[System] Execution batch completed successfully.

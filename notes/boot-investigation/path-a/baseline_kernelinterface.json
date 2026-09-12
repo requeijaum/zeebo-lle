@@ -1,0 +1,40 @@
+{
+  "port": 49101,
+  "milestones": {},
+  "ping": {
+    "ok": true,
+    "pong": true
+  },
+  "initial_state": {
+    "ok": true,
+    "cycle": 0,
+    "c0_pc": 0,
+    "c0_insns": 0,
+    "c1_pc": 0,
+    "c1_insns": 0,
+    "running": false
+  },
+  "disasm_wrapper_0xb000c720": [
+    "0xb000c720: mov pc, r3",
+    "0xb000c724: mov r3, lr",
+    "0xb000c728: mov ip, sp",
+    "0xb000c72c: mvn sp, #0x2b",
+    "0xb000c730: mov lr, pc",
+    "0xb000c734: svc #0",
+    "0xb000c738: mov pc, r3",
+    "0xb000c73c: mov r3, lr",
+    "0xb000c740: mov ip, sp",
+    "0xb000c744: mvn sp, #0x27",
+    "0xb000c748: mov lr, pc",
+    "0xb000c74c: svc #0",
+    "0xb000c750: mov pc, r3",
+    "0xb000c754: push {r4, lr}",
+    "0xb000c758: ldr r4, [r1, #0xc]",
+    "0xb000c75c: ldr r3, [r1, #8]",
+    "0xb000c760: ldr r2, [r1, #4]",
+    "0xb000c764: ldr r1, [r1]",
+    "0xb000c768: mov ip, sp",
+    "0xb000c76c: mvn sp, #0x47"
+  ],
+  "error": "ConnectionResetError(104, 'Connection reset by peer')"
+}

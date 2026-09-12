@@ -1,0 +1,66 @@
+{
+  "env": {
+    "firmware_sha256": "be45dae7c6fd71d615a6247f7e56e9c64bf5ac40d164df99eded475e85f9c909",
+    "seed": "0xb007",
+    "unicorn_py": "2.1.2",
+    "capstone_py": "5.0.7",
+    "libunicorn_uc_version_raw": "0x20102ff"
+  },
+  "suites": {
+    "minpage": {
+      "name": "minpage_ctz_differential",
+      "counterexamples": [],
+      "n": 210,
+      "pass": 210
+    },
+    "largest_fpage": {
+      "name": "largest_fpage_differential",
+      "counterexamples": [],
+      "n": 409,
+      "pass": 409
+    },
+    "wrapper_abi": {
+      "name": "wrapper_abi_saved_regs_MODELED",
+      "counterexamples": [
+        {
+          "mode": "bad_stack(MODELED_expected_fail)",
+          "property_violated": true,
+          "why": [
+            "r4_clobbered=bad0bad0",
+            "r5_clobbered=bad0bad4",
+            "r6_clobbered=bad0bad8"
+          ]
+        },
+        {
+          "mode": "bad_reg(MODELED_expected_fail)",
+          "property_violated": true,
+          "why": {
+            "err": "Invalid memory write (UC_ERR_WRITE_UNMAPPED)",
+            "pc": "0xb000c740"
+          }
+        }
+      ],
+      "n": 36,
+      "pass": 34,
+      "note": "hooks are MODELED, not production integration (Path A owns real integration)"
+    }
+  },
+  "minimized_fpage_counterexamples": [],
+  "elapsed_s": 3.26,
+  "totals": {
+    "minpage": [
+      210,
+      210,
+      0
+    ],
+    "largest_fpage": [
+      409,
+      409,
+      0
+    ],
+    "wrapper": [
+      36,
+      34
+    ]
+  }
+}

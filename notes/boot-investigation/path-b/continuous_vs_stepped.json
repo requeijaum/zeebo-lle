@@ -1,0 +1,43 @@
+{
+  "note": "same Unicorn frontend; stepped != independent second CPU. Verifies continuous vs count=1 stepping determinism only.",
+  "cases": [
+    {
+      "addr": "0xb0d00000",
+      "lo": "0xb0d00000",
+      "hi": "0xb6d00000",
+      "continuous": "0xb0d00140",
+      "stepped": "0xb0d00140",
+      "insns_stepped": 242,
+      "match": true
+    },
+    {
+      "addr": "0x10000000",
+      "lo": "0x10000000",
+      "hi": "0x10100000",
+      "continuous": "0x10000140",
+      "stepped": "0x10000140",
+      "insns_stepped": 244,
+      "match": true
+    },
+    {
+      "addr": "0xb0d00001",
+      "lo": "0xb0d00000",
+      "hi": "0xb6d00000",
+      "continuous": "0xb0d00140",
+      "stepped": "0xb0d00140",
+      "insns_stepped": 242,
+      "match": true
+    },
+    {
+      "addr": "0xffff0000",
+      "lo": "0xffff0000",
+      "hi": "0xffffffff",
+      "continuous": "0xffff0100",
+      "stepped": "0xffff0100",
+      "insns_stepped": 190,
+      "match": true
+    }
+  ],
+  "all_match": true,
+  "elapsed_s": 0.04
+}

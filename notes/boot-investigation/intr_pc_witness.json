@@ -1,0 +1,26 @@
+{
+  "unicorn": "2.1.2",
+  "scope": "semantics witness; not integrated boot",
+  "cases": [
+    {
+      "extra_pc_plus_4": false,
+      "events": [
+        {
+          "interrupt": 2,
+          "pc": "0x1004"
+        }
+      ],
+      "r0": "0x5a"
+    },
+    {
+      "extra_pc_plus_4": true,
+      "events": [
+        {
+          "interrupt": 2,
+          "pc": "0x1004"
+        }
+      ],
+      "r0": "0x0"
+    }
+  ]
+}
