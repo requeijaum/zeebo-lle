@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
     }
 
     // Set CPU model to ARM1176 (Zeebo ARM11 core)
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
 
     // Map memory: 4MB at base for code/data, and 4MB at 0x00200000..0x00400000 for stack
     uint32_t map_base = base & ~0xFFFFFu;

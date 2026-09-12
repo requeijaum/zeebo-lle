@@ -77,7 +77,7 @@ static const u32 FB_PHYS       = 0x12E00000u;
 static const u32 FB_VA_LINEAR  = 0xC2E00000u;  // regiao "fb"
 static const u32 FB_VA_IOREMAP = 0xC4C00000u;  // resource fbram
 static const u32 MIDR_REAL     = 0x4117B362u;  // ARM1136 r1p2
-static const u32 MIDR_OURS     = 0x410FB767u;  // ARM1176 (zeebo_dynarmic_core.h)
+static const u32 MIDR_OURS     = 0x4117B363u;  // ARM1136 (zeebo_dynarmic_core.h)
 static const u32 SCTLR_REAL    = 0x00C5387Fu;
 
 struct Region { const char* name; u32 va, pa, size; };
@@ -205,16 +205,20 @@ int main(int argc, char** argv) {
     auto part = [](u32 m) { return (m >> 4) & 0xfff; };
     printf("     hardware real : MIDR 0x%08x  part 0x%03x (ARM1136) rev %u\n",
            MIDR_REAL, part(MIDR_REAL), MIDR_REAL & 0xf);
-    printf("     nosso emulador: MIDR 0x%08x  part 0x%03x (ARM1176) rev %u\n",
+    printf("     nosso emulador: MIDR 0x%08x  part 0x%03x (ARM1136) rev %u\n",
            MIDR_OURS, part(MIDR_OURS), MIDR_OURS & 0xf);
     bool m4 = (part(MIDR_REAL) == part(MIDR_OURS));
     if (!m4) {
-        printf("     DIVERGENCIA CONHECIDA: o Zeebo real e ARM1136 (0xb36); o projeto\n");
-        printf("     usa UC_CPU_ARM_1176 em ~12 pontos. Registrado, nao corrigido aqui:\n");
-        printf("     trocar o modelo de CPU exige medicao propria (ARM1136 nao tem as\n");
-        printf("     mesmas extensoes) e pode mexer em todo o bring-up.\n");
+        printf("     DIVERGENCIA: part difere do silicio real.\n");
+    } else if (MIDR_OURS != MIDR_REAL) {
+        printf("     part e variant corretos; difere so na revision (%u vs %u)\n",
+               MIDR_OURS & 0xf, MIDR_REAL & 0xf);
+        printf("     O Unicorn nao expoe variant 1 + revision 2 simultaneamente:\n");
+        printf("       arm1136_r2 = 0x4107b362 (variant 0), arm1136 = 0x4117b363 (rev 3)\n");
+        printf("     UC_CPU_ARM_1136 e a aproximacao mais proxima (erra 1 bit).\n");
     }
-    printf("     M4: %s\n\n", m4 ? "PASS" : "DIVERGENTE (esperado por ora)");
+    printf("     M4: %s\n\n", m4 ? "PASS (part correto)" : "FAIL");
+    if (!m4) fails++;
 
     // ---------------- SCTLR informativo ----------------
     printf("[info] SCTLR real no boot: cr=0x%08x\n", SCTLR_REAL);
@@ -227,7 +231,7 @@ int main(int argc, char** argv) {
     printf("M1 linear delta : %s\n", m1 ? "PASS" : "FAIL");
     printf("M2 base da RAM  : %s\n", m2 ? "PASS" : "FAIL");
     printf("M3 alias do fb  : %s\n", m3 ? "PASS" : "FAIL");
-    printf("M4 modelo de CPU: %s\n", m4 ? "PASS" : "DIVERGENTE (registrado)");
+    printf("M4 modelo de CPU: %s\n", m4 ? "PASS (part correto)" : "FAIL");
     if (fails == 0) {
         printf("\nGREEN: emulador consistente com o contrato de MMU do hardware real.\n");
         return 0;

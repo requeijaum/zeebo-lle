@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
         printf("[Fatal] Failed to initialize ARM11 core: %s\n", uc_strerror(err0));
         return 1;
     }
-    uc_ctl_set_cpu_model(core0.uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(core0.uc, UC_CPU_ARM_1136);
 
     // Initialize Core 1 (ARM926EJ-S — Modem / Baseband Processor)
     CoreState core1;

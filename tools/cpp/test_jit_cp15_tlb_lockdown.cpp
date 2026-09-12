@@ -41,7 +41,7 @@ static void check(bool cond, const char* nome) {
 static uint32_t roda_mrc_c10(uint32_t semente, unsigned crm, unsigned opc2) {
     uc_engine* uc = nullptr;
     uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
 
     const uint32_t BASE = 0x1000;
     uc_mem_map(uc, BASE, 0x1000, UC_PROT_ALL);

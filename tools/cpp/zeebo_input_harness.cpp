@@ -95,7 +95,7 @@ int main() {
     if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) {
         fprintf(stderr, "uc_open falhou\n"); return 1;
     }
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, SCRATCH_BASE, SCRATCH_SIZE, UC_PROT_ALL);
     std::vector<uint8_t> zero(SCRATCH_SIZE, 0);
     uc_mem_write(uc, SCRATCH_BASE, zero.data(), zero.size());

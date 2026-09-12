@@ -1687,7 +1687,7 @@ public:
             return false;
         }
         uc_ctl_tlb_mode(core0_.uc, UC_TLB_VIRTUAL);
-        uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1176);
+        uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1136);
         core0_.name = "ARM11-Apps";
         if (brew_) { brew_->bind_uc(core0_.uc); brew_->bind_lut(&vtlb_); }
 
@@ -5702,7 +5702,7 @@ int main(int argc, char** argv) {
                 if (zeetris_ok && sys.host_audio()) {
                     // Áudio real do jogo conectado via buffer decodificado do IMedia
                 }
-                if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+                if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0 || !dump_frames_dir.empty())) {
                     sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
                 }
                 return zeetris_ok ? 0 : 1;

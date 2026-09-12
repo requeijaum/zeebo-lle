@@ -129,7 +129,7 @@ int main(int argc, char** argv){
 
     uc_engine* uc=nullptr;
     if(uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc)!=UC_ERR_OK){ fprintf(stderr,"uc_open falhou\n"); return 1; }
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
 
     // ── Carrega as páginas executáveis de 0:APPS (PF_X, VA no espaço APPS user) ──
     std::vector<std::pair<uint32_t,uint32_t>> code_ranges;

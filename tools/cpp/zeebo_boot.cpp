@@ -334,7 +334,7 @@ int main(int argc,char**argv){
     u16 phent=rd16(d.data(),42), phnum=rd16(d.data(),44);
     build_arm11_map();
     uc_engine* uc; uc_open(UC_ARCH_ARM,UC_MODE_ARM,&uc);
-    uc_ctl_set_cpu_model(uc,UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc,UC_CPU_ARM_1136);
     map_all(uc);
     // AMSS high vaddrs form one contiguous DRAM window; map as a single region
     uc_mem_map(uc,0x16e00000,0x17a60000-0x16e00000,UC_PROT_ALL);

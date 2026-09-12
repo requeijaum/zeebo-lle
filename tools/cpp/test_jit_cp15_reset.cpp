@@ -72,7 +72,7 @@ void compare_reset_read(const char* nome, std::uint32_t mrc_opcode) {
     {
         uc_engine* uc = nullptr;
         uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
         uc_mem_map(uc, kBase, kSize, UC_PROT_ALL);
         uc_mem_write(uc, kBase, g_mem.data(), g_mem.size());
         uc_emu_start(uc, kBase + 0x100, kBase + 0x104, 0, 1);

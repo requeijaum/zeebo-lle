@@ -35,7 +35,7 @@ static void oraculo_ldm_usr(uint32_t* sp_svc, uint32_t* lr_svc,
                             uint32_t* sp_usr, uint32_t* lr_usr) {
     uc_engine* uc = nullptr;
     uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, 0, 0x20000, UC_PROT_ALL);
 
     const uint32_t insn = 0xe8d06000u;
@@ -68,7 +68,7 @@ static void oraculo_ldm_usr(uint32_t* sp_svc, uint32_t* lr_svc,
 static void oraculo_rfe(uint32_t* pc, uint32_t* cpsr_out, uint32_t* rn) {
     uc_engine* uc = nullptr;
     uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, 0, 0x20000, UC_PROT_ALL);
 
     const uint32_t insn = 0xf8b00a00u;   // rfeia r0!

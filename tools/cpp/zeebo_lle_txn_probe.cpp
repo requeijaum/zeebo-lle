@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
     uc_engine* uc = nullptr;
     uc_err err = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
     if (err != UC_ERR_OK) { std::fprintf(stderr, "uc_open: %s\n", uc_strerror(err)); return 1; }
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
 
     uint32_t map_base = base & ~0xFFFFFu;
     uc_mem_map(uc, map_base, 0x00400000, UC_PROT_ALL);
