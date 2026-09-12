@@ -51,6 +51,10 @@ struct ZeetrisContext {
     uint32_t input_block_calls = 0;   // execucoes do bloco de input do gameloop
     uint32_t input_store_calls = 0;   // execucoes da rotina que escreve no struct de input
     uint32_t tex_loader_calls = 0;    // execucoes da rotina de carga de textura (0x120056fc)
+    // CONTROLE POSITIVO DO INSTRUMENTO: hook identico instalado em 0x1200ac5c
+    // (gameloop, executa ~50x/s COMPROVADAMENTE). Se este contador ficar 0,
+    // o mecanismo de hook esta quebrado e tex_loader_calls==0 nao significa nada.
+    uint32_t hook_selftest_calls = 0;
     // Quantas vezes cada handler de bit da mascara executou (8 bits do gameloop).
     uint32_t btn_handler_calls[8] = {0,0,0,0,0,0,0,0};
     uint32_t igl_calls = 0;
@@ -315,6 +319,12 @@ public:
     static void hook_tex_loader(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
         (void)uc; (void)addr; (void)size;
         if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->tex_loader_calls++;
+    }
+
+    // Controle positivo: mesmo tipo de hook, endereco sabidamente executado.
+    static void hook_selftest(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+        (void)uc; (void)addr; (void)size;
+        if (auto* ctx = reinterpret_cast<ZeetrisContext*>(user_data)) ctx->hook_selftest_calls++;
     }
 
     static void hook_input_store(uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
@@ -842,6 +852,13 @@ public:
         uc_mem_write(uc, LOAD_VA - 8, &sb, 4);
         uc_mem_write(uc, LOAD_VA - 4, &sb, 4);
 
+        // CONTROLE NEGATIVO (env-gated): ZEEBO_ZEETRIS_NO_GLOBAL_PATCHES=1 desliga
+        // TODOS os remendos manuais de globais abaixo. Hipotese do RCA: os remendos
+        // sao inertes e o defeito e estrutural (secao RW nao carregada + sem
+        // relocacao). Se a saida for identica com e sem eles, a hipotese se confirma.
+        const bool no_global_patches =
+            std::getenv("ZEEBO_ZEETRIS_NO_GLOBAL_PATCHES") != nullptr;
+        if (!no_global_patches) {
         // Global do módulo em 0x003c14c4 aponta para o objeto IGL (ver
         // constantes IGL_*): os 108 thunks do módulo provam que é a interface
         // GL ES (slots 3..79), não IDisplay.
@@ -865,6 +882,7 @@ public:
         u32 extra_ptr = EXTRA_OBJ_VA;
         uc_mem_write(uc, 0x003c142c + 0x74, &extra_ptr, 4);
         uc_mem_write(uc, 0x123c142c + 0x74, &extra_ptr, 4);
+        }
 
         // Stub bx lr no malloc/free
         const u32 MALLOC_STUB_VA = 0x30002000u;
@@ -961,6 +979,21 @@ public:
         uc_hook_add(uc, &h_trace, UC_HOOK_CODE, (void*)hook_trace_gameloop, &ctx,
                     0x12008614u, 0x12008658u);
         uc_hook_add(uc, &h_mem, UC_HOOK_MEM_UNMAPPED, (void*)mem_hook, &ctx, 1, 0);
+
+        // --- Instrumento de carga de textura + seu CONTROLE POSITIVO ---
+        // Antes, ambos viviam sob ZEEBO_ZEETRIS_WATCH_INPUT; com o gate desligado
+        // tex_loader_calls era 0 por construcao (hook nunca instalado), o que foi
+        // lido erradamente como "a rotina nunca executa". Agora sao incondicionais
+        // e o par tex/selftest permite distinguir "nao executa" de "nao medido".
+        uc_hook h_tl_always = 0;
+        uc_err e_tl = uc_hook_add(uc, &h_tl_always, UC_HOOK_CODE, (void*)hook_tex_loader,
+                                  &ctx, 0x120056fcu, 0x120056ffu);
+        uc_hook h_sf = 0;
+        uc_err e_sf = uc_hook_add(uc, &h_sf, UC_HOOK_CODE, (void*)hook_selftest,
+                                  &ctx, 0x1200ac5cu, 0x1200ac5fu);
+        if (e_tl != UC_ERR_OK || e_sf != UC_ERR_OK)
+            printf("[ZeetrisRunner] AVISO: uc_hook_add falhou (tex=%d selftest=%d)\n",
+                   (int)e_tl, (int)e_sf);
         // Instrumento (env-gated): quem escreve no struct de input do jogo?
         // O gameloop lê a máscara de botões via poll em [0x123c14ac+0x10]
         // (0x123c14bc) e nenhum store do módulo a escreve -> tem de vir de um
@@ -1128,6 +1161,10 @@ public:
 
     static bool step_frame(uc_engine* uc, ZeetrisContext& ctx) {
         if (!ctx.is_running || !uc) return false;
+        // Controle negativo: mesmo gate dos remendos de setup_and_start.
+        static const bool no_global_patches =
+            std::getenv("ZEEBO_ZEETRIS_NO_GLOBAL_PATCHES") != nullptr;
+        if (!no_global_patches) {
         // Força flag de renderização em 0x123c14e8 + 0x54 antes do frame
         u32 one = 1;
         uc_mem_write(uc, 0x123c14e8 + 0x54, &one, 4);
@@ -1138,6 +1175,7 @@ public:
         // Após o boot/relocação, 0x123c16c4 guarda o ponteiro ativo de IDisplay
         uc_mem_write(uc, 0x123c16c4, &disp_ptr, 4);
         uc_mem_write(uc, 0x123c16c4 + 4, &disp_ptr, 4);
+        }
         u32 sp = STK, lr = RETURN_SENTINEL;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
