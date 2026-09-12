@@ -68,6 +68,19 @@ public:
     static constexpr u32 STK             = 0x00200000u;
     static constexpr u32 ZEETRIS_CLSID   = 0x12345678u;
     static constexpr u32 CREATE_CLSID    = 0x0106e415u;
+    static constexpr u32 RETURN_SENTINEL = 0xF0F0F0F0u;
+
+    static constexpr u32 key_event(bool pressed) {
+        // Qualcomm AEEEvent: press=0x0100, release=0x0101.
+        return pressed ? 0x0100u : 0x0101u;
+    }
+
+    static bool completed_at_return_sentinel(uc_engine* uc, uc_err err) {
+        if (!uc || err != UC_ERR_OK) return false;
+        u32 pc = 0;
+        if (uc_reg_read(uc, UC_ARM_REG_PC, &pc) != UC_ERR_OK) return false;
+        return (pc & ~1u) == (RETURN_SENTINEL & ~1u);
+    }
 
     static constexpr u32 STATIC_BASE_VA  = 0x30000000u;
     static constexpr u32 GETUPTIME_VA    = 0x30002100u;
@@ -622,15 +635,15 @@ public:
 
         // ETAPA 1: AEEMod_Load
         u32 ppMod = 0x001FFFD0u;
-        u32 sp = STK, lr = 0xF0F0F0F0u;
+        u32 sp = STK, lr = RETURN_SENTINEL;
         uc_reg_write(uc, UC_ARM_REG_R0, &ishell_obj);
         uc_reg_write(uc, UC_ARM_REG_R1, &ishell_obj);
         uc_reg_write(uc, UC_ARM_REG_R2, &ppMod);
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
-        uc_err err = uc_emu_start(uc, ENTRY_VA, 0xF0F0F0F0u, 0, 500000);
-        if (err != UC_ERR_OK) {
+        uc_err err = uc_emu_start(uc, ENTRY_VA, RETURN_SENTINEL, 0, 500000);
+        if (!completed_at_return_sentinel(uc, err)) {
             u32 pc = 0, sp_val = 0;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
             uc_reg_read(uc, UC_ARM_REG_SP, &sp_val);
@@ -655,8 +668,8 @@ public:
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
-        err = uc_emu_start(uc, create_instance_va, 0xF0F0F0F0u, 0, 500000);
-        if (err != UC_ERR_OK) {
+        err = uc_emu_start(uc, create_instance_va, RETURN_SENTINEL, 0, 500000);
+        if (!completed_at_return_sentinel(uc, err)) {
             std::printf("[ZeetrisRunner] IModule::CreateInstance falhou: %s\n", uc_strerror(err));
             return false;
         }
@@ -691,8 +704,8 @@ public:
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
-        err = uc_emu_start(uc, ctx.handle_event_va, 0xF0F0F0F0u, 0, 500000);
-        if (err != UC_ERR_OK) {
+        err = uc_emu_start(uc, ctx.handle_event_va, RETURN_SENTINEL, 0, 500000);
+        if (!completed_at_return_sentinel(uc, err)) {
             std::printf("[ZeetrisRunner] EVT_APP_START falhou: %s\n", uc_strerror(err));
             return false;
         }
@@ -759,12 +772,12 @@ public:
         // Após o boot/relocação, 0x123c16c4 guarda o ponteiro ativo de IDisplay
         uc_mem_write(uc, 0x123c16c4, &disp_ptr, 4);
         uc_mem_write(uc, 0x123c16c4 + 4, &disp_ptr, 4);
-        u32 sp = STK, lr = 0xF0F0F0F0u;
+        u32 sp = STK, lr = RETURN_SENTINEL;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
-        uc_err err = uc_emu_start(uc, ctx.gameloop_cb_va, 0xF0F0F0F0u, 0, 500000);
+        uc_err err = uc_emu_start(uc, ctx.gameloop_cb_va, RETURN_SENTINEL, 0, 500000);
         u32 pc_end = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc_end);
         static int f_count = 0;
@@ -772,7 +785,7 @@ public:
             std::printf("[ZeetrisRunner] step_frame finished: err=%s pc_end=0x%08x\n",
                         uc_strerror(err), pc_end);
         }
-        return err == UC_ERR_OK;
+        return completed_at_return_sentinel(uc, err);
     }
 
     // Despacha um evento de aplicação arbitrário ao HandleEvent do applet.
@@ -780,15 +793,15 @@ public:
     // faz o jogo inicializar o próprio contexto/carregar assets.
     static bool dispatch_app_event(uc_engine* uc, ZeetrisContext& ctx, u32 evt, u32 wparam = 0) {
         if (!ctx.is_running || !uc) return false;
-        u32 sp = STK, lr = 0xF0F0F0F0u, r3 = 0;
+        u32 sp = STK, lr = RETURN_SENTINEL, r3 = 0;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
         uc_reg_write(uc, UC_ARM_REG_R1, &evt);
         uc_reg_write(uc, UC_ARM_REG_R2, &wparam);
         uc_reg_write(uc, UC_ARM_REG_R3, &r3);
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
-        uc_err err = uc_emu_start(uc, ctx.handle_event_va, 0xF0F0F0F0u, 0, 500000);
-        if (err != UC_ERR_OK) return false;
+        uc_err err = uc_emu_start(uc, ctx.handle_event_va, RETURN_SENTINEL, 0, 500000);
+        if (!completed_at_return_sentinel(uc, err)) return false;
         u32 r0 = 0;
         uc_reg_read(uc, UC_ARM_REG_R0, &r0);
         return r0 == 1;
@@ -817,9 +830,8 @@ public:
 
     static bool dispatch_key(uc_engine* uc, ZeetrisContext& ctx, u32 key_code, bool pressed) {
         if (!ctx.is_running || !uc) return false;
-        // Padrão Qualcomm BREW: EVT_KEY_PRESS = 0x101, EVT_KEY_RELEASE = 0x102
-        u32 evt = pressed ? 0x101u : 0x102u;
-        u32 sp = STK, lr = 0xF0F0F0F0u;
+        const u32 evt = key_event(pressed);
+        u32 sp = STK, lr = RETURN_SENTINEL;
         u32 r3 = 0;
         uc_reg_write(uc, UC_ARM_REG_R0, &ctx.pApplet);
         uc_reg_write(uc, UC_ARM_REG_R1, &evt);
@@ -828,8 +840,8 @@ public:
         uc_reg_write(uc, UC_ARM_REG_SP, &sp);
         uc_reg_write(uc, UC_ARM_REG_LR, &lr);
 
-        uc_err err = uc_emu_start(uc, ctx.handle_event_va, 0xF0F0F0F0u, 0, 500000);
-        if (err != UC_ERR_OK) return false;
+        uc_err err = uc_emu_start(uc, ctx.handle_event_va, RETURN_SENTINEL, 0, 500000);
+        if (!completed_at_return_sentinel(uc, err)) return false;
         u32 r0 = 0;
         uc_reg_read(uc, UC_ARM_REG_R0, &r0);
         return r0 == 1;
