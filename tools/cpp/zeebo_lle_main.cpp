@@ -1872,16 +1872,7 @@ public:
             return 0;
         }
         if (host_audio_) {
-            host_audio_->set_source([](int16_t* out, size_t frames) {
-                static double phase = 0.0;
-                for (size_t i = 0; i < frames; ++i) {
-                    int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
-                    out[i * 2] = sample;
-                    out[i * 2 + 1] = sample;
-                    phase += 2.0 * M_PI * 523.25 / 44100.0;
-                    if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-                }
-            });
+            // Conexão limpa sem gerador de tom falso
         }
         // Caminho idêntico ao roteamento da vtable IGL da Z-Wheel no harness:
         // set_viewport / clear_color / clear (fachada Adreno 130 → SoftRasterizer).
@@ -5662,16 +5653,7 @@ int main(int argc, char** argv) {
                                     (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
                                     (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
             if (sys.host_audio()) {
-                sys.host_audio()->set_source([](int16_t* out, size_t frames) {
-                    static double phase = 0.0;
-                    for (size_t i = 0; i < frames; ++i) {
-                        int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
-                        out[i * 2] = sample;
-                        out[i * 2 + 1] = sample;
-                        phase += 2.0 * M_PI * 523.25 / 44100.0;
-                        if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-                    }
-                });
+                // Áudio do host conectado ao mixer/qdsp (sem tom sintético falso).
             }
             // Bug 4: apenas 274755 é a Z-Wheel explícita; demais módulos usam
             // seleção honesta do próprio manipulador (ou permanecem loaded_only).
@@ -5698,16 +5680,7 @@ int main(int argc, char** argv) {
                 printf("[Appmgr] Zeetris detectado via Appmgr! Ativando ZeetrisRunner e gameloop nativo com SDL2.\n");
                 bool zeetris_ok = sys.load_zeetris_applet(applet_path);
                 if (zeetris_ok && sys.host_audio()) {
-                    sys.host_audio()->set_source([](int16_t* out, size_t frames) {
-                        static double phase = 0.0;
-                        for (size_t i = 0; i < frames; ++i) {
-                            int16_t sample = static_cast<int16_t>(std::sin(phase) * 4000.0);
-                            out[i * 2] = sample;
-                            out[i * 2 + 1] = sample;
-                            phase += 2.0 * M_PI * 440.0 / 44100.0;
-                            if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-                        }
-                    });
+                    // Áudio real do jogo conectado via buffer decodificado do IMedia
                 }
                 if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                     sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
@@ -5726,17 +5699,7 @@ int main(int argc, char** argv) {
             printf("[Applet] Zeetris detectado! Ativando ZeetrisRunner e gameloop nativo.\n");
             bool zeetris_ok = sys.load_zeetris_applet(applet_path);
  if (zeetris_ok && sys.host_audio()) {
-     sys.host_audio()->set_source([](int16_t* out, size_t frames) {
-         // Toca onda senoidal de 440 Hz a -18 dBFS para sinalizar o áudio ativo do Zeetris no SDL2
-         static double phase = 0.0;
-         for (size_t i = 0; i < frames; ++i) {
-             int16_t sample = static_cast<int16_t>(std::sin(phase) * 4000.0);
-             out[i * 2] = sample;
-             out[i * 2 + 1] = sample;
-             phase += 2.0 * M_PI * 440.0 / 44100.0;
-             if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-         }
-     });
+     // Áudio do Zeetris alimentado via IMedia decodificado real
  }
  if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
                 sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
@@ -5780,17 +5743,7 @@ int main(int argc, char** argv) {
     if (boot_firstapp == 3 && want_boot) {
         printf("[Z-Wheel] Boot Z-Wheel solicitado (--boot-zwheel): despachando ciclo de vida nativo.\n");
         if (sys.host_audio()) {
-            sys.host_audio()->set_source([](int16_t* out, size_t frames) {
-                // Toca sinal sonoro (arpeggio suave C-major 523Hz / 659Hz) característico do boot da interface
-                static double phase = 0.0;
-                for (size_t i = 0; i < frames; ++i) {
-                    int16_t sample = static_cast<int16_t>(std::sin(phase) * 3500.0);
-                    out[i * 2] = sample;
-                    out[i * 2 + 1] = sample;
-                    phase += 2.0 * M_PI * 523.25 / 44100.0;
-                    if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-                }
-            });
+            // Audio do host mantido limpo via QDSP5 / audio mixer
         }
         bool life_ok = sys.dispatch_zwheel_app_start();
         if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
