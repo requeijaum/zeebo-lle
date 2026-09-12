@@ -51,6 +51,7 @@
 #include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
 #include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
 #include "zeebo_module_gate.h"      // DD0: gate honesto de módulo — sem PASS por carga isolada
+#include "zeebo_efs2_module_guard.h" // Fail-closed: não reporta/injeta blob sem entry de módulo plausível
 #include "zeebo_zeetris_runner.h"
 
 // Mapa medido no .mod do Zeetris: a máscara de botões que o gameloop faz poll
@@ -826,15 +827,17 @@ public:
             const char* sig;               // assinatura ASCII de confirmação (nullptr = nenhuma)
         };
         static const KnownIB kKnown[] = {
-            // reksio.mod: bloco indireto @0x3b1d400 -> 128 clusters (64 KiB).
-            // Jogo / Applet Zeebo (Reksio) verificado no EFS2 da NAND 1.1.2.
-            { "reksio.mod", 0x3b1d400ULL, 65536ULL, 0xd9339103u, nullptr },
-            // 274755 (App ID da Z-Wheel / ZeeboApp, AEECLSID 0x01070798): bloco
-            // indireto @0x3a92000, payload carrega a string literal "274755".
-            { "274755",     0x3a92000ULL, 65536ULL, 0x544a6f30u, "274755" },
-            // tectoy.mod: bloco indireto @0x6026200 carrega a config do applet
-            // TecToy/Claro ("tectoy.claro.com.br"), filiado ao dirente inode 0x7ff13.
-            { "tectoy.mod", 0x6026200ULL, 65536ULL, 0xf7c3c740u, "tectoy.claro.com.br" },
+            // QUARENTENA (auditoria audit-efs2): as antigas entradas reksio.mod
+            // (@0x3b1d400), 274755 (@0x3a92000) e tectoy.mod (@0x6026200) foram
+            // REMOVIDAS por serem enganosas. Os checksums FNV-1a validavam bytes
+            // REAIS, mas esses bytes NÃO são módulos executáveis: as primeiras
+            // palavras são 0x9cd3ffff / 0xfd19f297 / 0x00000000 — nem ELF, nem um
+            // branch ARM inicial cujo alvo caia na faixa de carga. São metadados
+            // de gnode / dados de modem/NV / zeros. Reportá-los ou injetá-los como
+            // applet era propagar garbage. A extração genérica da tabela de gnodes
+            // ainda não foi revertida por bytes; até lá, retornamos vazio (honesto)
+            // e o guard fail-closed (zeebo_efs2_module_guard.h) impede que
+            // qualquer blob sem entry de módulo plausível seja lançado.
         };
         for (const auto& k : kKnown) {
             if (de->name == k.name) {
@@ -905,6 +908,27 @@ public:
         if (!brew_) {
             printf("[EFS2/Applet] BrewLoader indisponível (init incompleto).\n");
             return false;
+        }
+        // GATE FAIL-CLOSED (auditoria audit-efs2): NUNCA injeta um payload cru sem
+        // uma entrada de módulo executável plausível — ELF e_entry resolvido, ou
+        // um branch ARM inicial cujo alvo cai na faixa de carga. Metadados de
+        // gnode, dados de modem/NV e zeros (os antigos "KnownIB" reksio.mod/274755/
+        // tectoy.mod) são REJEITADOS aqui, antes de qualquer inject_bytes. MIF é
+        // exceção legítima: é validado logo abaixo pelo MifParser, não é módulo.
+        bool is_mif = path_or_name.size() >= 4 &&
+                      path_or_name.substr(path_or_name.size() - 4) == ".mif";
+        if (!is_mif) {
+            uint32_t guard_entry = 0;
+            auto verdict = zeebo::efs2_guard::classify_payload(payload, base_addr, &guard_entry);
+            if (verdict == zeebo::efs2_guard::MOD_REJECT) {
+                printf("[EFS2/Applet] REJEITADO (fail-closed): '%s' (%zu bytes) não tem entry "
+                       "de módulo plausível (nem ELF, nem branch ARM inicial na faixa @0x%08x). "
+                       "Não injetado.\n", path_or_name.c_str(), payload.size(), base_addr);
+                return false;
+            }
+            printf("[EFS2/Applet] guard OK: '%s' é módulo plausível (%s, entry=0x%08x).\n",
+                   path_or_name.c_str(),
+                   zeebo::efs2_guard::verdict_label(verdict), guard_entry);
         }
         std::string origin = "efs2:" + path_or_name;
         // QW35: Se o arquivo for um MIF (.mif), efetua o parse dos metadados e do CLSID
