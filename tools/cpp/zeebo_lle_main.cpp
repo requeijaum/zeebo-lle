@@ -2004,6 +2004,14 @@ public:
                 u32 start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u);
                 e0 = uc_emu_start(core0_.uc, start_addr0, 0, 0, slice_insns);
                 uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                // Bug 1 (deferred): um L4_Ipc/L4_ThreadSwitch pode ter ENFILEIRADO
+                // uma troca de address space DENTRO do UC_HOOK_INTR. Aqui o motor
+                // está quiescente ENTRE fatias — contexto seguro para aplicar o
+                // uc_mem_unmap/map_ptr real. Sem isto, activate() rodaria dentro do
+                // hook e corromperia o cache de tradução (SIGSEGV/hang).
+                if (space_manager_.has_pending_activate()) {
+                    space_manager_.drain_activate(core0_.uc);
+                }
                 if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
                     printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\\n", c, (int)e0, uc_strerror(e0), core0_.entry);
                 }
@@ -3453,8 +3461,12 @@ private:
                                 fprintf(stderr,"[QW99/IPC-sched] cur=0x%x next=0x%x nsid=0x%x has=%d spaces=%zu\n",
                                     cur_tid, next_tid, nsid, (int)sys->space_manager_.has_space(nsid),
                                     sys->space_manager_.space_count());
+                            // INVARIANTE: este handler roda DENTRO do UC_HOOK_INTR
+                            // (fatia uc_emu_start viva). activate() faz uc_mem_unmap/
+                            // map_ptr e NÃO pode rodar aqui — apenas ENFILEIRA. O laço
+                            // de escalonamento drena entre fatias (motor quiescente).
                             if (nsid && sys->space_manager_.has_space(nsid))
-                                sys->space_manager_.activate(uc, nsid);
+                                sys->space_manager_.queue_activate(nsid);
                         }
 
                         // Bug 2: restaura o CONTEXTO COMPLETO da próxima thread se
@@ -3538,8 +3550,11 @@ private:
                         // registradas, mantém a view atual (boot plano).
                         {
                             u32 nsid = sys->thread_table_.thread_space(next_tid);
+                            // INVARIANTE: rodando DENTRO do UC_HOOK_INTR. Só ENFILEIRA
+                            // — activate() (uc_mem_unmap/map_ptr) é aplicado no drain
+                            // entre fatias, jamais dentro deste hook.
                             if (nsid && sys->space_manager_.has_space(nsid))
-                                sys->space_manager_.activate(uc, nsid);
+                                sys->space_manager_.queue_activate(nsid);
                         }
 
                         // Bug 2: se a próxima thread tem contexto salvo, restaura o
