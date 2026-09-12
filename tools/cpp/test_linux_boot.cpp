@@ -58,8 +58,14 @@ inline u32 uart_base_for(u32 a) {
         if (a >= b && a < b + UART_SIZE) return b;
     return 0;
 }
-constexpr u32 UART_OFF_TF   = 0x000cu;       // TX FIFO
-constexpr u32 UART_OFF_SR   = 0x0008u;       // status; bit2 = TX_READY
+constexpr u32 UART_OFF_TF   = 0x000cu;       // TX FIFO (leitura = RX FIFO)
+constexpr u32 UART_OFF_SR   = 0x0008u;       // status; UART_SR_TX_EMPTY=(1<<3), TX_READY=(1<<2)
+constexpr u32 UART_OFF_IMR  = 0x0014u;       // escrita = IMR, leitura = ISR (TX_READY = 1<<7)
+constexpr u32 UART_OFF_CR   = 0x0010u;       // command register
+constexpr u32 UART_SR_TX_EMPTY = (1u << 3);
+constexpr u32 UART_SR_TX_READY = (1u << 2);
+constexpr u32 UART_ISR_TX_READY = (1u << 7);
+constexpr u32 UART_IMR_TXLEV = (1u << 0);
 constexpr u32 VIC_BASE      = 0xc0000000u;
 constexpr u32 VIC_SIZE      = 0x00200000u;   // 2MB: o VIC do MSM vai ate 0xc01xxxxx
 
@@ -83,6 +89,81 @@ static void on_smem_write(uc_engine* uc, uc_mem_type /*type*/, uint64_t addr,
     }
 }
 
+// --- Modelo da UART do MSM7x00 (base: drivers/tty/serial/msm_serial.h) -------
+// 0x00 MR1(w)  0x04 MR2(w)  0x08 SR(r)/CSR(w)  0x0c TF(w)/RF(r)
+// 0x10 CR(w)/MISR(r)       0x14 IMR(w)/ISR(r)
+// UART_SR_TX_EMPTY=(1<<3)  UART_SR_TX_READY=(1<<2)  UART_ISR_TX_READY=(1<<7)
+// UART_IMR_TXLEV=(1<<0)  UART_IMR_RXSTALE=(1<<3)  UART_IMR_RXLEV=(1<<4)
+// wait_for_xmitr(): se SR nao tem TX_EMPTY, ele gira lendo ISR. handle_tx()
+// so escreve enquanto SR tiver TX_READY. Os dois bits precisam estar certos.
+static u32 g_uart_imr[3] = {0, 0, 0};
+static bool g_uart_log = false;
+
+static inline int uart_idx(u32 base) {
+    return (base == UART1_BASE) ? 0 : ((base == UART2_BASE) ? 1 : 2);
+}
+
+// --- VIC do MSM7x00 (modelo minimo para poder entregar IRQ ao guest) --------
+// Fonte: arch/arm/mach-msm/irq.c + include/mach/entry-macro.S. O entry-macro le
+// 0xD0 e depois 0xD4 (numero da IRQ pendente; 0xffffffff = nenhuma).
+constexpr u32 VIC_OFF_ENCLEAR0 = 0x0020u;
+constexpr u32 VIC_OFF_ENSET0   = 0x0030u;
+constexpr u32 VIC_OFF_STATUS0  = 0x0080u;
+constexpr u32 VIC_OFF_CLEAR0   = 0x00b0u;
+constexpr u32 VIC_OFF_VEC_RD   = 0x00d0u;
+constexpr u32 VIC_OFF_VEC_PEND = 0x00d4u;
+constexpr u32 VIC_NO_PEND      = 0xffffffffu;
+constexpr u32 UART2_IRQ        = 11u;      // irq que o driver registra p/ ttyMSM2
+
+static u32  g_vic_en[2]      = {0, 0};
+static u32  g_vic_pending[2] = {0, 0};
+static bool g_irq_in_service = false;
+static u32  g_irq_delivered  = 0;
+static bool g_irq_log        = false;
+
+static inline u32 uart_irq_of(int idx) { return (idx == 0) ? 10u : ((idx == 1) ? UART2_IRQ : 12u); }
+
+static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                         int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 off = static_cast<u32>(addr) - VIC_BASE;
+    const u32 v = static_cast<u32>(value);
+    switch (off) {
+        case VIC_OFF_ENSET0:        g_vic_en[0] |= v; break;
+        case VIC_OFF_ENSET0 + 4:    g_vic_en[1] |= v; break;
+        case VIC_OFF_ENCLEAR0:      g_vic_en[0] &= ~v; break;
+        case VIC_OFF_ENCLEAR0 + 4:  g_vic_en[1] &= ~v; break;
+        case VIC_OFF_CLEAR0:                       // ack: o kernel ja tratou
+            g_vic_pending[0] &= ~v;
+            g_irq_in_service = false;
+            break;
+        case VIC_OFF_CLEAR0 + 4:
+            g_vic_pending[1] &= ~v;
+            break;
+        default: break;
+    }
+    if (g_irq_log)
+        std::printf("[vic] W off=0x%03x val=0x%08x -> en0=0x%08x pend0=0x%08x\n",
+                    off, v, g_vic_en[0], g_vic_pending[0]);
+}
+
+static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                        int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 off = static_cast<u32>(addr) - VIC_BASE;
+    const u32 act = g_vic_pending[0] & g_vic_en[0];
+    u32 val = 0;
+    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND)
+        val = act ? (u32)__builtin_ctz(act) : VIC_NO_PEND;
+    else if (off == VIC_OFF_STATUS0)     val = act;
+    else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
+    else if (off == VIC_OFF_ENSET0)      val = g_vic_en[0];
+    else if (off == VIC_OFF_ENSET0 + 4)  val = g_vic_en[1];
+    if (g_irq_log)
+        std::printf("[vic] R off=0x%03x -> 0x%08x\n", off, val);
+    uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
+}
+
 void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                    int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
@@ -90,11 +171,21 @@ void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
     const u32 base = uart_base_for(a);
     if (!base) return;
     const u32 off = a - base;
-    if (off == UART_OFF_TF || off == 0x00 || off == 0x0c) {
+    if (g_uart_log)
+        std::printf("[uart%d] W off=0x%02x val=0x%08x\n", uart_idx(base), off, (u32)value);
+    if (off == UART_OFF_TF) {                  // TX FIFO: e' o caractere de saida
         const char c = static_cast<char>(value & 0xff);
         if (c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f)) g_console.push_back(c);
         std::putchar(c);
         std::fflush(stdout);
+    } else if (off == UART_OFF_IMR) {          // mascara de interrupcao
+        const int i = uart_idx(base);
+        g_uart_imr[i] = (u32)value;
+        // TXLEV habilitado = o driver quer a IRQ de TX (handle_tx escreve a FIFO
+        // so quando o ISR roda). Marcamos a linha no VIC; o kernel faz o ack.
+        const u32 bit = 1u << uart_irq_of(i);
+        if ((u32)value & UART_IMR_TXLEV) g_vic_pending[0] |= bit;
+        else                             g_vic_pending[0] &= ~bit;
     }
 }
 
@@ -105,11 +196,18 @@ bool on_uart_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     const u32 base = uart_base_for(a);
     if (!base) return true;
     const u32 off = a - base;
+    const int idx = uart_idx(base);
+    u32 val = 0;
     if (off == UART_OFF_SR) {
-        // TX_READY sempre alto: o kernel nunca fica preso esperando a FIFO.
-        u32 sr = (1u << 2);
-        uc_mem_write(uc, base + UART_OFF_SR, &sr, 4);
+        val = UART_SR_TX_EMPTY | UART_SR_TX_READY;
+    } else if (off == UART_OFF_IMR) {          // leitura de 0x14 = ISR
+        val = UART_ISR_TX_READY;
+    } else if (off == UART_OFF_CR) {           // leitura de 0x10 = MISR (mascarado)
+        val = g_uart_imr[idx] & (UART_IMR_TXLEV | (1u << 3) | (1u << 4));
     }
+    if (g_uart_log)
+        std::printf("[uart%d] R off=0x%02x -> 0x%08x\n", idx, off, val);
+    uc_mem_write(uc, a, &val, 4);              // o guest le este valor
     return true;
 }
 
@@ -804,6 +902,30 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
     ++g_icount;
     g_last_pc = static_cast<u32>(addr);
+    // Entrega de IRQ ao guest: o Unicorn nao faz a entrada de excecao de IRQ,
+    // entao o handler do kernel (handle_IRQ -> ISR da UART) nunca roda.
+    if ((g_vic_pending[0] & g_vic_en[0]) != 0u && !g_irq_in_service) {
+        u32 cpsr = 0;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
+            g_irq_in_service = true;
+            ++g_irq_delivered;
+            const u32 nr = (u32)__builtin_ctz(g_vic_pending[0] & g_vic_en[0]);
+            if (g_irq_log || g_irq_delivered <= 8u) {
+                std::printf("[irq] entregando IRQ %u em pc=0x%08x cpsr=0x%08x\n",
+                            nr, static_cast<u32>(addr), cpsr);
+                std::fflush(stdout);
+            }
+            const u32 lr_ret = static_cast<u32>(addr) + 4u;
+            u32 irq_cpsr = (cpsr & ~0x3fu) | 0x12u | 0x80u;   // modo IRQ, I=1
+            uc_reg_write(uc, UC_ARM_REG_CPSR, &irq_cpsr);
+            uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
+            uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
+            u32 vec = 0xffff0000u + 0x18u;
+            uc_reg_write(uc, UC_ARM_REG_PC, &vec);
+            return;
+        }
+    }
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
         static int ucount = 0;
@@ -1212,6 +1334,14 @@ int main(int argc, char** argv) {
     if (err) std::printf("uc_mem_map 0xe0000000 failed: %d\n", err);
 
     uc_hook hw = 0, hr = 0, hc = 0;
+    g_uart_log = (std::getenv("ZEEBO_UART_LOG") != nullptr);   // traco dos acessos a UART
+    g_irq_log  = (std::getenv("ZEEBO_IRQ_LOG") != nullptr);    // traco de VIC/IRQ
+    // VIC: modelo dos registradores usados pelo entry-macro e pelo irq_chip.
+    uc_hook hvw = 0, hvr = 0;
+    uc_hook_add(uc, &hvw, UC_HOOK_MEM_WRITE, (void*)on_vic_write, nullptr,
+                VIC_BASE, VIC_BASE + VIC_SIZE);
+    uc_hook_add(uc, &hvr, UC_HOOK_MEM_READ, (void*)on_vic_read, nullptr,
+                VIC_BASE, VIC_BASE + VIC_SIZE);
     // UART1 (0xa9a00000), UART2/ttyMSM2 (0xa9c00000) e UART3 (0xa9e00000):
     // o console do kernel pode cair em qualquer uma delas.
     for (u32 ub : UART_BASES) {
