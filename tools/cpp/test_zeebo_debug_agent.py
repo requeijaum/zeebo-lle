@@ -99,19 +99,20 @@ def test_primitives_live():
 
 def test_run_app_zwheel():
     rep = run_applet(CATALOG[0], steps=50, verbose=False)
-    _check("274755 status pass", rep["status"] == "pass", rep["status"])
-    _check("274755 pixels gerados", rep["vram_blank"] is False,
-           str(rep.get("vram")))
+    _check("274755 recusado sem payload comprovado",
+           rep["status"] == "fail" and rep["loaded"] is False,
+           rep["status"])
+    _check("274755 execução não é forjada", rep["executed"] is False)
 
 
 def test_run_app_interleaved():
     rep = run_applet(
         {"id": "reksio.mod", "mode": "interleaved", "desc": "test"},
         steps=40, verbose=False)
-    _check("reksio.mod carregado", rep["loaded"] is True)
+    _check("reksio.mod não carregado sem gnode", rep["loaded"] is False)
     _check("reksio.mod execução não é forjada", rep["executed"] is False)
     _check("reksio.mod core progrediu", rep["core_progress"] is True)
-    _check("reksio.mod status loaded_only", rep["status"] == "loaded_only", rep["status"])
+    _check("reksio.mod status fail", rep["status"] == "fail", rep["status"])
     _check("reksio.mod backtrace presente",
            rep["backtrace"] is not None and rep["backtrace"].get("ok") is True)
 
@@ -119,8 +120,10 @@ def test_run_app_interleaved():
 def test_catalog_report(tmp_report="/tmp/zeebo_agent_test_report.json"):
     summary = run_catalog(steps=40, report_path=tmp_report, verbose=False)
     _check("catálogo total=3", summary["total"] == 3, str(summary["total"]))
-    _check("catálogo distingue execução de mera carga",
-           summary["passed"] == 1 and summary["loaded_only"] == 2,
+    _check("catálogo rejeita cadeias sem proveniência",
+           summary["passed"] == 0 and summary["loaded_only"] == 0
+           and all(r["status"] == "fail" and not r["executed"]
+                   for r in summary["results"]),
            f"pass={summary['passed']} loaded_only={summary['loaded_only']}")
     _check("relatório JSON gravado", os.path.exists(tmp_report))
     # Valida que o arquivo é JSON válido e reflete os resultados.

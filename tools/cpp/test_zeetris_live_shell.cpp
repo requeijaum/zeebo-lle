@@ -1,55 +1,17 @@
-// test_zeetris_live_shell.cpp — Can a REAL, live IShell context for the Zeetris
-// lifecycle be derived from a running AppMgr boot? This test answers that with
-// MEASUREMENT at the EXACT shell anchors, not with a broad heuristic window.
+// test_zeetris_live_shell.cpp — Reachability witness for two historical symbol
+// labels, now explicitly refuted as BREW shell entry points.
 //
-// The prior lifecycle work (test_zeetris_ishell.cpp) hands AEEMod_Load a
-// SYNTHETIC IShell object at 0x40000000 whose word[0] points to a sentinel
-// vtable. That advances the module past the VA-0 deref at 0x123c1bdc, but the
-// `this` pointer and its vtable are FABRICATED by the harness — not a shell the
-// firmware actually stood up. The honest question for a real lifecycle bridge
-// is: does the emulator's own booted APPS/BREW ever REACH the exact code where a
-// genuine AEECShell/IShell is constructed, so we could capture the live ARM
-// register context (r0=pIShell, r1, r2, sp) instead of fabricating it?
+// The trace is still useful: it proves the real AppMgr boot reaches exactly
+// 0x10c874f4 and records its live registers. The provenance and semantic gates
+// establish that this site is an APPS/AMSS bootstrap env-installer, r0 points to
+// env_base (0xb0d02000), and 0x105c7fb4 is rodata. Therefore an anchor hit is
+// boot-progress evidence only; it must never create a pIShell, mark a module
+// loaded, or bind applet services.
 //
-// EVIDENCE UPGRADE (over the first revision of this gate):
-// The first revision counted ANY Core0 PC inside the broad window
-// [0x1013a000, 0x14000000) as "reached the shell". That is a weak proxy: the
-// APPS segment-11 code base spans a huge region and a mere PC there does NOT
-// prove a shell was constructed or dispatched. This revision demands the EXACT
-// anchor:
-//   - ISHELL_CreateInstance   @ 0x105c7fb4  (BrewSymbols::ishell_create_va)
-//   - AEECShell dispatch       @ 0x10c874f4  (BrewSymbols::aeecshell_dispatch_va)
-// measured at PER-INSTRUCTION granularity by the orchestrator's own read-only,
-// environment-gated trace (ZEEBO_SHELL_TRACE=1 -> "[SHELL-ANCHOR] Core0 HIT ...
-// pc=0x... r0=0x... r1=0x... r2=0x... sp=0x..."). The trace fabricates no
-// pointer, PC, or guest state: it only reads the live ARM context AT the exact
-// anchor. If and only if such a line appears has a live pIShell context become
-// derivable.
-//
-// This test drives the REAL orchestrator (pure Unicorn interpreter, no Dynarmic)
-// booting the REAL proprietary NAND to AppMgr with the anchor trace enabled, and
-// asserts, as a POSITIVE witness (was a RED blocker-witness until the boot
-// started reaching the anchor), that Core0 DOES execute an exact
-// shell anchor. It ALSO records the per-cycle Core0 PC trajectory to confirm the
-// measured PC=0x14 derail is still present (boot behavior unchanged). Therefore
-// a live pIShell context IS captured (r0 at the anchor): the upstream blockers
-// (Core1 REX scheduling, Core0 PC=0x14 derail) gate it. This is a measured,
-// falsifiable fact — and a proper negative control: it is a "boot has NOT yet
-// reached the shell anchor" gate that goes GREEN->RED the moment the real boot
-// executes the anchor, at which point the synthetic stub must be replaced by the
-// live shell context captured from the anchor trace.
-//
-// Detector POWER control (the assertion CAN fail): the same parser proves it can
-// positively recognize an anchor line by feeding it a synthetic
-// "[SHELL-ANCHOR] ... pc=0x105c7fb4 ..." line — if the parser could never match,
-// the RED witness would be vacuous. It ALSO proves it REJECTS a broad-window PC
-// (0x1013a100) that is NOT an exact anchor — closing the old over-count hole.
-// Mutant (argv "buggy") claims the live boot DOES execute the shell anchor and
-// must fail here.
-//
-// Gate tier: requires the real NAND -> Tier B. Without it, exit 77 (SKIP),
-// never SKIP-as-PASS. Absolute proprietary paths; the orchestrator resolves the
-// NAND via its own default/relative paths from tools/cpp.
+// The detector has positive and negative controls and requires the real NAND.
+// Missing firmware exits 77. The "buggy" mode preserves the mutation property:
+// it asserts the old reachability blocker (that neither exact address executes)
+// and must fail once the bootstrap anchor is observed.
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -243,18 +205,16 @@ int main(int argc, char** argv) {
         // nunca executa o âncora do shell, logo não há pIShell vivo". Como a
         // medição mostra que ele É alcançado, essa afirmação tem de falhar.
         if (live_reached_anchor) {
-            std::printf("[MUTANT] a afirmação antiga (âncora inalcançável) falha "
-                        "como esperado: o boot vivo ALCANÇOU o âncora.\n");
+            std::printf("[MUTANT] a afirmação antiga (bootstrap inalcançável) falha "
+                        "como esperado: o boot vivo ALCANÇOU o instalador de env.\n");
             return 1;
         }
         std::printf("[MUTANT] (inesperadamente) o âncora não foi alcançado.\n");
         return 0;
     }
 
-    // NOVA VERDADE MEDIDA: o boot vivo ALCANÇA o âncora do shell e entrega um
-    // contexto pIShell real. O gate deixou de ser blocker-witness e passou a ser
-    // witness POSITIVO: exige que o âncora continue sendo alcançado (regressão do
-    // boot vira FAIL) e publica os registradores capturados.
+    // Measured truth: the real boot reaches the disproven bootstrap anchor.
+    // This is a boot-progress regression witness, not shell-object evidence.
     if (!live_reached_anchor) {
         std::printf("[FAIL] o boot vivo NÃO alcançou o âncora do shell (0x%08x nem "
                     "0x%08x); o boot REGREDIU em relação à medição anterior.\n",
@@ -263,16 +223,14 @@ int main(int argc, char** argv) {
     }
 
     const AnchorHit& h = hits.front();
-    std::printf("=== Test Zeetris LIVE shell anchor: PASS ===\n");
-    std::printf("  MEDIDO (trace por instrução): num boot AppMgr real do Unicorn, "
-                "Core0 EXECUTA o âncora do shell — pc=0x%08x r0=0x%08x r1=0x%08x "
-                "r2=0x%08x sp=0x%08x. r0 é o pIShell VIVO do guest.\n",
+    std::printf("=== Test Zeetris bootstrap anchor reachability: PASS ===\n");
+    std::printf("  MEDIDO: o boot AppMgr real executa o instalador de env APPS/AMSS "
+                "pc=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x sp=0x%08x. "
+                "r0 é env_base, NÃO pIShell.\n",
                 h.pc, h.r0, h.r1, h.r2, h.sp);
-    std::printf("  SEGUIMENTO (ação pendente, não feita aqui): usar esse pIShell "
-                "capturado no lugar do stub sintético 0x40000000 do ZeetrisRunner. "
-                "O sintético continua sendo instrumento de OBSERVAÇÃO, não ponte "
-                "de contexto vivo. Este gate segue mais estrito que a heurística "
-                "de janela ampla: um PC qualquer na região APPS não conta como shell. "
+    std::printf("  CONTRATO: estes VAs permanecem somente como âncoras diagnósticas; "
+                "não podem marcar módulo loaded nem disparar binding BREW/IGL. "
+                "A construção de um IShell vivo continua não provada. "
                 "(pc14_derail_hits=%zu — informativo.)\n", pc14_hits);
     return 0;
 }

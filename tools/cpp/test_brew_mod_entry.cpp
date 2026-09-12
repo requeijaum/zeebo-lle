@@ -36,6 +36,16 @@ static u32 enc_b(u32 insn_va, u32 target, bool link = false) {
 }
 
 int main() {
+    // Rótulos refutados nunca podem ser defaults de dispatch: alcançar o
+    // bootstrap não marca módulo loaded nem dispara binding BREW.
+    zeebo::brew::BrewSymbols defaults{};
+    assert(defaults.aeecshell_dispatch_va == 0);
+    assert(defaults.ishell_create_va == 0);
+    BrewLoader default_loader;
+    assert(!default_loader.on_code(0));
+    assert(!default_loader.on_code(zeebo::brew::DISPROVEN_BOOTSTRAP_ENV_VA));
+    assert(!default_loader.on_code(zeebo::brew::DISPROVEN_ISHELL_RODATA_VA));
+
     // Proveniência exibida deve corresponder ao caminho de resolução real.
     assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_ELF)) == "ELF e_entry");
     assert(std::string(zeebo::brew::entry_kind_label(zeebo::brew::ENTRY_RAW_BRANCH)) == "MOD cru branch inicial");

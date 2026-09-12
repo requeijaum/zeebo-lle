@@ -262,7 +262,7 @@ int main(int argc, char** argv) {
     }
 
     // RED: the stale "AEECShell_dispatch" label is proven wrong.
-    std::printf("[FAIL] 0x%08x is NOT a BREW IShell dispatch. Provenance = %s: the caller\n"
+    std::printf("[REFUTED] 0x%08x is NOT a BREW IShell dispatch. Provenance = %s: the caller\n"
                 "       loads the boot env off the stack (ldr r0,[sp]), makes a DIRECT\n"
                 "       absolute call, and consumes the returned constant as a stack\n"
                 "       adjustment (add sp,sp,r0). The THUMB callee is a leaf that stores\n"
