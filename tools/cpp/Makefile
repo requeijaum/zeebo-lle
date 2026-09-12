@@ -359,8 +359,9 @@ test-dd1a: test_dd1a_diag
 	./test_dd1a_diag || [ $$? -eq 77 ]
 	@# Mutação negativa: force_success fabrica entrada no módulo → controle
 	@# negativo passa a alegar execução; o gate DEVE ficar VERMELHO.
-	@if ./test_dd1a_diag buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
+	@./test_dd1a_diag buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante force_success pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
 	else echo "OK: mutante force_success falha como esperado (RED reproduzido)"; fi
 
 # Zeetris lifecycle probe (evidence-only): deriva o CLASS ID estrutural do MIF e
@@ -377,8 +378,9 @@ test-zeetris-lifecycle: test_zeetris_lifecycle
 	./test_zeetris_lifecycle || [ $$? -eq 77 ]
 	@# Mutação negativa: fingir que o entry ARM roda como Thumb (premissa da v1)
 	@# → o controle exige execução limpa que não ocorre; o gate DEVE ficar VERMELHO.
-	@if ./test_zeetris_lifecycle buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
+	@./test_zeetris_lifecycle buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (ABI Thumb) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
 	else echo "OK: mutante (ABI Thumb) falha como esperado (RED reproduzido)"; fi
 
 # Zeetris IShell lifecycle: prova que o VA-0 read (0x123c1bdc) é o ARGUMENTO DE
@@ -393,8 +395,9 @@ test_zeetris_ishell: test_zeetris_ishell.cpp zeebo_brew_ishell.h zeebo_brew_load
 # mutação (vtable NULL "roda limpo") que DEVE falhar (RED reproduzido).
 test-zeetris-ishell: test_zeetris_ishell
 	./test_zeetris_ishell || [ $$? -eq 77 ]
-	@if ./test_zeetris_ishell buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (vtable NULL limpa) passou"; exit 1; \
+	@./test_zeetris_ishell buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (vtable NULL limpa) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (vtable NULL limpa) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
 
 # Zeetris full lifecycle gate: AEEMod_Load -> IModule::CreateInstance -> HandleEvent(EVT_APP_START)
@@ -404,8 +407,9 @@ test_zeetris_full_lifecycle: test_zeetris_full_lifecycle.cpp zeebo_brew_ishell.h
 
 test-zeetris-full-lifecycle: test_zeetris_full_lifecycle
 	./test_zeetris_full_lifecycle || [ $$? -eq 77 ]
-	@if ./test_zeetris_full_lifecycle buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (malloc NULL aceito) passou"; exit 1; \
+	@./test_zeetris_full_lifecycle buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (malloc NULL aceito) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (malloc NULL aceito) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
 
 test_zeetris_runner: test_zeetris_runner.cpp zeebo_zeetris_runner.h gpu/igl_hook.h \
@@ -415,8 +419,9 @@ test_zeetris_runner: test_zeetris_runner.cpp zeebo_zeetris_runner.h gpu/igl_hook
 
 test-zeetris-runner: test_zeetris_runner
 	./test_zeetris_runner || [ $$? -eq 77 ]
-	@if ./test_zeetris_runner buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante passou"; exit 1; \
+	@./test_zeetris_runner buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
 
 
@@ -431,8 +436,9 @@ test_zeetris_live_shell: test_zeetris_live_shell.cpp
 
 test-zeetris-live-shell: test_zeetris_live_shell zeebo_lle_main
 	./test_zeetris_live_shell || [ $$? -eq 77 ]
-	@if ./test_zeetris_live_shell buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (afirmacao antiga: ancora inalcancavel) passou"; exit 1; \
+	@./test_zeetris_live_shell buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (afirmacao antiga) pulado (exit 77, NAND/orquestrador ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (afirmacao antiga: ancora inalcancavel) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (o boot ALCANCA o shell)"; fi
 
 # SEMANTIC gate (Tier B, negative control): drives the REAL Unicorn AppMgr boot
@@ -454,8 +460,9 @@ test-zeetris-shell-semantics: test_zeetris_shell_semantics zeebo_lle_main
 	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-semantics: SKIP (exit 77)"; \
 	elif [ $$rc -eq 0 ]; then echo "test-zeetris-shell-semantics: PASS (live IShell medido)"; \
 	else echo "test-zeetris-shell-semantics: FAIL (exit $$rc)"; exit 1; fi
-	@if ./test_zeetris_shell_semantics buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
+	@./test_zeetris_shell_semantics buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante NON_SEMANTIC pulado (exit 77, NAND ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao e' shell vivo)"; fi
 
 # CALL-PROVENANCE gate: prova ESTATICAMENTE (bytes reais do APPS.bin) que o
@@ -480,8 +487,9 @@ test-zeetris-shell-provenance: test_zeetris_shell_provenance
 	if [ $$rc -eq 1 ]; then echo "test-zeetris-shell-provenance: OK (provenance confirmada: AMSS_BOOTSTRAP; premissa BREW refutada)"; \
 	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-provenance: SKIP (exit 77)"; \
 	else echo "test-zeetris-shell-provenance: FAIL (exit $$rc)"; exit 1; fi
-	@if ./test_zeetris_shell_provenance buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (AMSS_BOOTSTRAP tratado como dispatch BREW) passou"; exit 1; \
+	@./test_zeetris_shell_provenance buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante de provenance pulado (exit 77, APPS.bin ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (AMSS_BOOTSTRAP tratado como dispatch BREW) passou"; exit 1; \
 	else echo "OK: mutante falha como esperado (bootstrap nao e' dispatch BREW)"; fi
 
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
@@ -763,6 +771,8 @@ test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
 # alvo clean. Mutação negativa (remover 1 nome do clean) torna o gate VERMELHO.
 test-clean-hygiene:
 	python3 test_clean_hygiene.py
+	python3 test_mutation_gate_hygiene.py
+	python3 test_binary_ignore_hygiene.py
 
 # ---------------------------------------------------------------------------
 # QW99 Part 1 — truthful test tiers. The aggregate `check` mixes two classes of
