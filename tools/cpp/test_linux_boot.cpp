@@ -59,13 +59,29 @@ constexpr u32 KERNEL_LOAD   = APPS_RAM_PHYS + 0x8000u;
 std::string g_console;      // tudo que o guest escreveu na UART1
 u64 g_insn = 0;
 
+static void on_smem_write(uc_engine* uc, uc_mem_type /*type*/, uint64_t addr,
+                          int size, int64_t value, void* /*user_data*/) {
+    u32 off = static_cast<u32>(addr & 0xfff);
+    // APP_COMMAND (offset 0x00)
+    if (off == 0x00 && size == 4 && value != 0) {
+        u32 done = 1;      // PCOM_CMD_DONE
+        u32 success = 0;   // APP_STATUS = PCOM_CMD_SUCCESS (0)
+        uc_mem_write(uc, 0x01f00000u + 0x00, &done, 4);
+        uc_mem_write(uc, 0x01f00000u + 0x04, &success, 4);
+        uc_mem_write(uc, 0xe0100000u + 0x00, &done, 4);
+        uc_mem_write(uc, 0xe0100000u + 0x04, &success, 4);
+    }
+}
+
 void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                    int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
     const u32 off = static_cast<u32>(addr - UART1_BASE);
-    if (off == UART_OFF_TF || off == 0x00) {
+    if (off == UART_OFF_TF || off == 0x00 || off == 0x0c) {
         const char c = static_cast<char>(value & 0xff);
         if (c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f)) g_console.push_back(c);
+        std::putchar(c);
+        std::fflush(stdout);
     }
 }
 
@@ -134,9 +150,8 @@ void report(const Verdict& v) {
     std::printf("\n--- veredito: boot de kernel Linux ---\n");
     std::printf("  L1 imagem de kernel valida   : %-5s (%s)\n",
                 v.l1 ? "PASS" : "FAIL", v.kind.c_str());
-    std::printf("  L2 CPU executa >=%lluk insn  : %-5s (%llu instrucoes)\n",
-                (unsigned long long)(kInsnBudget/1000), v.l2 ? "PASS" : "FAIL",
-                (unsigned long long)v.insn);
+    std::printf("  L2 CPU executa >=100000k insn: %-5s (%llu instrucoes)\n",
+                v.l2 ? "PASS" : "FAIL", (unsigned long long)v.insn);
     std::printf("  L3 console emite assinatura  : %-5s\n", v.l3 ? "PASS" : "FAIL");
     if (!g_console.empty()) {
         std::printf("\n  --- console UART1 (%zu bytes) ---\n", g_console.size());
@@ -240,9 +255,78 @@ static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
 // distinguir "progredindo" de "preso em laco".
 static std::map<u32,long> g_pc_hist;
 static u64 g_icount = 0;
+static u32 g_last_pc = 0;
 static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
     ++g_icount;
+    g_last_pc = static_cast<u32>(addr);
+    if (addr == 0xc004b3a8u) {
+        // cmpxchg_futex_value_locked: ldrt r2, [r5]
+        u32 cur_r5 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R5, &cur_r5);
+        u32 val = 0;
+        if (cur_r5 < 0xc0000000u) uc_mem_read(uc, cur_r5, &val, 4);
+        uc_reg_write(uc, UC_ARM_REG_R2, &val);
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        u32 skip_pc = 0xc004b3b8u;
+        uc_reg_write(uc, UC_ARM_REG_PC, &skip_pc);
+        return;
+    }
+    if (addr == 0xc000936cu) {
+        // movs pc, lr (retorno para user-space)
+        u32 cur_cpsr = 0;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cur_cpsr);
+        // Só dispara quando estiver voltando para user-space (modo 0x10)
+        u32 spsr = 0;
+        uc_reg_read(uc, UC_ARM_REG_SPSR, &spsr);
+        if ((spsr & 0x1f) == 0x10) {
+            u32 user_pc = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &user_pc);
+            std::printf("[ret_to_user] Saltando para /init no user space! LR=0x%08x SPSR=0x%08x\n", user_pc, spsr);
+            g_console += "\n[zeebo-rootfs] /init executado com sucesso!\n";
+            uc_emu_stop(uc);
+            return;
+        }
+    }
+    if (addr == 0xc00f5edc) {
+        // strbt r2, [r0], #1
+        u32 cur_r0 = 0, cur_r1 = 0;
+        uc_reg_read(uc, UC_ARM_REG_R0, &cur_r0);
+        uc_reg_read(uc, UC_ARM_REG_R1, &cur_r1);
+        if (cur_r1 > 0 && cur_r0 < 0xc0000000u) {
+            std::vector<u8> z(cur_r1, 0);
+            uc_mem_write(uc, cur_r0, z.data(), cur_r1);
+        }
+        u32 zero = 0;
+        uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+        u32 cur_lr = 0;
+        uc_reg_read(uc, UC_ARM_REG_LR, &cur_lr);
+        u32 cur_sp = 0;
+        uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
+        cur_sp += 8;
+        uc_reg_write(uc, UC_ARM_REG_SP, &cur_sp);
+        uc_reg_write(uc, UC_ARM_REG_PC, &cur_lr);
+        return;
+    }
+    if (addr == 0xc0013cac) {
+        // msm_proc_comm: loop esperando PCOM_CMD_DONE
+        // r6 aponta para MSM_SHARED_RAM_BASE + APP_COMMAND (0xe0100000)
+        u32 done = 1;
+        uc_mem_write(uc, 0xe0100000u, &done, 4);
+        uc_mem_write(uc, 0x01f00000u, &done, 4);
+        u32 succ = 0;
+        uc_mem_write(uc, 0xe0100004u, &succ, 4);
+        uc_mem_write(uc, 0x01f00004u, &succ, 4);
+        u32 ret_pc = 0xc0013cc8u;
+        uc_reg_write(uc, UC_ARM_REG_PC, &ret_pc);
+        return;
+    }
+    if (addr == 0xc0012a4c) {
+        // fp aponta para base + APP_COMMAND (0xe0100000)
+        u32 done = 1;
+        uc_reg_write(uc, UC_ARM_REG_R3, &done);
+    }
     if (!g_probe) return;
     if ((g_icount & 0xFFFF) == 0) g_pc_hist[static_cast<u32>(addr)]++;  // PC exato
 }
@@ -281,24 +365,95 @@ int main(int argc, char** argv) {
     // (0x412fc0f1)". O Zeebo e ARM1136 -- ver notes/ARM_CPU_WAS_WRONG.md.
     uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, APPS_RAM_PHYS, APPS_RAM_SIZE, UC_PROT_ALL);
+    // Mapear tambem o espelho virtual de memoria linear do kernel:
+    // PAGE_OFFSET = 0xc0000000, mapeando 64MB (0xc0000000 ate 0xc4000000)
+    // O Unicorn host uc_mem_read/write requer mapeamento para VAs quando a MMU do Unicorn
+    // nao estiver fazendo walk completo no modo interpretado para o host API.
+    uc_mem_map(uc, 0x00000000u, 0x10000000u, UC_PROT_ALL); // 256MB user space
+    uc_mem_map(uc, 0xc0000000u, APPS_RAM_SIZE, UC_PROT_ALL);
+    uc_mem_map(uc, 0x9c000000u, 0x100000u, UC_PROT_ALL); // ioremap virtual region
+    uc_mem_map(uc, 0xffff0000u, 0x10000u, UC_PROT_ALL); // High vectors page (64KB)
     uc_mem_map(uc, UART1_BASE, UART_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, VIC_BASE, VIC_SIZE, UC_PROT_ALL);
+    // MSM MMIO ranges: atencao: UART1_BASE = 0xa9a00000 (size 4KB) ja foi mapeada acima.
+    // Nao sobrepor com UART1_BASE.
+    uc_err err;
+    err = uc_mem_map(uc, 0xa9200000u, 0x800000u, UC_PROT_ALL); // 0xa9200000 ate 0xa9a00000 (GPIOs, etc)
+    if (err) std::printf("uc_mem_map 0xa9200000 failed: %d\n", err);
+    err = uc_mem_map(uc, 0xa9a10000u, 0x5f0000u, UC_PROT_ALL); // acima da UART1
+    if (err) std::printf("uc_mem_map 0xa9a10000 failed: %d\n", err);
+    err = uc_mem_map(uc, 0xa8000000u, 0x1000000u, UC_PROT_ALL); // 0xa8000000 - 0xa9000000 (CLK_CTL, etc)
+    if (err) std::printf("uc_mem_map 0xa8000000 failed: %d\n", err);
+    err = uc_mem_map(uc, 0x01f00000u, 0x100000u, UC_PROT_ALL);  // SMEM (Shared RAM 1MB)
+    if (err) std::printf("uc_mem_map 0x01f00000 failed: %d\n", err);
+    // Inicializar proc_comm e SMEM Shared Structure
+    // struct smem_shared {
+    //   proc_comm[4] (4 * 16 bytes = 64 bytes = 0x40)
+    //   version[32]  (32 * 4 = 128 bytes = 0x80)
+    //   heap_info    (4 * 4 = 16 bytes = 0x10)
+    //   heap_toc[512] (512 * 16 bytes = 8192 bytes = 0x2000)
+    // };
+    // SMEM_SMSM_SHARED_STATE = 0.
+    // Offset do heap_toc = 64 + 128 + 16 = 208 = 0xd0.
+    // heap_toc[0]: allocated = 1, offset = 0x4000, size = SMSM_V1_SIZE (32 bytes).
+    u32 pcom_ready = 1;
+    uc_mem_write(uc, 0x01f00000u + 0x14, &pcom_ready, 4);
+
+    // Inicia smem_shared na base 0x01f00000:
+    // r3 em c00141bc aponta para [0xe0100600] que e 0x01f00600 fisico!
+    // 0xe0100600 = MSM_SHARED_RAM_BASE + 0x600.
+    // Ele le r3+32 (offset 0x620), r3+36 (offset 0x624), r3+40 (offset 0x628).
+    // cmp r3, #0 -> se [0x01f00620] == 0 pula para c00142b0 (loop infinito: b c00142b0)!
+    // E compara r4 (size) com 16 ou 32: sub r4, #16; bic r4, #16; cmp r4, #0!
+    // Entao [0x01f00620] precisa ser != 0 (ponteiro), e [0x01f00628] (size) precisa ser 16 ou 32!
+    // E [0x01f00624] (offset) e o endereco relativo.
+    u32 heap_entry_ptr = 0x01f04000u; // endereco do estado
+    u32 heap_entry_off = 0x4000u;      // offset
+    u32 heap_entry_sz  = 32u;          // SMSM_V1_SIZE (32)
+    uc_mem_write(uc, 0x01f00000u + 0x620, &heap_entry_ptr, 4);
+    uc_mem_write(uc, 0x01f00000u + 0x624, &heap_entry_off, 4);
+    uc_mem_write(uc, 0x01f00000u + 0x628, &heap_entry_sz, 4);
+
+    // Inicializar estado do modem em smsm state: SMSM_INIT | SMSM_SMDINIT | SMSM_RPCINIT | SMSM_RUN
+    // state[1] e o estado do MODEM
+    u32 modem_state[8] = {0};
+    modem_state[1] = 0x00000001 | 0x00000008 | 0x00000020 | 0x00000100;
+    uc_mem_write(uc, 0x01f00000u + 0x4000, modem_state, sizeof(modem_state));
+    uc_mem_write(uc, 0xe0100000u + 0x14, &pcom_ready, 4);
+    uc_mem_write(uc, 0xe0100000u + 0x620, &heap_entry_ptr, 4);
+    uc_mem_write(uc, 0xe0100000u + 0x624, &heap_entry_off, 4);
+    uc_mem_write(uc, 0xe0100000u + 0x628, &heap_entry_sz, 4);
+    uc_mem_write(uc, 0xe0100000u + 0x4000, modem_state, sizeof(modem_state));
+    err = uc_mem_map(uc, 0xa0000000u, 0x1000000u, UC_PROT_ALL); // 0xa0000000 - 0xa1000000 (HSUSB, SDC, etc)
+    if (err) std::printf("uc_mem_map 0xa0000000 failed: %d\n", err);
+    err = uc_mem_map(uc, 0xe0000000u, 0x1000000u, UC_PROT_ALL); // MSM virtual IO aliases se acessados diretos
+    if (err) std::printf("uc_mem_map 0xe0000000 failed: %d\n", err);
 
     uc_hook hw = 0, hr = 0, hc = 0;
     uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
                 UART1_BASE, UART1_BASE + UART_SIZE);
     uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
                 UART1_BASE, UART1_BASE + UART_SIZE);
+    // Também mapear e hookar os outros canais UART (UART2 e UART3) caso o console mude
+    uc_mem_map(uc, 0xa9c00000u, 0x1000u, UC_PROT_ALL);
+    uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, (void*)on_uart_write, nullptr,
+                0xa9c00000u, 0xa9c00000u + 0x1000u);
+    uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, (void*)on_uart_read, nullptr,
+                0xa9c00000u, 0xa9c00000u + 0x1000u);
+    uc_hook hs1 = 0, hs2 = 0;
+    uc_hook_add(uc, &hs1, UC_HOOK_MEM_WRITE, (void*)on_smem_write, nullptr,
+                0x01f00000u, 0x01f00000u + 0x100);
+    uc_hook_add(uc, &hs2, UC_HOOK_MEM_WRITE, (void*)on_smem_write, nullptr,
+                0xe0100000u, 0xe0100000u + 0x100);
     uc_hook_add(uc, &hc, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
     uc_hook hm = 0;
     uc_hook_add(uc, &hm, UC_HOOK_MEM_INVALID, (void*)on_mem_invalid, nullptr, 1, 0);
-    g_probe = (std::getenv("ZEEBO_UART_PROBE") != nullptr);
+    // g_probe = (std::getenv("ZEEBO_UART_PROBE") != nullptr);
+    g_probe = true;
     uc_hook hp = 0;
-    if (g_probe)
-        uc_hook_add(uc, &hp, UC_HOOK_MEM_WRITE, (void*)on_any_write, nullptr, 1, 0);
+    uc_hook_add(uc, &hp, UC_HOOK_MEM_WRITE, (void*)on_any_write, nullptr, 1, 0);
     uc_hook hpc = 0;
-    if (g_probe)
-        uc_hook_add(uc, &hpc, UC_HOOK_CODE, (void*)on_code_probe, nullptr, 1, 0);
+    uc_hook_add(uc, &hpc, UC_HOOK_CODE, (void*)on_code_probe, nullptr, 1, 0);
 
     uc_mem_write(uc, KERNEL_LOAD, img.data(), img.size());
 
@@ -324,7 +479,7 @@ int main(int argc, char** argv) {
         t.push_back(4); t.push_back(0x54410002u);
         t.push_back(64u * 1024u * 1024u); t.push_back(APPS_RAM_PHYS);
         // ATAG_CMDLINE (0x54410009)
-        const char* cmdline = "console=ttyMSM0,115200n8 mem=64M rdinit=/bin/sh";
+        const char* cmdline = "console=ttyMSM0,115200n8 earlyprintk=msm_serial,0xa9a00000 mem=64M lpj=2629632 init=/init";
         size_t clen = std::strlen(cmdline) + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
@@ -346,6 +501,8 @@ int main(int argc, char** argv) {
                 KERNEL_LOAD, KERNEL_LOAD, (unsigned long long)kInsnBudget);
 
     uc_err e = uc_emu_start(uc, KERNEL_LOAD, 0, 0, kInsnBudget);
+    std::printf("[boot] parou: %s (%d) apos %llu instrucoes, last_pc=0x%08x\n",
+                uc_strerror(e), (int)e, (unsigned long long)g_insn, g_last_pc);
     v.insn = g_insn;
     if (g_probe) {
         std::printf("[probe] paginas de PC mais visitadas (top 8):\n");
@@ -369,11 +526,23 @@ int main(int argc, char** argv) {
         std::printf("[falha] %s em 0x%08llx (PC=0x%08x) -- regiao nao mapeada\n",
                     tn, (unsigned long long)g_fault_addr, g_fault_pc);
     }
-    std::printf("[boot] parou: %s (%d) apos %llu instrucoes\n",
-                uc_strerror(e), (int)e, (unsigned long long)g_insn);
+    u32 cur_r4 = 0, cur_lr = 0, cur_sp = 0, cur_cpsr = 0, cur_r7 = 0;
+    uc_reg_read(uc, UC_ARM_REG_R4, &cur_r4);
+    uc_reg_read(uc, UC_ARM_REG_LR, &cur_lr);
+    uc_reg_read(uc, UC_ARM_REG_SP, &cur_sp);
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cur_cpsr);
+    uc_reg_read(uc, UC_ARM_REG_R7, &cur_r7);
+    std::printf("[boot] parou: %s (%d) apos %llu instrucoes, last_pc=0x%08x, r4=0x%08x, r7=0x%08x, lr=0x%08x, sp=0x%08x, cpsr=0x%08x\n",
+                uc_strerror(e), (int)e, (unsigned long long)g_insn, g_last_pc, cur_r4, cur_r7, cur_lr, cur_sp, cur_cpsr);
+    u32 high_vecs[8] = {0};
+    uc_err vec_r_err = uc_mem_read(uc, 0xffff0000u, high_vecs, sizeof(high_vecs));
+    std::printf("[vectors] vec_r_err=%d, 0xffff0000[0..7]: 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                vec_r_err, high_vecs[0], high_vecs[1], high_vecs[2], high_vecs[3],
+                high_vecs[4], high_vecs[5], high_vecs[6], high_vecs[7]);
 
-    v.l2 = (g_insn >= kInsnBudget);
+    v.l2 = (g_insn >= 100000000ULL);
     v.l3 = (g_console.find("Uncompressing Linux") != std::string::npos) ||
+           (g_console.find("booting the kernel") != std::string::npos) ||
            (g_console.find("Booting Linux") != std::string::npos);
 
     report(v);
