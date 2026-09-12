@@ -1400,10 +1400,24 @@ void on_mdp_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
 static u64 g_fb_writes = 0;        // total de escritas na faixa do framebuffer
 static u64 g_fb_writes_nz = 0;     // quantas com valor != 0
 u64 fb_writes_count() { return g_fb_writes; }   // usado pelo redesenho (dirty check)
+// Janela de memoria da lista assincrona do EHCI (QH/qTD). Quando o endereco da lista e'
+// descoberto, o observador do USB habilita esta janela: as escritas do HCD aqui dentro
+// mostram exatamente o qTD que ele monta (token com Active, buffer, etc).
+static u32 g_usb_watch_lo = 0, g_usb_watch_hi = 0;
+static int g_usb_watch_log = 0;
 
 static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                              int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
+    // Escritas do HCD na regiao da lista assincrona: e' onde nasce o qTD (token com
+    // Active=1) que o "hardware" teria de executar.
+    if (g_usb_watch_lo && (u32)addr >= g_usb_watch_lo && (u32)addr < g_usb_watch_hi && g_usb_watch_log < 70) {
+        ++g_usb_watch_log;
+        u32 pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        std::printf("[usb-qtd] W 0x%08x = 0x%08x (pc=0x%08x)\n", (u32)addr, (u32)value, pc);
+        std::fflush(stdout);
+    }
     ++g_fb_writes;
     if (value != 0) ++g_fb_writes_nz;
     if ((g_fb_writes + g_fb_writes_nz) < 4000u && value != 0 && g_fb_writes_nz <= 8) {
@@ -1838,22 +1852,28 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     // HCRESET repetido -- estes contadores dizem quem esta' repetindo.
     static const bool usb_cnt_on = (std::getenv("ZEEBO_USB_LOG") != nullptr);
     if (usb_cnt_on) {
-        static const u32 kUsb[] = {0xc01893ccu, 0xc0189720u, 0xc017a354u, 0xc0174ff8u,
-                                   0xc0173564u, 0xc0176598u, 0xc0178da0u, 0xc018f740u,
-                                   0xc018d0dcu, 0xc0224b80u, 0xc0023edcu};
-        static const char* kUsbName[] = {"handshake", "ehci_reset", "usb_add_hcd",
-                                         "hub_port_init", "hub_port_reset", "hub_thread",
-                                         "hcd_poll_rh", "ehci_run", "ehci_hub_ctrl",
-                                         "sched_timeout", "msleep"};
-        static u32 usb_cnt[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        for (u32 k = 0; k < 11u; ++k) {
+        static const u32 kUsb[] = {
+            0xc01893ccu, 0xc0189720u, 0xc017a354u, 0xc0174ff8u, 0xc0173564u,
+            0xc0176598u, 0xc018f740u, 0xc018d0dcu, 0xc0023edcu,
+            0xc019013cu, 0xc018ed78u, 0xc018e90cu, 0xc018e964u,
+            0xc017ad94u, 0xc017baacu, 0xc01786a0u, 0xc018bb74u,
+            0xc0189d00u, 0xc018f8dcu, 0xc01783a8u, 0xc0173b50u};
+        static const char* kUsbName[] = {
+            "handshake", "ehci_reset", "usb_add_hcd", "hub_port_init", "hub_port_reset",
+            "hub_thread", "ehci_run", "ehci_hub_ctrl", "msleep",
+            "urb_enqueue", "qh_urb_tx", "qtd_alloc", "qh_alloc",
+            "usb_submit_urb", "wait_urb", "hcd_submit", "ehci_work",
+            "qh_completions", "ehci_irq", "giveback_urb", "hub_activate"};
+        enum { kUsbN = 21 };
+        static u32 usb_cnt[kUsbN] = {0};
+        for (u32 k = 0; k < kUsbN; ++k) {
             if (static_cast<u32>(addr) == kUsb[k]) { ++usb_cnt[k]; break; }
         }
         static u64 last_report = 0;
         if (g_icount - last_report > 33000000ull) {           // relatorio rolante
             last_report = g_icount;
             std::printf("[usb-cnt] insn=%llu", (unsigned long long)g_icount);
-            for (u32 k = 0; k < 11u; ++k) std::printf(" %s=%u", kUsbName[k], usb_cnt[k]);
+            for (u32 k = 0; k < kUsbN; ++k) std::printf(" %s=%u", kUsbName[k], usb_cnt[k]);
             std::printf("\n");
             std::fflush(stdout);
         }
@@ -1944,6 +1964,13 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
 // leituras em polling esperando o HCRESET cair.
 static u32 g_usb_regs[0x200 / 4];
 static bool g_usb_log = false;
+// PORTSC da porta 1: dispositivo conectado (CCS) + habilitado (PED) + power (PP) e
+// PORT_SPEED = high-speed (2), que e' o que uma porta EHCI aceita (root port de EHCI
+// nao lida com full/low speed -- isso seria o controlador companheiro). O hub pede
+// "Cannot enable port 1" se PED nao estiver ligado depois do reset, entao a porta ja'
+// se apresenta habilitada; o reset (PR, bit 7) e' completado na leitura seguinte.
+static u32  g_usb_portsc = 0x0800100Fu;
+static bool g_usb_port_reset_pending = false;
 
 static u32 usb_reg_read(u32 off) {
     switch (off & ~0x3u) {
@@ -1957,7 +1984,15 @@ static u32 usb_reg_read(u32 off) {
     case 0x104: return 0x00000011u;          // HCSPARAMS: N_PORTS=1, PPC=1
     case 0x108: return 0x00000006u;          // HCCPARAMS: lista de frames programavel
     case 0x10c: return 0x00000000u;          // HCSP-PORTROUTE
-    case 0x184: return 0x00001000u;          // PORTSC1: PP (bit 12); sem dispositivo (CCS=0)
+    case 0x184: {                            // PORTSC1
+        if (g_usb_port_reset_pending) {
+            g_usb_port_reset_pending = false;
+            g_usb_portsc = (g_usb_portsc & ~0x00000080u)   // PR=0 (reset terminou)
+                         | 0x0000000cu                     // PED=1, PEDC=1
+                         | (2u << 26);                     // PORT_SPEED = high-speed
+        }
+        return g_usb_portsc;
+    }
     default:    return g_usb_regs[(off & 0x1ffu) >> 2];
     }
 }
@@ -1973,6 +2008,17 @@ static void on_usb_write(uc_engine* uc, uc_mem_type type, u64 addr, int size, i6
     // do reset lendo 2 para sempre (~180k leituras ate' estourar o timeout).
     if ((off & ~0x3u) == 0x100u || (off & ~0x3u) == 0x140u) {
         v &= ~0x2u;
+    }
+    // PORTSC: o kernel escreve aqui para mexer nas features da porta. PR (bit 7) liga o
+    // reset e os bits de mudanca (CSC 0x2, PEDC 0x8) sao write-1-to-clear.
+    if ((off & ~0x3u) == 0x184u) {
+        if (v & 0x80u) g_usb_port_reset_pending = true;
+        u32 st = g_usb_portsc;
+        if (v & 0x02u) st &= ~0x02u;
+        if (v & 0x08u) st &= ~0x08u;
+        g_usb_portsc = st;
+        if (g_usb_log) printf("[usb] w PORTSC <- 0x%08x (PR=%u)\n", v, (v >> 7) & 1u);
+        return;
     }
     if (g_usb_log) printf("[usb] w 0x%03x <- 0x%08x\n", off, v);
     g_usb_regs[(off & 0x1ffu) >> 2] = v;
@@ -2013,7 +2059,111 @@ static bool g_usb_async_log = false;
 
 void usb_async_poll(uc_engine* uc) {
     u32 list = g_usb_regs[(0x158u & 0x1ffu) >> 2] & ~0x1fu;   // ASYNCLISTADDR
+    // Com ZEEBO_USB_ASYNC=1 imprime a estrutura crua da lista (capped): sem isso nao da'
+    // para saber se o HCD chegou a submeter, se o QH tem qTD ativo e onde ele esta'.
+    static int prints = 0;
+    static u32 last_list = 0xffffffffu;
+    static u32 calls = 0;
+    if (list && !g_usb_watch_lo) {           // descobre a regiao do pool: passa a observar
+        g_usb_watch_lo = list & ~0xffffu;    // o HCD aloca QH e qTD no mesmo pool
+        g_usb_watch_hi = g_usb_watch_lo + 0x20000u;
+    }
+    // Amostra periodica (a lista muda rapido: o HCD escreve ASYNCLISTADDR antes de
+    // montar os qTDs, entao imprimir so' na mudanca pegava a lista vazia).
+    const bool sample = (list && ((calls++ & 7u) == 0u) && prints < 24) || (list != last_list && prints < 6);
+    if (sample) {
+        ++prints;
+        last_list = list;
+        std::printf("[usb-async] ASYNCLISTADDR=0x%08x USBCMD=0x%08x USBSTS=0x%08x\n",
+                    list, g_usb_regs[(0x140u & 0x1ffu) >> 2], g_usb_regs[(0x144u & 0x1ffu) >> 2]);
+        if (list) {
+            u32 qh = list;
+            for (int n = 0; n < 4 && qh; ++n) {          // cadeia de QHs da lista async
+                u32 w[8];
+                if (uc_mem_read(uc, qh, w, sizeof(w)) != UC_ERR_OK) break;
+                const u32 tok = w[6];
+                std::printf("[usb-async]   qh[%d]@0x%08x next=0x%08x epc=0x%08x cur=0x%08x tok=0x%08x buf0=0x%08x active=%u pid=%u bytes=%u\n",
+                            n, qh, w[0], w[1], w[3], tok, w[7], (tok >> 7) & 1u, (tok >> 8) & 3u, (tok >> 16) & 0x7fffu);
+                // qTD ativo: no overlay (qh+0x10, que ja' tem o layout de qTD) ou no
+                // qTD corrente (0x0c, esse sim alinhado a 32 bytes)
+                u32 cand[2] = { qh + 0x10u, w[3] };
+                for (int c = 0; c < 2; ++c) {
+                    if (!cand[c]) continue;
+                    const u32 base = c ? (cand[c] & ~0x1fu) : cand[c];
+                    u32 q[8];
+                    if (uc_mem_read(uc, base, q, sizeof(q)) != UC_ERR_OK) continue;
+                    const u32 t = q[2];
+                    if (!((t >> 7) & 1u)) continue;
+                    std::printf("[usb-async]     ATIVO em %s: tok=0x%08x pid=%u bytes=%u buf0=0x%08x\n",
+                                c ? "hw_current" : "overlay", t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, q[3]);
+                    unsigned char b[8] = {0};
+                    if (q[3] && uc_mem_read(uc, q[3], b, sizeof(b)) == UC_ERR_OK)
+                        std::printf("[usb-async]     dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+                }
+                const u32 nx = w[0];
+                qh = (nx & 1u) ? 0u : (nx & ~0x1fu);       // segue o proximo QH
+            }
+        }
+        std::fflush(stdout);
+    }
     if (!list) return;
+    // Varredura que roda em TODA amostragem (barata: 2 QHs x 2 candidatos) e procura
+    // qTD ativo -- ou seja, URB submetido e ainda nao completado, que e' o momento em
+    // que o "hardware" (nosso modelo) teria de executar a transferencia.
+    static int act_seen = 0;
+    // Varredura por token ATIVO em todo o pool (o HCD pode alocar os qTDs fora da
+    // cadeia que eu sigo): token ativo = bit7, PID 0..2 e total bytes > 0.
+    if (g_usb_watch_lo && act_seen < 10) {
+        std::vector<u8> pool(0x20000u);
+        if (uc_mem_read(uc, g_usb_watch_lo, pool.data(), pool.size()) == UC_ERR_OK) {
+            for (size_t o = 0; o + 32 <= pool.size(); o += 4) {
+                u32 t; std::memcpy(&t, &pool[o + 8], 4);
+                const u32 tb = (t >> 16) & 0x7fffu;
+                if (!(t & 0x80u)) continue;
+                if (((t >> 8) & 3u) > 2u) continue;
+                // qTD de verdade: bytes plausiveis (setup 8, control/descriptor <= 1024)
+                // -- sem isso a varredura casa com ponteiros do kernel (falso positivo).
+                if (tb == 0u || tb > 1024u) continue;
+                ++act_seen;
+                u32 buf; std::memcpy(&buf, &pool[o + 12], 4);
+                std::printf("[usb-qtd] ATIVO em pool+0x%zx: tok=0x%08x pid=%u bytes=%u buf=0x%08x\n",
+                            o, t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, buf);
+                unsigned char b[8] = {0};
+                if (buf && uc_mem_read(uc, buf, b, sizeof(b)) == UC_ERR_OK)
+                    std::printf("[usb-qtd]   dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+                std::fflush(stdout);
+                if (act_seen >= 10) break;
+            }
+        }
+    }
+    if (act_seen < 8) {
+        u32 qh_w = list;
+        for (int n = 0; n < 4 && qh_w; ++n) {
+            u32 w[8];
+            if (uc_mem_read(uc, qh_w, w, sizeof(w)) != UC_ERR_OK) break;
+            u32 cand[2] = { qh_w + 0x10u, w[3] };
+            for (int c = 0; c < 2; ++c) {
+                if (!cand[c]) continue;
+                const u32 base = c ? (cand[c] & ~0x1fu) : cand[c];
+                u32 q[8];
+                if (uc_mem_read(uc, base, q, sizeof(q)) != UC_ERR_OK) continue;
+                const u32 t = q[2];
+                if (!((t >> 7) & 1u)) continue;
+                ++act_seen;
+                std::printf("[usb-async] ATIVO qh[%d]@0x%08x via %s: tok=0x%08x pid=%u bytes=%u buf0=0x%08x\n",
+                            n, qh_w, c ? "hw_current" : "overlay", t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, q[3]);
+                unsigned char b[8] = {0};
+                if (q[3] && uc_mem_read(uc, q[3], b, sizeof(b)) == UC_ERR_OK)
+                    std::printf("[usb-async]   setup/dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+                std::fflush(stdout);
+            }
+            const u32 nx = w[0];
+            qh_w = (nx & 1u) ? 0u : (nx & ~0x1fu);
+        }
+    }
     u32 qh = list;
     for (int i = 0; i < 4 && qh; i++) {
         u32 epc = 0, token = 0, buf0 = 0, cur = 0;

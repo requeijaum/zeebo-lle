@@ -100,6 +100,35 @@ e os contadores de execução (env `ZEEBO_USB_LOG=1`) mostram o HCD de fato inic
 **O boot completa até a shell com o host controller rodando** (`uname -a`, `echo`
 respondem normalmente). O host controller entra por padrão; `ZEEBO_NOUSB=1` desliga.
 
+## Porta com dispositivo conectado (2026-09-12, depois do HCD)
+
+O modelo de `PORTSC` (regra `0x184`) passou a apresentar a porta com **dispositivo
+conectado e habilitado**: `CCS | CSC | PED | PEDC | PP` + `PORT_SPEED = 2`
+(high-speed, que é o único que uma root port de EHCI aceita -- full/low speed iria
+para o controlador companheiro, que não temos). O reset de porta (`PR`, bit 7) é
+completado pelo modelo na leitura seguinte.
+
+Resultado no guest: **o hub enumera o dispositivo** --
+
+```
+hub 1-0:1.0: USB hub found / 1 port detected
+usb 1-1: new high-speed USB device number 2 using msm_hsusb
+usb 1-1: device descriptor read/64, error -110
+hub 1-0:1.0: unable to enumerate USB device on port 1
+```
+
+O `-110` (ETIMEDOUT) é justamente o que falta: o URB é submetido e o "hardware"
+(nós) não completa a transferência. Os contadores mostram a cadeia funcionando:
+`urb_enqueue=16 qh_urb_tx=16 qtd_alloc=49 usb_submit_urb=63 wait_urb=62
+giveback=62 ehci_work=408 qh_completions=416 ehci_irq=0`.
+
+Ou seja: **falta o motor de transferência** (executar os qTD da lista assíncrona,
+escrever status/bytes de volta, levantar `USBSTS.USBINT` e entregar a IRQ 47), mais
+os descritores do teclado HID. A varredura por token ativo no pool (`ZEEBO_USB_ASYNC=1`)
+ainda não localizou o qTD em voo: a sobreposição do QH estava idle nas amostragens e
+a varredura de 128KB dá falso positivo com ponteiros do kernel (foi apertada para
+exigir `total bytes` entre 1 e 1024).
+
 ## Onde exatamente mexer para entregar a IRQ 47 (mapeado no código)
 
 No `tools/cpp/test_linux_boot.cpp` a entrega de IRQ tem **dois pontos**, e os dois
