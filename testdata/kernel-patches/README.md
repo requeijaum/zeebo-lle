@@ -34,3 +34,15 @@ sai do inicio do boot), depois reaplicar este patch e blitar o FB
   (UART3) — identidade VA=PA.
 - MDP `0xaa200000` (MSM_MDP_PHYS), TVENC `0xaa400000`.
 - Hooks do Unicorn: os de CODIGO reportam VA; os de MEMORIA reportam PA.
+
+## Achado do fbcon x msm_fb (2026-09-12)
+
+Com o patch aplicado o kernel instala o fb0 e o fbcon assume o console
+("Console: switching to colour frame buffer device 90x30"), e o kernel escreve na
+memoria de FB -- confirmado com hook de escrita: stores em 0x15000000/0x150005a0/
+0x15000b40... (clear de uma palavra por linha, passo 1440 = line_length) e o padrao
+do `cfb_fillrect`. O TEXTO nao aparece porque `msm_fb.c` guarda o estado do driver em
+`fb_info.par` (`struct msmfb_info *msmfb = fb->par`) enquanto o `fbcon` do 3.4 usa o
+mesmo campo para o `fbcon_ops` -- conflito de API de framebuffer antiga, nao do
+harness. Para o proximo passo: mover o estado do msm_fb para outro lugar (ou portar
+tvenc.c/tv_ntsc.c/tv_pal.c como painel de verdade, que e' o que o Zeebo usa).

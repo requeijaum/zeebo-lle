@@ -41,7 +41,7 @@
 #include <sys/select.h>
 #include <unicorn/unicorn.h>
 
-using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; using i64 = int64_t;
+using u8 = uint8_t; using u16 = uint16_t; using u32 = uint32_t; using u64 = uint64_t; using i64 = int64_t;
 
 namespace {
 
@@ -200,14 +200,22 @@ static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                     off, v, g_vic_en[0], g_vic_pending[0]);
 }
 
+static u32  g_vic_cursor = 0;      // round-robin: sem isso a IRQ de menor
+                                   // numero (timer=7) starva as outras (MDP=19)
+
 static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
                         int size, int64_t value, void* ud) {
     (void)type; (void)size; (void)value; (void)ud;
     const u32 off = static_cast<u32>(addr) - VIC_BASE;
     const u32 act = g_vic_pending[0] & g_vic_en[0];
     u32 val = 0;
-    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND)
-        val = act ? (u32)__builtin_ctz(act) : VIC_NO_PEND;
+    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND) {
+        val = VIC_NO_PEND;
+        for (u32 i = 0; i < 32u && act; ++i) {
+            const u32 b = (g_vic_cursor + i) & 31u;
+            if (act & (1u << b)) { val = b; g_vic_cursor = (b + 1u) & 31u; break; }
+        }
+    }
     else if (off == VIC_OFF_STATUS0)     val = act;
     else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
     else if (off == VIC_OFF_ENSET0)      val = g_vic_en[0];
@@ -947,6 +955,73 @@ static void sdl_pump() {
     }
 }
 
+// Framebuffer do guest: PA 0x15000000, 720x480, RGB565 (o board patch define
+// ZEEBO_FB_BASE). Se a memoria tiver conteudo, ele e' o que aparece na janela;
+// senao cai no texto do console (kernel sem driver de fb).
+static constexpr u32 FB_PA   = 0x15000000u;
+static constexpr int FB_XRES = 720;
+static constexpr int FB_YRES = 480;
+static SDL_Texture*  g_sdl_fbtex = nullptr;
+static std::vector<u32> g_sdl_fbpix;
+
+// Copia o framebuffer do guest (se houver) para o texture da janela.
+// O msm_fb usa buffer duplo (yres_virtual = 2*yres), entao o quadro visivel pode
+// estar na primeira ou na segunda metade: escolhemos a que tem mais tinta.
+// Devolve true se desenhou o FB; false para usar o texto do console.
+static bool sdl_draw_fb(uc_engine* uc) {
+    if (!g_sdl_ren) return false;
+    if (!g_sdl_fbtex)
+        g_sdl_fbtex = SDL_CreateTexture(g_sdl_ren, SDL_PIXELFORMAT_ARGB8888,
+                                        SDL_TEXTUREACCESS_STREAMING, FB_XRES, FB_YRES);
+    if (!g_sdl_fbtex) return false;
+    const u32 frame_bytes = (u32)FB_XRES * FB_YRES * 2u;     // 691200
+    std::vector<u8> buf(frame_bytes * 2u);
+    const uc_err rerr = uc_mem_read(uc, FB_PA, buf.data(), buf.size());
+    static int dprints = 0;
+    if (dprints < 5) {
+        ++dprints;
+        std::printf("[fb] leitura de 0x%08x (%zu bytes) -> err=%d\n", FB_PA, buf.size(), (int)rerr);
+        if (rerr == UC_ERR_OK) {
+            size_t nz = 0;
+            for (u8 b : buf) if (b) ++nz;
+            std::printf("[fb]   bytes nao-zero: %zu (primeiros 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                        nz, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+        }
+        std::fflush(stdout);
+    }
+    if (rerr != UC_ERR_OK) return false;
+    size_t ink[2] = {0, 0};
+    for (int h = 0; h < 2; ++h) {
+        const u8* p = buf.data() + h * frame_bytes;
+        for (u32 i = 0; i < frame_bytes; i += 2) {
+            const u16 px = (u16)(p[i] | (p[i + 1] << 8));
+            if (px) ++ink[h];
+        }
+    }
+    static bool printed = false;
+    if (!printed && (ink[0] || ink[1])) {
+        printed = true;
+        std::printf("[fb] tinta: buffer0=%zu buffer1=%zu pixels (de %d)\n",
+                    ink[0], ink[1], FB_XRES * FB_YRES);
+        std::fflush(stdout);
+    }
+    const int half = (ink[1] > ink[0]) ? 1 : 0;
+    if (ink[half] == 0) return false;                        // ainda sem imagem
+    const u8* p = buf.data() + half * frame_bytes;
+    g_sdl_fbpix.assign(FB_XRES * FB_YRES, 0);
+    for (int i = 0; i < FB_XRES * FB_YRES; ++i) {
+        const u16 px = (u16)(p[i * 2] | (p[i * 2 + 1] << 8));
+        const u32 r = (px >> 11) & 0x1fu, g = (px >> 5) & 0x3fu, b = px & 0x1fu;
+        g_sdl_fbpix[i] = 0xff000000u | ((r << 3 | r >> 2) << 16)
+                       | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+    }
+    SDL_UpdateTexture(g_sdl_fbtex, nullptr, g_sdl_fbpix.data(), FB_XRES * 4);
+    SDL_RenderClear(g_sdl_ren);
+    SDL_RenderCopy(g_sdl_ren, g_sdl_fbtex, nullptr, nullptr);
+    SDL_RenderPresent(g_sdl_ren);
+    return true;
+}
+
 static void sdl_present(const std::string& console) {
     if (!g_sdl_on) return;
     SDL_SetRenderDrawColor(g_sdl_ren, 16, 16, 24, 255);
@@ -1026,13 +1101,17 @@ constexpr u64 INSN_PER_SEC = 1000000ull;
 
 static u32  g_gpt_match  = 0xffffffffu;
 static u32  g_gpt_enable = 0;
+static u64  g_gpt_base   = 0;       // g_icount no ultimo TIMER_CLEAR
 static bool g_timer_log  = false;
 static bool g_timer_on   = false;   // ZEEBO_TIMER=1 liga o clockevent virtual
+static u32  g_timer_prints = 0;     // cap do log (o kernel acessa o CSR milhares de vezes)
 
+// O GPT conta a partir do ultimo CLEAR (o driver faz CLEAR; MATCH=delta; ENABLE).
+// Sem isso o contador livre fica sempre >= MATCH e vira tempestade de ticks.
 static inline u32 gpt_count_now() {
-    return static_cast<u32>((g_icount * GPT_HZ) / INSN_PER_SEC);
+    return static_cast<u32>(((g_icount - g_gpt_base) * GPT_HZ) / INSN_PER_SEC);
 }
-static inline u32 dgt_count_now() {
+static inline u32 dgt_count_now() {   // clock source: livre, nunca zerado
     return static_cast<u32>((g_icount * DGT_HZ) / INSN_PER_SEC);
 }
 
@@ -1054,8 +1133,8 @@ void on_csr_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
     const u32 v = static_cast<u32>(value);
     if (off == TIMER_MATCH_VAL)      g_gpt_match = v;
     else if (off == TIMER_ENABLE)    g_gpt_enable = v;
-    else if (off == TIMER_CLEAR)     g_gpt_enable = 0;
-    if (g_timer_log)
+    else if (off == TIMER_CLEAR)   { g_gpt_enable = 0; g_gpt_base = g_icount; }
+    if (g_timer_log && g_timer_prints++ < 60)
         std::printf("[gpt] W off=0x%02x val=0x%08x (match=0x%x en=%u cnt=%u)\n",
                     off, v, g_gpt_match, g_gpt_enable, gpt_count_now());
     if (off == TIMER_MATCH_VAL || off == TIMER_ENABLE || off == TIMER_CLEAR)
@@ -1074,10 +1153,73 @@ void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     else if (off == TIMER_COUNT_VAL)     val = gpt_count_now();
     else if (off == TIMER_ENABLE)        val = g_gpt_enable;
     else if (off == TIMER_COUNT_VAL + 0x10u) val = dgt_count_now();   // DGT
-    if (g_timer_log)
+    if (g_timer_log && g_timer_prints++ < 60)
         std::printf("[gpt] R off=0x%02x -> 0x%08x\n", off, val);
     // O guest le atraves da MMU: o valor tem de estar no PA, nao no VA do hook.
     uc_mem_write(uc, CSR_PA + off, &val, 4);
+}
+
+// --- MDP do MSM7x00 (so o suficiente para o fb0 andar) ----------------------
+// mdp_hw.h: MDP_INTR_ENABLE=0x20, MDP_INTR_STATUS=0x24, MDP_INTR_CLEAR=0x28.
+// mdp.c: enable_mdp_irq() pede os bits; mdp_isr() le STATUS, escreve de volta em
+// CLEAR, e se DL0_DMA2_TERM_DONE estiver setado chama o callback e acorda a
+// waitqueue -- e' isso que faz msmfb_pan_display retornar em vez de esperar o
+// frame-start ate o timeout (sem isso sao 878 "mdp_dma_to_mddi: busy" no boot).
+// INT_MDP = 19 (irqs-7x00.h). Sem engine de DMA real, o DMA "termina" na hora:
+// o conteudo do framebuffer ja foi escrito pela CPU (fbcon/cfb_*).
+constexpr u32 MDP_INTR_ENABLE = 0x020u;
+constexpr u32 MDP_INTR_STATUS = 0x024u;
+constexpr u32 MDP_INTR_CLEAR  = 0x028u;
+constexpr u32 INT_MDP         = 19u;
+
+static u32  g_mdp_status = 0;
+static bool g_mdp_log    = false;
+
+void on_mdp_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                  int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 off = static_cast<u32>(addr) - MDP_BASE;
+    const u32 v = static_cast<u32>(value);
+    if (off == MDP_INTR_ENABLE) {          // o driver habilitou: considera concluido
+        g_mdp_status |= v;
+        g_vic_pending[0] |= (1u << INT_MDP);
+        if (g_mdp_log)
+            std::printf("[mdp] ENABLE=0x%x -> status=0x%x (irq 19)\n", v, g_mdp_status);
+    } else if (off == MDP_INTR_CLEAR) {    // ISR limpou
+        g_mdp_status &= ~v;
+        if (g_mdp_status == 0) g_vic_pending[0] &= ~(1u << INT_MDP);
+        if (g_mdp_log)
+            std::printf("[mdp] CLEAR=0x%x -> status=0x%x\n", v, g_mdp_status);
+    } else if (g_mdp_log && off >= 0x10000u && off < 0x10200u) {
+        // Configuracao de DMA: aqui aparece o endereco fisico do framebuffer.
+        static int cfg = 0;
+        if (cfg++ < 40)
+            std::printf("[mdp] W cfg off=0x%05x val=0x%08x\n", off, v);
+    }
+}
+
+void on_mdp_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                 int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 off = static_cast<u32>(addr) - MDP_BASE;
+    if (off != MDP_INTR_STATUS) return;
+    u32 val = g_mdp_status;
+    if (g_mdp_log)
+        std::printf("[mdp] R STATUS -> 0x%x\n", val);
+    uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
+}
+
+static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                             int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    static int n = 0;
+    if (n++ < 12) {
+        u32 pc = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        std::printf("[fbprobe] W 0x%08llx val=0x%llx pc=0x%08x\n",
+                    (unsigned long long)addr, (unsigned long long)value, pc);
+        std::fflush(stdout);
+    }
 }
 
 static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
@@ -1181,7 +1323,15 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
         if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
             g_irq_in_service = true;
             ++g_irq_delivered;
-            const u32 nr = (u32)__builtin_ctz(g_vic_pending[0] & g_vic_en[0]);
+            u32 nr = 0;
+            {
+                const u32 act = g_vic_pending[0] & g_vic_en[0];
+                nr = 32u;                                   // 32 = nenhuma
+                for (u32 i = 0; i < 32u && act; ++i) {
+                    const u32 b = (g_vic_cursor + i) & 31u;
+                    if (act & (1u << b)) { nr = b; g_vic_cursor = (b + 1u) & 31u; break; }
+                }
+            }
             if (g_irq_log || g_irq_delivered <= 8u) {
                 std::printf("[irq] entregando IRQ %u em pc=0x%08x (hook=0x%08x) cpsr=0x%08x\n",
                             nr, pc_va, static_cast<u32>(addr), cpsr);
@@ -1201,10 +1351,12 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     if ((g_icount & 0x3FFFu) == 0u) rx_fill_from_host();
     rx_try_stage();
 #if defined(ZEEBO_SDL)
-    // Janela do console: bombeia teclado e redesenha a cada ~256k instrucoes.
+    // Janela: bombeia teclado e redesenha a cada ~256k instrucoes. Se o guest tem
+    // framebuffer com conteudo (driver de fb carregado), ele e' o que aparece;
+    // senao cai no texto do console.
     if (g_sdl_on && (g_icount & 0x3FFFFu) == 0u) {
         sdl_pump();
-        sdl_present(g_console);
+        if (!sdl_draw_fb(uc)) sdl_present(g_console);
         if (g_sdl_quit) uc_emu_stop(uc);
     }
 #endif
@@ -1567,7 +1719,15 @@ int main(int argc, char** argv) {
     // 0xaa200060). O espaco de FB memoria fica em PA 0x15000000 (dentro da RAM
     // mapeada de 96MB, fora dos 64MB que o kernel gerencia).
     uc_mem_map(uc, MDP_BASE, MDP_SIZE, UC_PROT_ALL);
+    g_mdp_log = (std::getenv("ZEEBO_MDP_LOG") != nullptr);
+    uc_hook hmw = 0, hmr = 0;
+    uc_hook_add(uc, &hmw, UC_HOOK_MEM_WRITE, (void*)on_mdp_write, nullptr, MDP_BASE, MDP_BASE + MDP_SIZE);
+    uc_hook_add(uc, &hmr, UC_HOOK_MEM_READ, (void*)on_mdp_read, nullptr, MDP_BASE, MDP_BASE + MDP_SIZE);
     uc_mem_map(uc, TVENC_BASE, TVENC_SIZE, UC_PROT_ALL);
+    // Diagnostico: onde o kernel escreve o framebuffer (acima da RAM dele).
+    uc_hook hfp = 0;
+    uc_hook_add(uc, &hfp, UC_HOOK_MEM_WRITE, (void*)on_fbprobe_write, nullptr,
+                0x14000000u, 0x16000000u);
     // NAO mapear espelho de 0xc0000000+: os hooks do Unicorn reportam o endereco
     // FISICO dos acessos do guest, e 0xC0100000 (PA do GPT) cai exatamente ali --
     // mapear/hookar esse espaco corromperia RAM do kernel. O dump do log do kernel
