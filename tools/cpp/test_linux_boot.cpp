@@ -902,6 +902,8 @@ static const char*   g_sdl_shot = "/tmp/zeebo_console.bmp";
 // Janela 1x2: esquerda = texto do console UART, direita = framebuffer do guest.
 static SDL_Rect      g_sdl_pane_left  = {0, 0, 720, 480};
 static SDL_Rect      g_sdl_pane_right = {720, 0, 720, 480};
+// Definida junto do contador de escritas do framebuffer (usada pelo dirty check do FB).
+u64 fb_writes_count();
 
 static void sdl_open() {
     // O usuario pediu Wayland: se ninguem escolheu driver, forca wayland.
@@ -1065,7 +1067,6 @@ static bool sdl_draw_fb(uc_engine* uc) {
     // Vblank "de verdade" nao existe aqui: quem manda no redesenho e' o limitador por
     // tempo do loop principal. E se o guest nao escreveu nada no framebuffer desde o
     // ultimo quadro, nem relê os 1,4MB: reusa o texture.
-    u64 fb_writes_count();
     static u64  last_drawn = 0;
     static bool fb_valid   = false;
     if (fb_valid && fb_writes_count() == last_drawn) return true;
@@ -1400,28 +1401,14 @@ void on_mdp_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
 static u64 g_fb_writes = 0;        // total de escritas na faixa do framebuffer
 static u64 g_fb_writes_nz = 0;     // quantas com valor != 0
 u64 fb_writes_count() { return g_fb_writes; }   // usado pelo redesenho (dirty check)
-// Janela de memoria da lista assincrona do EHCI (QH/qTD). Quando o endereco da lista e'
-// descoberto, o observador do USB habilita esta janela: as escritas do HCD aqui dentro
-// mostram exatamente o qTD que ele monta (token com Active, buffer, etc).
-static u32 g_usb_watch_lo = 0, g_usb_watch_hi = 0;
-static int g_usb_watch_log = 0;
-// Ultimo qTD alocado pelo HCD (capturado nos PCs de retorno de ehci_qtd_alloc dentro de
-// qh_urb_transaction) e de qual call site veio.
+// Ultimo qTD alocado pelo HCD, capturado nos PCs de retorno de ehci_qtd_alloc dentro de
+// qh_urb_transaction (ver ZEEBO_USB_ASYNC no observador da lista assincrona).
 static u32 g_usb_last_qtd = 0;
 static u32 g_usb_last_qtd_pc = 0;
 
 static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                              int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
-    // Escritas do HCD na regiao da lista assincrona: e' onde nasce o qTD (token com
-    // Active=1) que o "hardware" teria de executar.
-    if (g_usb_watch_lo && (u32)addr >= g_usb_watch_lo && (u32)addr < g_usb_watch_hi && g_usb_watch_log < 70) {
-        ++g_usb_watch_log;
-        u32 pc = 0;
-        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-        std::printf("[usb-qtd] W 0x%08x = 0x%08x (pc=0x%08x)\n", (u32)addr, (u32)value, pc);
-        std::fflush(stdout);
-    }
     ++g_fb_writes;
     if (value != 0) ++g_fb_writes_nz;
     if ((g_fb_writes + g_fb_writes_nz) < 4000u && value != 0 && g_fb_writes_nz <= 8) {
@@ -1443,14 +1430,12 @@ static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
         std::fflush(stdout);
         return;
     }
-    // Ler DFAR/DFSR (data abort) para descobrir o endereco que falhou.
-    u32 far = 0, fsr = 0;
+    // Ler DFAR (o endereco que faltou). O DFSR cru do Unicorn nao e' usado: injetamos
+    // um FSR sintetico no formato que o Linux/ARM1136 espera (fsr_use, abaixo).
+    u32 far = 0;
     uc_arm_cp_reg r_far = {15, 0, 0, 6, 0, 0, 0, 0};   // DFAR
-    uc_arm_cp_reg r_fsr = {15, 0, 0, 5, 0, 0, 0, 0};   // DFSR
-    uc_err ef = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_far);
-    uc_err es = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_fsr);
+    const uc_err ef = uc_reg_read(uc, UC_ARM_REG_CP_REG, &r_far);
     if (ef == UC_ERR_OK) far = (u32)r_far.val;
-    if (es == UC_ERR_OK) fsr = (u32)r_fsr.val;
 
     const bool is_swi  = (intno == 2u);
     const bool is_pabt = (intno == 3u);
@@ -2083,10 +2068,6 @@ void usb_async_poll(uc_engine* uc) {
     static int prints = 0;
     static u32 last_list = 0xffffffffu;
     static u32 calls = 0;
-    if (list && !g_usb_watch_lo) {           // descobre a regiao do pool: passa a observar
-        g_usb_watch_lo = list & ~0xffffu;    // o HCD aloca QH e qTD no mesmo pool
-        g_usb_watch_hi = g_usb_watch_lo + 0x20000u;
-    }
     // Amostra periodica (a lista muda rapido: o HCD escreve ASYNCLISTADDR antes de
     // montar os qTDs, entao imprimir so' na mudanca pegava a lista vazia).
     const bool sample = (list && ((calls++ & 7u) == 0u) && prints < 24) || (list != last_list && prints < 6);
@@ -2096,53 +2077,21 @@ void usb_async_poll(uc_engine* uc) {
         std::printf("[usb-async] ASYNCLISTADDR=0x%08x USBCMD=0x%08x USBSTS=0x%08x\n",
                     list, g_usb_regs[(0x140u & 0x1ffu) >> 2], g_usb_regs[(0x144u & 0x1ffu) >> 2]);
         if (list) {
-            u32 qh = list;
-            for (int n = 0; n < 4 && qh; ++n) {          // cadeia de QHs da lista async
-                u32 w[8];
-                if (uc_mem_read(uc, qh, w, sizeof(w)) != UC_ERR_OK) break;
-                const u32 tok = w[6];
-                std::printf("[usb-async]   qh[%d]@0x%08x next=0x%08x epc=0x%08x cur=0x%08x tok=0x%08x buf0=0x%08x active=%u pid=%u bytes=%u\n",
-                            n, qh, w[0], w[1], w[3], tok, w[7], (tok >> 7) & 1u, (tok >> 8) & 3u, (tok >> 16) & 0x7fffu);
-                // qTD ativo: no overlay (qh+0x10, que ja' tem o layout de qTD) ou no
-                // qTD corrente (0x0c, esse sim alinhado a 32 bytes)
-                u32 cand[2] = { qh + 0x10u, w[3] };
-                for (int c = 0; c < 2; ++c) {
-                    if (!cand[c]) continue;
-                    const u32 base = c ? (cand[c] & ~0x1fu) : cand[c];
-                    u32 q[8];
-                    if (uc_mem_read(uc, base, q, sizeof(q)) != UC_ERR_OK) continue;
-                    const u32 t = q[2];
-                    if (!((t >> 7) & 1u)) continue;
-                    std::printf("[usb-async]     ATIVO em %s: tok=0x%08x pid=%u bytes=%u buf0=0x%08x\n",
-                                c ? "hw_current" : "overlay", t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, q[3]);
-                    unsigned char b[8] = {0};
-                    if (q[3] && uc_mem_read(uc, q[3], b, sizeof(b)) == UC_ERR_OK)
-                        std::printf("[usb-async]     dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
-                }
-                const u32 nx = w[0];
-                qh = (nx & 1u) ? 0u : (nx & ~0x1fu);       // segue o proximo QH
-            }
+            u32 w[8];
+            if (uc_mem_read(uc, list, w, sizeof(w)) == UC_ERR_OK)
+                std::printf("[usb-async]   qh0: next=0x%08x info1=0x%08x cur=0x%08x next_qtd=0x%08x tok=0x%08x buf0=0x%08x\n",
+                            w[0], w[1], w[3], w[4], w[6], w[7]);
         }
         std::fflush(stdout);
     }
     if (!list) return;
-    // Varredura que roda em TODA amostragem (barata: 2 QHs x 2 candidatos) e procura
-    // qTD ativo -- ou seja, URB submetido e ainda nao completado, que e' o momento em
-    // que o "hardware" (nosso modelo) teria de executar a transferencia.
-    static int act_seen = 0;
-    // Lista de SOFTWARE do QH: struct ehci_qh = hw (0x00-0x2F) + list_head qtd_list
-    // (0x30); struct ehci_qtd = hw (0x00-0x1F) + list_head qtd_list (0x20) + ... .
-    // Essa lista o HCD mantem sempre populada (a sobreposicao de hardware so' e' escrita
-    // quando o HC fetcha), entao e' por ela que se ve a transferencia pendente.
-    static int sw_seen = 0, sw_calls = 0;
-    // qTD capturado no retorno de ehci_qtd_alloc: mostra a transferencia que o HCD esta'
-    // montando (token com PID/bytes e o primeiro buffer, que num control transfer e' o
-    // setup packet).
+    // qTD recem-alocado (capturado no retorno de ehci_qtd_alloc em qh_urb_transaction):
+    // mostra a transferencia que o HCD esta' montando. Num control transfer o primeiro
+    // qTD e' o SETUP, entao o buffer dele traz o setup packet.
     static u32 last_reported = 0;
     if (g_usb_last_qtd && g_usb_last_qtd != last_reported) {
         last_reported = g_usb_last_qtd;
-        u32 q[4] = {0, 0, 0, 0};
+        u32 q[2] = {0, 0};
         if (uc_mem_read(uc, g_usb_last_qtd + 0x08u, q, sizeof(q)) == UC_ERR_OK) {
             const u32 tok = q[0], buf = q[1];
             std::printf("[usb-qtd] qTD@0x%08x (ret pc=0x%08x) tok=0x%08x active=%u pid=%u bytes=%u buf=0x%08x\n",
@@ -2155,39 +2104,19 @@ void usb_async_poll(uc_engine* uc) {
             std::fflush(stdout);
         }
     }
-    if (list && sw_seen < 24 && ((sw_calls++ & 15u) == 0u)) {
-        u32 qh_w = list;
-        for (int n = 0; n < 4 && qh_w; ++n) {
-            u32 qln = 0;
-            if (uc_mem_read(uc, qh_w + 0x30u, &qln, 4) != UC_ERR_OK) break;
-            u32 qtd = qln - 0x20u;                 // base do primeiro qTD
-            for (int k = 0; k < 4 && qtd && qtd != qh_w + 0x30u; ++k) {
-                u32 q[4];
-                if (uc_mem_read(uc, qtd + 0x08u, q, sizeof(q)) != UC_ERR_OK) break;
-                const u32 tok = q[0];
-                const u32 buf = q[1];
-                std::printf("[usb-qtd] qh[%d]@0x%08x qtd[%d]@0x%08x tok=0x%08x active=%u pid=%u bytes=%u buf=0x%08x\n",
-                            n, qh_w, k, qtd, tok, (tok >> 7) & 1u, (tok >> 8) & 3u, (tok >> 16) & 0x7fffu, buf);
-                unsigned char b[8] = {0};
-                if (buf && uc_mem_read(uc, buf, b, sizeof(b)) == UC_ERR_OK)
-                    std::printf("[usb-qtd]   dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
-                std::fflush(stdout);
-                ++sw_seen;
-                u32 nxt = 0;
-                if (uc_mem_read(uc, qtd + 0x20u, &nxt, 4) != UC_ERR_OK) break;
-                qtd = nxt - 0x20u;
-            }
-            const u32 nx = 0;
-            if (uc_mem_read(uc, qh_w, &qh_w, 4) != UC_ERR_OK) break; (void)nx;
-        }
-    }
+    // Varredura que roda em TODA amostragem (barata: ate' 4 QHs x 2 candidatos) e procura
+    // qTD ativo -- URB submetido e ainda nao completado, que e' o momento em que o
+    // "hardware" (nosso modelo) teria de executar a transferencia. Nota: a qtd_list de
+    // software do HCD nao e' alcancavel por ASYNCLISTADDR (que aponta para o
+    // struct ehci_qh_hw, bloco DMA so' de hardware), entao o qTD em voo e' procurado no
+    // overlay do QH (qh+0x10..0x1c, mesmo layout de um qTD) e no qTD corrente.
+    static int act_seen = 0;
     if (act_seen < 8) {
-        u32 qh_w = list;
-        for (int n = 0; n < 4 && qh_w; ++n) {
+        u32 qh = list;
+        for (int n = 0; n < 4 && qh; ++n) {
             u32 w[8];
-            if (uc_mem_read(uc, qh_w, w, sizeof(w)) != UC_ERR_OK) break;
-            u32 cand[2] = { qh_w + 0x10u, w[3] };
+            if (uc_mem_read(uc, qh, w, sizeof(w)) != UC_ERR_OK) break;
+            u32 cand[2] = { qh + 0x10u, w[3] };
             for (int c = 0; c < 2; ++c) {
                 if (!cand[c]) continue;
                 const u32 base = c ? (cand[c] & ~0x1fu) : cand[c];
@@ -2197,7 +2126,7 @@ void usb_async_poll(uc_engine* uc) {
                 if (!((t >> 7) & 1u)) continue;
                 ++act_seen;
                 std::printf("[usb-async] ATIVO qh[%d]@0x%08x via %s: tok=0x%08x pid=%u bytes=%u buf0=0x%08x\n",
-                            n, qh_w, c ? "hw_current" : "overlay", t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, q[3]);
+                            n, qh, c ? "hw_current" : "overlay", t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, q[3]);
                 unsigned char b[8] = {0};
                 if (q[3] && uc_mem_read(uc, q[3], b, sizeof(b)) == UC_ERR_OK)
                     std::printf("[usb-async]   setup/dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -2205,38 +2134,8 @@ void usb_async_poll(uc_engine* uc) {
                 std::fflush(stdout);
             }
             const u32 nx = w[0];
-            qh_w = (nx & 1u) ? 0u : (nx & ~0x1fu);
+            qh = (nx & 1u) ? 0u : (nx & ~0x1fu);
         }
-    }
-    u32 qh = list;
-    for (int i = 0; i < 4 && qh; i++) {
-        u32 epc = 0, token = 0, buf0 = 0, cur = 0;
-        if (uc_mem_read(uc, qh + 0x04, &epc, 4)   != UC_ERR_OK) break;
-        if (uc_mem_read(uc, qh + 0x0c, &cur, 4)   != UC_ERR_OK) break;
-        if (uc_mem_read(uc, qh + 0x18, &token, 4) != UC_ERR_OK) break;
-        if (uc_mem_read(uc, qh + 0x1c, &buf0, 4)  != UC_ERR_OK) break;
-        if (token & 0x80u) {                                   // Active
-            const char* pid = ((token >> 8) & 3) == 0 ? "OUT" : ((token >> 8) & 3) == 1 ? "IN" : "SETUP";
-            u32 bytes = (token >> 16) & 0x7fffu;
-            static u32 last_qh = 0, last_tok = 0;
-            if (qh != last_qh || token != last_tok) {
-                last_qh = qh; last_tok = token;
-                printf("[usb-async] qh=0x%08x ep=%u dev=%u %s bytes=%u buf=0x%08x cur=0x%08x\n",
-                       qh, epc & 0xf, (epc >> 8) & 0x7f, pid, bytes, buf0, cur);
-                if (bytes && buf0) {
-                    unsigned char b[16] = {0};
-                    if (uc_mem_read(uc, buf0, b, sizeof(b)) == UC_ERR_OK) {
-                        printf("[usb-async]   dados:");
-                        for (int k = 0; k < (int)(bytes < 16 ? bytes : 16); k++) printf(" %02x", b[k]);
-                        printf("\n");
-                    }
-                }
-            }
-        }
-        u32 next = 0;
-        if (uc_mem_read(uc, qh, &next, 4) != UC_ERR_OK) break;
-        qh = next & ~0x1fu;                                    // H bit limpo = proximo
-        if (qh == list) break;
     }
 }
 
