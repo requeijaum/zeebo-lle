@@ -77,25 +77,28 @@ os acessos caíram para **404** e o reset completa.
 
 ## Estado verificado
 
-Com `ZEEBO_USB=1` no harness (que acrescenta `zeebo_usb=1` na cmdline):
+Duas correções no modelo de registradores do harness destravaram o caminho:
+
+1. o modelo **não escrevia** as leituras na memória do guest (VIC e UART escrevem).
+   O kernel lia zero no CAPLENGTH, calculava `HC_LENGTH = 0` e portanto acreditava que
+   o USBCMD ficava em `0x100` (e não em `0x140`, como no mapa do MSM);
+2. o HCRESET (USBCMD bit 1) só era limpo em `0x140`. Como o kernel escrevia em
+   `0x100`, a memória devolvia 2 para sempre e o `ehci_reset` ficava ~180 mil leituras
+   no handshake até estourar o timeout (medido: `handshake` com `mask=0x2 done=0x0`).
+
+Depois disso, no guest:
 
 ```
-msm_hsusb: LLE probe: 1 entrou (irq=47)
-msm_hsusb: no transceiver; continuing without PHY (LLE)
 msm_hsusb: LLE probe: 2 usb_add_hcd (irq=47)
 msm_hsusb: Qualcomm On-Chip EHCI Host Controller
 msm_hsusb: new USB bus registered, assigned bus number 1
 ```
 
-E, com o modelo de registradores corrigido, o `ehci-hcd` passa do reset (404 acessos
-USB no total, nenhum poll infinito). **Mas o boot ainda para logo depois**: o
-trabalho seguinte é a enumeração do root hub, que submete transferências pelo
-caminho assíncrono do EHCI (qTD/qH na RAM do guest) — e aí o guest está em polling
-**sem tocar em registrador USB nenhum**, o que confirma que o que falta é ler/escrever
-essas estruturas na RAM, não mais MMIO.
+e os contadores de execução (env `ZEEBO_USB_LOG=1`) mostram o HCD de fato iniciando:
+`ehci_reset=1 handshake=1 ehci_run=1 ehci_hub_ctrl=5 hub_thread=1 msleep=2`.
 
-Por isso o bring-up ficou atrás de `zeebo_usb=1`: sem ele o boot padrão segue
-limpo (shell + framebuffer + SDL2) — verificado com o mesmo zImage commitado.
+**O boot completa até a shell com o host controller rodando** (`uname -a`, `echo`
+respondem normalmente). O host controller entra por padrão; `ZEEBO_NOUSB=1` desliga.
 
 ## Onde exatamente mexer para entregar a IRQ 47 (mapeado no código)
 
@@ -116,22 +119,16 @@ já são tratadas: falta só a seleção/entrega considerar a palavra 1 e devolv
 
 ## Próximo passo (para enumerar o teclado HID)
 
-1. **entregar a IRQ 47 (INT_USB_HS)**: o modelo de VIC do harness só entrega IRQs
-   0-31, mas o USB HS usa a 47. O URB completion do EHCI depende do `ehci_irq`, então
-   isso casa com o sintoma observado (o boot para sem tocar em registrador USB
-   nenhum, o que é espera, não polling de MMIO). Primeiro passo concreto: estender a
-   entrega do VIC para a segunda palavra (IRQs 32-63) e ver se o root hub avança;
-2. instrumentar o que o kernel espera: com a 47 entregue, ver se aparecem qTD/qH na
-   RAM (o harness já tem o observador `ZEEBO_USB_ASYNC=1`, que caminha a lista
-   assíncrona e imprime endpoint/PID/bytes/buffer + os primeiros bytes). Hoje ele
-   imprime zero transferências ativas — ou seja, o HCD ainda não chegou a submeter;
-3. modelar aí a lista assíncrona: ler os `qTD`/`qH` da RAM do guest, completar as
-   transferências (device descriptor → set address → config descriptor → HID report
-   descriptor → interrupt IN) e emular o teclado HID na porta 1 (`PORTSC` com
-   `CCS=1` + reset/enable da porta). Aí o `usbhid` faz o bind e o guest lista o
-   dispositivo em `/sys/bus/usb/devices` — que é o critério do objetivo.
+O host controller já sobe e o boot completa; falta o **dispositivo**:
 
-Observador já pronto no harness (env `ZEEBO_USB_ASYNC=1`): caminha a lista
-assíncrona, imprime `ep/dev/PID/bytes/buffer` da transferência ativa e os primeiros
-16 bytes do buffer — é ele que vai mostrar o setup packet da enumeração quando o
-HCD começar a submeter.
+1. emular o teclado HID na porta 1: hoje `PORTSC` responde `0x1000` (só PP, `CCS=0`,
+   ou seja "nada conectado"). Precisa reportar `CCS=1` e atender o reset/enable da
+   porta em `ehci_hub_control` (que já roda, `ehci_hub_ctrl=5` no último run);
+2. completar as transferências: ler os `qTD`/`qH` da RAM do guest, escrever de volta
+   status/bytes transferidos e levantar `USBSTS.USBINT`. O observador
+   `ZEEBO_USB_ASYNC=1` já caminha a lista e imprime endpoint/PID/bytes/buffer + os
+   primeiros bytes do setup packet. **Nesta etapa a IRQ 47 passa a ser necessária** —
+   ver a seção acima com os dois pontos do VIC que hoje só olham a palavra 0;
+3. com os descritores respondidos (device → set address → config → HID report) e o
+   interrupt IN funcionando, o `usbhid` faz o bind e o guest lista o dispositivo em
+   `/sys/bus/usb/devices` — que é o critério do objetivo.

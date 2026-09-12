@@ -1662,6 +1662,31 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
             break;
         }
     }
+    // Estrutura do bring-up USB: quantas vezes cada peca roda. O boot trava logo
+    // apos "new USB bus registered" e o unico acesso a registrador e' o handshake do
+    // HCRESET repetido -- estes contadores dizem quem esta' repetindo.
+    static const bool usb_cnt_on = (std::getenv("ZEEBO_USB_LOG") != nullptr);
+    if (usb_cnt_on) {
+        static const u32 kUsb[] = {0xc01893ccu, 0xc0189720u, 0xc017a354u, 0xc0174ff8u,
+                                   0xc0173564u, 0xc0176598u, 0xc0178da0u, 0xc018f740u,
+                                   0xc018d0dcu, 0xc0224b80u, 0xc0023edcu};
+        static const char* kUsbName[] = {"handshake", "ehci_reset", "usb_add_hcd",
+                                         "hub_port_init", "hub_port_reset", "hub_thread",
+                                         "hcd_poll_rh", "ehci_run", "ehci_hub_ctrl",
+                                         "sched_timeout", "msleep"};
+        static u32 usb_cnt[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        for (u32 k = 0; k < 11u; ++k) {
+            if (static_cast<u32>(addr) == kUsb[k]) { ++usb_cnt[k]; break; }
+        }
+        static u64 last_report = 0;
+        if (g_icount - last_report > 33000000ull) {           // relatorio rolante
+            last_report = g_icount;
+            std::printf("[usb-cnt] insn=%llu", (unsigned long long)g_icount);
+            for (u32 k = 0; k < 11u; ++k) std::printf(" %s=%u", kUsbName[k], usb_cnt[k]);
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+    }
     // Cadeia do fbcon: quem realmente desenha no framebuffer?
     {
         static const u32 kDraw[] = {0xc012b17cu, 0xc01217f0u, 0xc0128544u, 0xc0126438u, 0xc0123bccu, 0xc0129e04u};
@@ -1770,8 +1795,13 @@ static void on_usb_write(uc_engine* uc, uc_mem_type type, u64 addr, int size, i6
     (void)uc; (void)type; (void)ud; (void)size;
     u32 off = (u32)(addr & 0xfffu);
     u32 v   = (u32)value;
-    if ((off & ~0x3u) == 0x140u) {
-        v &= ~0x2u;                          // USBCMD.HCRESET: o hardware limpa sozinho
+    // HCRESET (USBCMD bit 1) some sozinho quando o hardware aceita o reset. Neste
+    // kernel o driver faz `ehci->caps = MSM_USB_BASE + 0x100` e o core deriva os
+    // operacionais de `caps + CAPLENGTH`, entao o USBCMD que ele escreve/lê e' 0x100
+    // (e nao 0x140, como no mapa do MSM). Sem limpar aqui o guest fica no handshake
+    // do reset lendo 2 para sempre (~180k leituras ate' estourar o timeout).
+    if ((off & ~0x3u) == 0x100u || (off & ~0x3u) == 0x140u) {
+        v &= ~0x2u;
     }
     if (g_usb_log) printf("[usb] w 0x%03x <- 0x%08x\n", off, v);
     g_usb_regs[(off & 0x1ffu) >> 2] = v;
@@ -1782,9 +1812,21 @@ static void on_usb_read(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64
     u32 off = (u32)(addr & 0xfffu);
     u32 v   = usb_reg_read(off);
     static u32 n_reads = 0;
-    if (g_usb_log && (n_reads++ < 400 || (n_reads & 0x3FFFu) == 0))
-        printf("[usb] read 0x%03x -> 0x%08x\n", off, v);
+    if (g_usb_log && (n_reads < 40 || (n_reads & 0x3FFFu) == 0)) {
+        u32 pc = 0, lr = 0, r4 = 0, r6 = 0, r8 = 0;
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+        uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+        uc_reg_read(uc, UC_ARM_REG_R8, &r8);
+        printf("[usb] read 0x%03x -> 0x%08x (pc=0x%08x lr=0x%08x mask=0x%08x done=0x%08x)\n",
+               off, v, pc, lr, r6, r8);
+    }
+    ++n_reads;
+    // Serve a leitura de verdade: sem escrever na memoria do guest o kernel lia zero
+    // no CAPLENGTH (HC_LENGTH = 0) e derivava o USBCMD errado (0x100 em vez de 0x140).
     g_usb_regs[(off & 0x1ffu) >> 2] = v;
+    uc_mem_write(uc, (u32)addr, &v, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -2049,7 +2091,10 @@ int main(int argc, char** argv) {
         // zeebo_usb=1 liga o bring-up do host controller EHCI no kernel (o caminho
         // de transferencia USB ainda nao esta' modelado, entao por padrao fica off).
         std::string cmdline = "console=ttyMSM2,115200n8 earlyprintk=msm_serial,0xa9c00000 mem=64M lpj=2629632 init=/init";
-        if (std::getenv("ZEEBO_USB")) cmdline += " zeebo_usb=1";
+        // O host controller EHCI entra por padrao (ZEEBO_NOUSB=1 desliga): com o modelo
+        // de registradores servindo as leituras, o reset completa, o HCD inicia e o boot
+        // segue ate' a shell normalmente.
+        if (!std::getenv("ZEEBO_NOUSB")) cmdline += " zeebo_usb=1";
         size_t clen = cmdline.size() + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
