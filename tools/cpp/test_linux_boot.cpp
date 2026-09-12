@@ -37,6 +37,8 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <unistd.h>          // read/isatty: entrada de teclado -> RX da UART
+#include <sys/select.h>
 #include <unicorn/unicorn.h>
 
 using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; using i64 = int64_t;
@@ -123,6 +125,48 @@ static bool g_irq_log        = false;
 
 static inline u32 uart_irq_of(int idx) { return (idx == 0) ? 10u : ((idx == 1) ? UART2_IRQ : 12u); }
 
+// --- Entrada de teclado -> RX da UART --------------------------------------
+// O guest le o caractere em 0x0c (RF) e ve RX_READY (SR bit 0). O driver so
+// consome no ISR, entao a chegada de dado tambem levanta a IRQ da UART.
+static std::string g_rx_buf;          // bytes a entregar (stdin ou script)
+static bool g_stdin_tty   = false;    // stdin e' tty: ler sob demanda com select
+static bool g_rx_staged   = false;    // caractere atual visivel em RF
+static char g_rx_char     = 0;
+static bool g_uart_tx_irq = false;
+static bool g_uart_rx_irq = false;
+
+static void uart_update_irq() {
+    const u32 bit = 1u << UART2_IRQ;
+    if (g_uart_tx_irq || g_uart_rx_irq) g_vic_pending[0] |= bit;
+    else                                g_vic_pending[0] &= ~bit;
+}
+
+static void rx_fill_from_host() {
+    if (!g_stdin_tty || !g_rx_buf.empty() || g_rx_staged) return;
+    fd_set rf;
+    FD_ZERO(&rf);
+    FD_SET(0, &rf);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    if (select(1, &rf, nullptr, nullptr, &tv) <= 0) return;
+    char c = 0;
+    if (read(0, &c, 1) == 1) g_rx_buf.push_back(c);
+}
+
+static void rx_try_stage() {
+    if (g_rx_staged || g_rx_buf.empty()) return;
+    // so levanta IRQ de RX se o driver habilitou RXLEV/RXSTALE
+    if ((g_uart_imr[1] & ((1u << 4) | (1u << 3))) == 0u) return;
+    g_rx_char = g_rx_buf.front();
+    g_rx_buf.erase(0, 1);
+    g_rx_staged = true;
+    g_uart_rx_irq = true;
+    uart_update_irq();
+    if (g_uart_log)
+        std::printf("[rx] entregando 0x%02x\n", (unsigned char)g_rx_char);
+}
+
 static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                          int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
@@ -181,11 +225,12 @@ void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
     } else if (off == UART_OFF_IMR) {          // mascara de interrupcao
         const int i = uart_idx(base);
         g_uart_imr[i] = (u32)value;
-        // TXLEV habilitado = o driver quer a IRQ de TX (handle_tx escreve a FIFO
-        // so quando o ISR roda). Marcamos a linha no VIC; o kernel faz o ack.
-        const u32 bit = 1u << uart_irq_of(i);
-        if ((u32)value & UART_IMR_TXLEV) g_vic_pending[0] |= bit;
-        else                             g_vic_pending[0] &= ~bit;
+        // TXLEV habilitado = o driver tem dado para enviar e espera a IRQ de TX
+        // (handle_tx escreve a FIFO so quando o ISR roda).
+        if (i == 1) {
+            g_uart_tx_irq = ((u32)value & UART_IMR_TXLEV) != 0u;
+            uart_update_irq();
+        }
     }
 }
 
@@ -200,6 +245,14 @@ bool on_uart_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     u32 val = 0;
     if (off == UART_OFF_SR) {
         val = UART_SR_TX_EMPTY | UART_SR_TX_READY;
+        if (g_rx_staged) val |= 0x1u;          // UART_SR_RX_READY (1<<0)
+    } else if (off == UART_OFF_TF) {           // leitura de 0x0c = RF (FIFO de RX)
+        if (g_rx_staged) {
+            val = (u32)(unsigned char)g_rx_char;
+            g_rx_staged = false;
+            g_uart_rx_irq = false;
+            uart_update_irq();
+        }
     } else if (off == UART_OFF_IMR) {          // leitura de 0x14 = ISR
         val = UART_ISR_TX_READY;
     } else if (off == UART_OFF_CR) {           // leitura de 0x10 = MISR (mascarado)
@@ -926,6 +979,9 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
             return;
         }
     }
+    // Entrada do host (teclado/pipe) -> RX da UART do guest.
+    if ((g_icount & 0x3FFFu) == 0u) rx_fill_from_host();
+    rx_try_stage();
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
         static int ucount = 0;
@@ -1335,6 +1391,15 @@ int main(int argc, char** argv) {
 
     uc_hook hw = 0, hr = 0, hc = 0;
     g_uart_log = (std::getenv("ZEEBO_UART_LOG") != nullptr);   // traco dos acessos a UART
+    // Entrada de teclado -> RX da UART: pipe/arquivo entra de uma vez; tty usa select.
+    if (!isatty(0)) {
+        char c = 0;
+        while (read(0, &c, 1) == 1) g_rx_buf.push_back(c);
+        if (!g_rx_buf.empty())
+            std::printf("[rx] %zu bytes de entrada do host na fila da UART\n", g_rx_buf.size());
+    } else {
+        g_stdin_tty = true;
+    }
     g_irq_log  = (std::getenv("ZEEBO_IRQ_LOG") != nullptr);    // traco de VIC/IRQ
     // VIC: modelo dos registradores usados pelo entry-macro e pelo irq_chip.
     uc_hook hvw = 0, hvr = 0;
