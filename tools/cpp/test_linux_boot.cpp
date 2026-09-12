@@ -1405,6 +1405,10 @@ u64 fb_writes_count() { return g_fb_writes; }   // usado pelo redesenho (dirty c
 // mostram exatamente o qTD que ele monta (token com Active, buffer, etc).
 static u32 g_usb_watch_lo = 0, g_usb_watch_hi = 0;
 static int g_usb_watch_log = 0;
+// Ultimo qTD alocado pelo HCD (capturado nos PCs de retorno de ehci_qtd_alloc dentro de
+// qh_urb_transaction) e de qual call site veio.
+static u32 g_usb_last_qtd = 0;
+static u32 g_usb_last_qtd_pc = 0;
 
 static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                              int size, int64_t value, void* ud) {
@@ -1851,6 +1855,21 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     // apos "new USB bus registered" e o unico acesso a registrador e' o handshake do
     // HCRESET repetido -- estes contadores dizem quem esta' repetindo.
     static const bool usb_cnt_on = (std::getenv("ZEEBO_USB_LOG") != nullptr);
+    // qTD recem-alocado: o HCD chama ehci_qtd_alloc e usa r0; capturamos o ponteiro nos
+    // PCs de retorno (0xc018ed98/0xc018eeb0/0xc018f064/0xc018f0ec em qh_urb_transaction)
+    // para depois ler o token/PID/buffer da transferencia pendente.
+    static const bool usb_qtd_on = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
+    if (usb_qtd_on) {
+        static const u32 kRet[] = {0xc018ed98u, 0xc018eeb0u, 0xc018f064u, 0xc018f0ecu};
+        for (u32 k = 0; k < 4; ++k) {
+            if (static_cast<u32>(addr) != kRet[k]) continue;
+            u32 r0 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            g_usb_last_qtd = r0;
+            g_usb_last_qtd_pc = kRet[k];
+            break;
+        }
+    }
     if (usb_cnt_on) {
         static const u32 kUsb[] = {
             0xc01893ccu, 0xc0189720u, 0xc017a354u, 0xc0174ff8u, 0xc0173564u,
@@ -2112,30 +2131,55 @@ void usb_async_poll(uc_engine* uc) {
     // qTD ativo -- ou seja, URB submetido e ainda nao completado, que e' o momento em
     // que o "hardware" (nosso modelo) teria de executar a transferencia.
     static int act_seen = 0;
-    // Varredura por token ATIVO em todo o pool (o HCD pode alocar os qTDs fora da
-    // cadeia que eu sigo): token ativo = bit7, PID 0..2 e total bytes > 0.
-    if (g_usb_watch_lo && act_seen < 10) {
-        std::vector<u8> pool(0x20000u);
-        if (uc_mem_read(uc, g_usb_watch_lo, pool.data(), pool.size()) == UC_ERR_OK) {
-            for (size_t o = 0; o + 32 <= pool.size(); o += 4) {
-                u32 t; std::memcpy(&t, &pool[o + 8], 4);
-                const u32 tb = (t >> 16) & 0x7fffu;
-                if (!(t & 0x80u)) continue;
-                if (((t >> 8) & 3u) > 2u) continue;
-                // qTD de verdade: bytes plausiveis (setup 8, control/descriptor <= 1024)
-                // -- sem isso a varredura casa com ponteiros do kernel (falso positivo).
-                if (tb == 0u || tb > 1024u) continue;
-                ++act_seen;
-                u32 buf; std::memcpy(&buf, &pool[o + 12], 4);
-                std::printf("[usb-qtd] ATIVO em pool+0x%zx: tok=0x%08x pid=%u bytes=%u buf=0x%08x\n",
-                            o, t, (t >> 8) & 3u, (t >> 16) & 0x7fffu, buf);
+    // Lista de SOFTWARE do QH: struct ehci_qh = hw (0x00-0x2F) + list_head qtd_list
+    // (0x30); struct ehci_qtd = hw (0x00-0x1F) + list_head qtd_list (0x20) + ... .
+    // Essa lista o HCD mantem sempre populada (a sobreposicao de hardware so' e' escrita
+    // quando o HC fetcha), entao e' por ela que se ve a transferencia pendente.
+    static int sw_seen = 0, sw_calls = 0;
+    // qTD capturado no retorno de ehci_qtd_alloc: mostra a transferencia que o HCD esta'
+    // montando (token com PID/bytes e o primeiro buffer, que num control transfer e' o
+    // setup packet).
+    static u32 last_reported = 0;
+    if (g_usb_last_qtd && g_usb_last_qtd != last_reported) {
+        last_reported = g_usb_last_qtd;
+        u32 q[4] = {0, 0, 0, 0};
+        if (uc_mem_read(uc, g_usb_last_qtd + 0x08u, q, sizeof(q)) == UC_ERR_OK) {
+            const u32 tok = q[0], buf = q[1];
+            std::printf("[usb-qtd] qTD@0x%08x (ret pc=0x%08x) tok=0x%08x active=%u pid=%u bytes=%u buf=0x%08x\n",
+                        g_usb_last_qtd, g_usb_last_qtd_pc, tok, (tok >> 7) & 1u, (tok >> 8) & 3u,
+                        (tok >> 16) & 0x7fffu, buf);
+            unsigned char b[8] = {0};
+            if (buf && uc_mem_read(uc, buf, b, sizeof(b)) == UC_ERR_OK)
+                std::printf("[usb-qtd]   dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+            std::fflush(stdout);
+        }
+    }
+    if (list && sw_seen < 24 && ((sw_calls++ & 15u) == 0u)) {
+        u32 qh_w = list;
+        for (int n = 0; n < 4 && qh_w; ++n) {
+            u32 qln = 0;
+            if (uc_mem_read(uc, qh_w + 0x30u, &qln, 4) != UC_ERR_OK) break;
+            u32 qtd = qln - 0x20u;                 // base do primeiro qTD
+            for (int k = 0; k < 4 && qtd && qtd != qh_w + 0x30u; ++k) {
+                u32 q[4];
+                if (uc_mem_read(uc, qtd + 0x08u, q, sizeof(q)) != UC_ERR_OK) break;
+                const u32 tok = q[0];
+                const u32 buf = q[1];
+                std::printf("[usb-qtd] qh[%d]@0x%08x qtd[%d]@0x%08x tok=0x%08x active=%u pid=%u bytes=%u buf=0x%08x\n",
+                            n, qh_w, k, qtd, tok, (tok >> 7) & 1u, (tok >> 8) & 3u, (tok >> 16) & 0x7fffu, buf);
                 unsigned char b[8] = {0};
                 if (buf && uc_mem_read(uc, buf, b, sizeof(b)) == UC_ERR_OK)
                     std::printf("[usb-qtd]   dados: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
                 std::fflush(stdout);
-                if (act_seen >= 10) break;
+                ++sw_seen;
+                u32 nxt = 0;
+                if (uc_mem_read(uc, qtd + 0x20u, &nxt, 4) != UC_ERR_OK) break;
+                qtd = nxt - 0x20u;
             }
+            const u32 nx = 0;
+            if (uc_mem_read(uc, qh_w, &qh_w, 4) != UC_ERR_OK) break; (void)nx;
         }
     }
     if (act_seen < 8) {

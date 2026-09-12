@@ -124,10 +124,27 @@ giveback=62 ehci_work=408 qh_completions=416 ehci_irq=0`.
 
 Ou seja: **falta o motor de transferência** (executar os qTD da lista assíncrona,
 escrever status/bytes de volta, levantar `USBSTS.USBINT` e entregar a IRQ 47), mais
-os descritores do teclado HID. A varredura por token ativo no pool (`ZEEBO_USB_ASYNC=1`)
-ainda não localizou o qTD em voo: a sobreposição do QH estava idle nas amostragens e
-a varredura de 128KB dá falso positivo com ponteiros do kernel (foi apertada para
-exigir `total bytes` entre 1 e 1024).
+os descritores do teclado HID.
+
+Duas descobertas de estrutura, para não repetir o caminho:
+
+1. `ASYNCLISTADDR` aponta para o **`struct ehci_qh_hw`** (bloco DMA de 48 bytes, só a
+   parte de hardware). A `qtd_list` de software fica no `struct ehci_qh` (kzalloc'd),
+   em outro endereço -- por isso ler `qh+0x30` devolve zero e a lista de qTD não é
+   alcançável por ali;
+2. o HCD prepara a transferência com `hw_qtd_next` (qh+0x10) e deixa a sobreposição
+   inativa; quem "fetcha" o qTD é o hardware. Então o motor tem de olhar
+   `hw_qtd_next`/`hw_current`, executar o qTD apontado e escrever o resultado na
+   sobreposição.
+
+**Atenção antes de confiar em instrumento por PC**: os contadores de entrada
+(`ehci_urb_enqueue`, `qh_urb_transaction`, `ehci_qtd_alloc`) disparam normalmente
+(16/16/49 no último run), mas um watch nos PCs de **retorno** de `ehci_qtd_alloc`
+dentro de `qh_urb_transaction` (0xc018ed98, 0xc018eeb0, 0xc018f064, 0xc018f0ec, tirados
+do `objdump` do `vmlinux` do container) **nunca disparou**. Como as duas coisas vêm da
+mesma função, o próximo passo é validar o mapeamento PC↔símbolo antes de usar PC como
+instrumento: ler os bytes de `0xc018ed78` da memória do guest e comparar com o
+`objdump` do `vmlinux` do container.
 
 ## Onde exatamente mexer para entregar a IRQ 47 (mapeado no código)
 
