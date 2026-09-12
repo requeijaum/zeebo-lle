@@ -62,6 +62,19 @@ static struct platform_driver ehci_msm_driver = {
 	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
 ```
 
+## Modelo do EHCI no harness (registradores)
+
+O driver faz `ehci->caps = MSM_USB_BASE + 0x100` (USB_CAPLENGTH) e o core deriva os
+operacionais de `caps + CAPLENGTH`; para USBCMD cair em `0x140` — como o
+`msm_hsusb_hw.h` define (USBCMD 0x140, USBSTS 0x144, USBINTR 0x148, PORTSC 0x184,
+USBMODE 0x1A8) — o **CAPLENGTH tem que ser 0x40**. O `ehci_setup` do core ainda
+recalcula `ehci->caps = hcd->regs` (base `0xa0800000`) e lê o capbase ali, então o
+modelo responde as capacidades nos **dois** endereços (`0x000` e `0x100`).
+
+Sintoma que isso causava antes: `ehci_reset` ficava **130.261 leituras em polling**
+em `0x100` esperando o HCRESET cair (o modelo devolvia lixo ali). Depois da correção
+os acessos caíram para **404** e o reset completa.
+
 ## Estado verificado
 
 Com `ZEEBO_USB=1` no harness (que acrescenta `zeebo_usb=1` na cmdline):
@@ -74,14 +87,15 @@ msm_hsusb: Qualcomm On-Chip EHCI Host Controller
 msm_hsusb: new USB bus registered, assigned bus number 1
 ```
 
-O `ehci-hcd` fala com o nosso modelo de registradores em `0xa0800000`
-(130.265 acessos no run). **Mas o boot trava logo depois**: a enumeração do root
-hub submete transferências pelo caminho assíncrono do EHCI (qTD/qH na RAM do
-guest) e esse caminho ainda **não** está modelado — o driver fica em polling.
+E, com o modelo de registradores corrigido, o `ehci-hcd` passa do reset (404 acessos
+USB no total, nenhum poll infinito). **Mas o boot ainda para logo depois**: o
+trabalho seguinte é a enumeração do root hub, que submete transferências pelo
+caminho assíncrono do EHCI (qTD/qH na RAM do guest) — e aí o guest está em polling
+**sem tocar em registrador USB nenhum**, o que confirma que o que falta é ler/escrever
+essas estruturas na RAM, não mais MMIO.
 
 Por isso o bring-up ficou atrás de `zeebo_usb=1`: sem ele o boot padrão segue
-limpo (shell + framebuffer + SDL2). Com `ZEEBO_USB=1` o boot vai até
-"new USB bus registered" e para aí.
+limpo (shell + framebuffer + SDL2) — verificado com o mesmo zImage commitado.
 
 ## Próximo passo (para enumerar o teclado HID)
 

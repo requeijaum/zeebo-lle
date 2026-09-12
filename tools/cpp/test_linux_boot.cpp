@@ -1737,19 +1737,28 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
 // aborta ("can't find host controller"). Modelamos o minimo: CAPLENGTH/
 // HCIVERSION/HCSPARAMS/HCCPARAMS + os operacionais, com HCRESET se limpando no
 // write (ehci_reset escreve e fica em polling ate' o bit cair).
-// Layout EHCI: 0x00 CAPLENGTH(u8)+HCIVERSION(u16), 0x04 HCSPARAMS, 0x08 HCCPARAMS,
-// 0x20 USBCMD, 0x24 USBSTS, 0x28 USBINTR, 0x2c FRINDEX, 0x34 PERIODICLISTBASE,
-// 0x38 ASYNCLISTADDR, 0x40 CONFIGFLAG, 0x44+ PORTSC (1 porta no HCSPARAMS).
-static u32 g_usb_regs[0x100 / 4];
+// Layout: o driver faz `ehci->caps = MSM_USB_BASE + 0x100` (USB_CAPLENGTH) e o core
+// deriva os operacionais de `caps + CAPLENGTH`. Para USBCMD cair em 0x140 (como o
+// msm_hsusb_hw.h define: USBCMD 0x140, PORTSC 0x184, USBMODE 0x1A8) o CAPLENGTH tem
+// que ser 0x40. Antes o modelo respondia 0/lixo ali e o `ehci_reset` ficava 130 mil
+// leituras em polling esperando o HCRESET cair.
+static u32 g_usb_regs[0x200 / 4];
 static bool g_usb_log = false;
 
 static u32 usb_reg_read(u32 off) {
     switch (off & ~0x3u) {
-    case 0x00: return 0x01000020u;           // HCIVERSION=0x0100 (EHCI 1.0), CAPLENGTH=0x20
-    case 0x04: return 0x00000011u;           // N_PORTS=1 (bits 0-3), PPC=1 (bit 4)
-    case 0x08: return 0x00000006u;           // HCCPARAMS: lista de frames programavel
-    case 0x44: return 0x00001000u;           // PORTSC1: PP (bit 12), sem dispositivo (CCS=0)
-    default:   return g_usb_regs[(off & 0xffu) >> 2];
+    // O driver faz `ehci->caps = MSM_USB_BASE + 0x100`, mas o ehci_setup do core
+    // refaz `ehci->caps = hcd->regs` (base 0xa0800000) e le' o capbase ali. Como o
+    // wrapper do MSM espelha o bloco, respondemos as capacidades nos dois.
+    case 0x000: return 0x01000040u;          // HC_CAPBASE (espelho): caplen 0x40, versao 1.0
+    case 0x004: return 0x00000011u;
+    case 0x008: return 0x00000006u;
+    case 0x100: return 0x01000040u;          // CAPLENGTH=0x40, HCIVERSION=0x0100 (EHCI 1.0)
+    case 0x104: return 0x00000011u;          // HCSPARAMS: N_PORTS=1, PPC=1
+    case 0x108: return 0x00000006u;          // HCCPARAMS: lista de frames programavel
+    case 0x10c: return 0x00000000u;          // HCSP-PORTROUTE
+    case 0x184: return 0x00001000u;          // PORTSC1: PP (bit 12); sem dispositivo (CCS=0)
+    default:    return g_usb_regs[(off & 0x1ffu) >> 2];
     }
 }
 
@@ -1757,19 +1766,21 @@ static void on_usb_write(uc_engine* uc, uc_mem_type type, u64 addr, int size, i6
     (void)uc; (void)type; (void)ud; (void)size;
     u32 off = (u32)(addr & 0xfffu);
     u32 v   = (u32)value;
-    if ((off & ~0x3u) == 0x20u) {
-        v &= ~0x2u;                          // USBCMD.HCRESET: hardware limpa sozinho
-        if (g_usb_log) printf("[usb] USBCMD <- 0x%08x\n", v);
+    if ((off & ~0x3u) == 0x140u) {
+        v &= ~0x2u;                          // USBCMD.HCRESET: o hardware limpa sozinho
     }
-    g_usb_regs[(off & 0xffu) >> 2] = v;
+    if (g_usb_log) printf("[usb] w 0x%03x <- 0x%08x\n", off, v);
+    g_usb_regs[(off & 0x1ffu) >> 2] = v;
 }
 
 static void on_usb_read(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value, void* ud) {
     (void)uc; (void)type; (void)value; (void)ud; (void)size;
     u32 off = (u32)(addr & 0xfffu);
     u32 v   = usb_reg_read(off);
-    if (g_usb_log) printf("[usb] read 0x%03x -> 0x%08x\n", off, v);
-    g_usb_regs[(off & 0xffu) >> 2] = v;
+    static u32 n_reads = 0;
+    if (g_usb_log && (n_reads++ < 400 || (n_reads & 0x3FFFu) == 0))
+        printf("[usb] read 0x%03x -> 0x%08x\n", off, v);
+    g_usb_regs[(off & 0x1ffu) >> 2] = v;
 }
 
 int main(int argc, char** argv) {
