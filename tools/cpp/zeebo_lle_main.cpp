@@ -200,6 +200,13 @@ private:
 };
 
 // 4. Shared Memory SMD / ONCRPC Subsystem (Zeebo AMSS Messaging)
+// Structs, constants and the UnifiedSMDBridge injector now live in the
+// extracted, unit-testable header so the doorbell RPC path can be exercised in
+// isolation (see test_qdsp5_doorbell_probe.cpp). No behavior change here.
+#include "zeebo_smd_bridge_unified.h"
+#include "qdsp5_doorbell_probe.h"
+
+#if 0  // Superseded by zeebo_smd_bridge_unified.h — kept for provenance only.
 enum {
     AMSS_SMD_CHANNEL_ADDR   = 0x1755d1dc,
     AMSS_RPC_QUEUE_HEAD     = 0x17571748,
@@ -304,6 +311,7 @@ public:
 private:
     u32 packets_injected_;
 };
+#endif  // Superseded UnifiedSMDBridge / AMSS structs (see zeebo_smd_bridge_unified.h)
 
 // 5. Host Display Sink (SDL2 + Snapshot)
 class UnifiedDisplaySink {
@@ -4650,11 +4658,14 @@ private:
                 vic_status0 |= (1 << int_num);
                 uc_mem_write(core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
 
-                // Inject RPC packets on doorbell trigger using official IDs AUDMGR (0x30000013) / ADSPRTOSATOM (0x3000000a)
+                // QDSP5 RPC liveness probe — OFF by default (production doorbells
+                // must NOT mutate the AMSS ONCRPC queue). Previously this block
+                // unconditionally injected fabricated 0x42 packets with proc
+                // 0x1b59 (which is the RPC SUCCESS STATUS code, not a proc ID —
+                // QDSP5_TODO.md §3.1/§11.1), corrupting the live queue on every
+                // doorbell. Now gated behind ZEEBO_QDSP5_RPC_PROBE (Q1.5).
                 if (smd_) {
-                    std::vector<u8> dummy_payload(16, 0x42);
-                    smd_->inject_packet(core1_state_->uc, 0x30000013, 0x1b59, dummy_payload);
-                    smd_->inject_packet(core1_state_->uc, 0x3000000a, 0x02, dummy_payload);
+                    zeebo_qdsp5::doorbell_maybe_inject(*smd_, core1_state_->uc);
                 }
             }
         }
