@@ -4082,8 +4082,8 @@ private:
         static const bool shell_trace_on = std::getenv("ZEEBO_SHELL_TRACE") != nullptr;
         if (shell_trace_on && sys->brew_) {
             const u32 here = (u32)ad;
-            const u32 ish  = sys->brew_->symbols().ishell_create_va;    // 0x105c7fb4
-            const u32 aees = sys->brew_->symbols().aeecshell_dispatch_va; // 0x10c874f4
+            const u32 ish  = zeebo::brew::DISPROVEN_ISHELL_RODATA_VA;
+            const u32 aees = zeebo::brew::DISPROVEN_BOOTSTRAP_ENV_VA;
             if ((ish && here == ish) || here == aees) {
                 u32 r0=0,r1=0,r2=0,sp=0;
                 uc_reg_read(uc, UC_ARM_REG_R0, &r0);
@@ -4114,8 +4114,8 @@ private:
         static const bool shell_sem_on = std::getenv("ZEEBO_SHELL_SEM") != nullptr;
         if (shell_sem_on && sys->brew_) {
             const u32 here = (u32)ad;
-            const u32 ish  = sys->brew_->symbols().ishell_create_va;
-            const u32 aees = sys->brew_->symbols().aeecshell_dispatch_va;
+            const u32 ish  = zeebo::brew::DISPROVEN_ISHELL_RODATA_VA;
+            const u32 aees = zeebo::brew::DISPROVEN_BOOTSTRAP_ENV_VA;
             if ((ish && here == ish) || here == aees) {
                 const bool is_create = (ish && here == ish);
                 u32 r0=0,r1=0,r2=0,r3=0,sp=0,lr=0;

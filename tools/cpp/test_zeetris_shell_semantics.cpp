@@ -223,7 +223,7 @@ int main(int argc, char** argv) {
     // is PROVEN INVALID. Fail the stale claim loudly.
     if (live_create == 0) {
         const SemHit& h = hits.front();
-        std::printf("[FAIL] the anchor was executed (%zu hits) but NONE is a live "
+        std::printf("[REFUTED] the anchor was executed (%zu hits) but NONE is a live "
                     "IShell: e.g. site pc=0x%08x r0=0x%08x r2=0x%08x sp=0x%08x is "
                     "VERDICT=NON_SEMANTIC. This PROVES the old inference ('r0 present "
                     "at the dispatch VA is pIShell') INVALID: r0=0xb0d02000 is the "

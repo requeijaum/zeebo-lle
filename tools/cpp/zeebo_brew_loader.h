@@ -64,15 +64,15 @@ struct AppletModule {
     u32         reserved_hi_va = 0; // load_va - 4
 };
 
-// VAs dos símbolos BREW resolvidos no APPS.bin (AEECShell). Todos [infer] até
-// serem confirmados por RE. Zero = desconhecido -> dispatch honesto/no-op.
+// VAs BREW só podem entrar aqui após prova semântica (objeto/vtable/call chain).
+// Zero = desconhecido -> dispatch honesto/no-op. Dois rótulos históricos foram
+// refutados pelos gates de proveniência e permanecem apenas como âncoras
+// diagnósticas; nunca são defaults de dispatch.
+inline constexpr u32 DISPROVEN_BOOTSTRAP_ENV_VA = 0x10c874f4;
+inline constexpr u32 DISPROVEN_ISHELL_RODATA_VA = 0x105c7fb4;
 struct BrewSymbols {
-    // Vetor da AEECShell onde ela decide criar a instância do applet do jogo.
-    // Confirmado subindo no boot recente (commit "vetor BREW/AEECShell").
-    u32 aeecshell_dispatch_va = 0x10c874f4;
-    // Entradas de despacho a resolver via RE / reaproveitar do mod_probe.
-    // Localizadas no segmento 11 do APPS.bin (VA base 0x1013a000):
-    u32 ishell_create_va   = 0x105c7fb4;  // ISHELL_CreateInstance(pShell, clsid, ppOut)
+    u32 aeecshell_dispatch_va = 0; // nenhum dispatch AEECShell provado
+    u32 ishell_create_va   = 0;    // nenhum ISHELL_CreateInstance provado
     u32 aeemod_load_va     = 0;           // AEEMod_Load(pIModule, ...)
     u32 aeeclscreate_va    = 0;           // AEEClsCreateInstance(clsid, pShell, pModule, ppObj)
     u32 aeeappletnew_va    = 0x105322f2;  // AEEAppletNew (ZeeboApp applet entry)
@@ -355,7 +355,7 @@ public:
     // então redirecionar o PC / parar a fatia conforme sua convenção de hook).
     // NÃO altera PC aqui — devolve a decisão ao orquestrador (desacoplamento).
     bool on_code(u32 pc) {
-        if (pc == sym_.aeecshell_dispatch_va) { on_aeecshell_dispatch(); return true; }
+        if (sym_.aeecshell_dispatch_va && pc == sym_.aeecshell_dispatch_va) { on_aeecshell_dispatch(); return true; }
         if (sym_.ishell_create_va && pc == sym_.ishell_create_va) { on_create_instance(); return true; }
         if (sym_.aeemod_load_va && pc == sym_.aeemod_load_va)       { on_aeemod_load();     return true; }
         if (sym_.aeeclscreate_va && pc == sym_.aeeclscreate_va)     { on_cls_create();      return true; }

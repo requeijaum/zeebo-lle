@@ -670,15 +670,14 @@ test-core1: test-rex
 test-zwheel-preview: zeebo_lle_main
 	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --zwheel-preview-headless
 
-# Ciclo de vida do applet Z-Wheel (274755) carregado do EFS2: extrai o gnode de
-# 274755 da NAND 0:EFS2APPS, injeta via BrewLoader e despacha EVT_APP_START ao
-# manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344), roteando a chamada
-# gráfica ao SoftRasterizer. Valida sem crash e exige o PASS do ciclo de vida.
+# Honest EFS2 launch guard: 274755 is catalogued, but inode→cluster (gnode)
+# provenance is not reversed. The former 64 KiB KnownIB payload was modem/NV
+# data, so production must refuse it rather than fabricate a Z-Wheel launch.
 test-efs2-zwheel: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=0 --cycles=1 \
-	  | grep -q "Z-Wheel/Life] PASS" \
-	  && echo "PASS: --efs2-run=274755 instanciou o ciclo de vida do ZeeboApp (EVT_APP_START, r0=1)." \
-	  || (echo "FAIL: ciclo de vida do applet 274755 não completou EVT_APP_START"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=0 --cycles=1); \
+	echo "$$out" | grep -q "sem bloco indireto comprovado" && \
+	! echo "$$out" | grep -q "Z-Wheel/Life] PASS" && \
+	echo "PASS: 274755 recusado sem gnode comprovado; nenhum lifecycle fabricado."
 
 # Passo 5: mapeamento Z-Pad/SDL2 → AVK e despacho contínuo de EVT_KEY_PRESS/
 # EVT_KEY_RELEASE ao manipulador BREW (HandleEvent), provado por execução real
@@ -689,21 +688,19 @@ zeebo_input_harness: zeebo_input_harness.cpp zeebo_brew_loader.h zeebo_l4_mmu.h
 test-input: zeebo_input_harness
 	./zeebo_input_harness
 
-# Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) sob SDL2.
-# Roda o ciclo de vida + loop por tempo real (--seconds=1) em headless (dummy),
-# apresentando o framebuffer à taxa de quadros e drenando eventos Z-Pad→AVK.
-# Valida que o loop entra e encerra organicamente sem crash.
+# Long-run negative control: refusal must remain stable and must not enter the
+# former fabricated interactive loop.
 test-efs2-zwheel-loop: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=1 \
-	  | grep -q "Z-Wheel/Loop] loop encerrado" \
-	  && echo "PASS: --efs2-run=274755 --seconds=1 executou o loop interativo contínuo (Passo 11)." \
-	  || (echo "FAIL: loop interativo do applet 274755 não encerrou corretamente"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=1); \
+	echo "$$out" | grep -q "Sem payload extraível para '274755'" && \
+	! echo "$$out" | grep -q "Z-Wheel/Loop] loop encerrado" && \
+	echo "PASS: 274755 permaneceu recusado durante execução prolongada."
 
 test-efs2-game-reksio: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=reksio.mod --seconds=1 \
-	  | grep -q "PASS: Jogo/Applet 'Reksio (reksio.mod)' entrou em execução" \
-	  && echo "PASS: --efs2-run=reksio.mod --seconds=1 executou o jogo comercial Reksio." \
-	  || (echo "FAIL: execução do jogo reksio.mod falhou"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=reksio.mod --seconds=1); \
+	echo "$$out" | grep -q "Sem payload extraível para 'reksio.mod'" && \
+	! echo "$$out" | grep -q "entrou em execução" && \
+	echo "PASS: reksio.mod recusado sem gnode comprovado; execução não fabricada."
 
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
@@ -856,7 +853,7 @@ test-clean-hygiene:
 # loads NAND) plus test-rex test-zwheel test-efs2-fs test-efs2-zwheel
 # test-efs2-zwheel-loop test-debug-agent.
 NAND_REQUIRED_BINS := ../../nand/1.1.2_AMSS.bin ../../nand/1.1.2_APPS.bin ../../nand/1.1.2.bin
-FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-zeetris-live-shell test-efs2-guard-real
+FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-shell-semantics test-efs2-guard-real
 
 check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
        test-cli \
