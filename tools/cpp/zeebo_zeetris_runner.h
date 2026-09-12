@@ -2,6 +2,10 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <fstream>
+#include <optional>
 #include <functional>
 #include <map>
 #include <vector>
@@ -59,6 +63,23 @@ struct ZeetrisContext {
 
     // Framebuffer 640x480 RGB565 (inicializado em branco 0xFFFF)
     std::vector<uint16_t> framebuffer = std::vector<uint16_t>(640 * 480, 0xFFFF);
+
+    // Sistema de arquivos virtual (IFileMgr / IFile) servindo data/*
+    std::string data_dir = "/home/rafaelfrequiao/Downloads/mod/zeetris/data";
+    struct OpenFileInfo {
+        std::string name;
+        std::vector<uint8_t> data;
+        uint32_t position = 0;
+    };
+    std::map<uint32_t, OpenFileInfo> open_files;
+    uint32_t file_open_calls = 0;
+    uint32_t file_read_calls = 0;
+
+    // Callback de áudio PCM emitido pelo IMedia::Play
+    std::function<void(const int16_t* pcm, size_t count, int sample_rate, int channels)> on_audio_play;
+    std::vector<int16_t> current_media_pcm;
+    int current_media_rate = 0;
+    int current_media_channels = 0;
 };
 
 class ZeetrisRunner {
@@ -100,6 +121,96 @@ public:
     static constexpr u32 DISPLAY_VTBL_VA = IGL_VTBL_VA;
     static constexpr u32 BITMAP_OBJ_VA   = 0x60004000u;
     static constexpr u32 BITMAP_VTBL_VA  = 0x60005000u;
+    static constexpr u32 FILEMGR_OBJ_VA  = 0x60002000u;
+    static constexpr u32 FILEMGR_VTBL_VA = 0x60003000u;
+    static constexpr u32 FILE_OBJ_BASE_VA= 0x60006000u;
+    static constexpr u32 FILE_VTBL_VA    = 0x60009000u;
+    static constexpr u32 NOTIFY_OBJ_VA   = 0x6000A000u;
+    static constexpr u32 NOTIFY_VTBL_VA  = 0x6000B000u;
+
+    struct WavAudio {
+        int sample_rate = 0;
+        int channels = 0;
+        std::vector<int16_t> samples;
+    };
+
+    static inline uint16_t read_u16_le(const uint8_t* p) {
+        return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1] << 8);
+    }
+    static inline uint32_t read_u32_le(const uint8_t* p) {
+        return static_cast<uint32_t>(p[0]) |
+               (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) |
+               (static_cast<uint32_t>(p[3]) << 24);
+    }
+
+    static std::optional<WavAudio> parse_wav(const uint8_t* data, size_t size) {
+        if (size < 12 || std::memcmp(data, "RIFF", 4) != 0 || std::memcmp(data + 8, "WAVE", 4) != 0) {
+            return std::nullopt;
+        }
+        bool have_fmt = false;
+        uint16_t audio_format = 0, channels = 0, bits_per_sample = 0;
+        uint32_t sample_rate = 0, data_size = 0;
+        const uint8_t* data_chunk = nullptr;
+
+        size_t pos = 12;
+        while (pos + 8 <= size) {
+            const uint8_t* chunk_id = data + pos;
+            uint32_t chunk_size = read_u32_le(data + pos + 4);
+            size_t chunk_data_offset = pos + 8;
+            if (chunk_data_offset + chunk_size > size) break;
+
+            if (std::memcmp(chunk_id, "fmt ", 4) == 0 && chunk_size >= 16) {
+                const uint8_t* fmt = data + chunk_data_offset;
+                audio_format = read_u16_le(fmt + 0);
+                channels = read_u16_le(fmt + 2);
+                sample_rate = read_u32_le(fmt + 4);
+                bits_per_sample = read_u16_le(fmt + 14);
+                have_fmt = true;
+            } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+                data_chunk = data + chunk_data_offset;
+                data_size = chunk_size;
+            }
+            pos = chunk_data_offset + chunk_size + (chunk_size & 1);
+        }
+
+        if (!have_fmt || data_chunk == nullptr) return std::nullopt;
+        if (audio_format != 1) return std::nullopt; // PCM
+        if (channels != 1 && channels != 2) return std::nullopt;
+        if (bits_per_sample != 8 && bits_per_sample != 16) return std::nullopt;
+
+        WavAudio out;
+        out.sample_rate = static_cast<int>(sample_rate);
+        out.channels = channels;
+
+        if (bits_per_sample == 16) {
+            size_t sample_count = data_size / 2;
+            out.samples.resize(sample_count);
+            for (size_t i = 0; i < sample_count; ++i) {
+                out.samples[i] = static_cast<int16_t>(read_u16_le(data_chunk + i * 2));
+            }
+        } else {
+            size_t sample_count = data_size;
+            out.samples.resize(sample_count);
+            for (size_t i = 0; i < sample_count; ++i) {
+                int unsigned_sample = data_chunk[i];
+                out.samples[i] = static_cast<int16_t>((unsigned_sample - 128) * 256);
+            }
+        }
+        return out;
+    }
+
+    static std::string read_c_string(uc_engine* uc, u32 addr) {
+        std::string s;
+        if (!uc || addr == 0) return s;
+        for (u32 a = addr; ; ++a) {
+            char c = 0;
+            if (uc_mem_read(uc, a, &c, 1) != UC_ERR_OK || c == '\0') break;
+            s.push_back(c);
+            if (s.size() > 512) break; // salvaguarda contra strings corrompidas
+        }
+        return s;
+    }
 
     // Ponte uc -> GuestMachine: args 0..3 em R0..R3, >=4 em SP+((n-4)*4);
     // `read` lê memória guest (usada pelo IglHook para arrays de vértices/cor no
@@ -292,9 +403,11 @@ public:
                 } else if (clsid == 0x01001001u) { // AEECLSID_DISPLAY
                     obj_ptr = DISPLAY_OBJ_VA;
                 } else if (clsid == 0x01001003u) { // AEECLSID_FILEMGR
-                    obj_ptr = EXTRA_OBJ_VA; // reaproveita vtable básica com retorno 0
+                    obj_ptr = FILEMGR_OBJ_VA;
                 } else if (clsid == 0x0106c411u) { // AEECLSID_HID (driver de entrada Qualcomm)
                     obj_ptr = EXTRA_OBJ_VA;
+                } else if (clsid == 0x01005511u) { // Notification/Progress service
+                    obj_ptr = NOTIFY_OBJ_VA;
                 } else if (clsid == 0x01014bc3u) { // AEECLSID_GL (OpenGL ES 1.1)
                     obj_ptr = IGL_OBJ_VA;
                 } else if (clsid == 0x01014bc4u) { // AEECLSID_EGL (EGL 1.1)
@@ -359,15 +472,48 @@ public:
                 uc_reg_read(uc, UC_ARM_REG_R3, &p2);
                 ctx->media_set_param_calls++;
                 std::printf("[IMedia] SetMediaParm param=%u p1=0x%08x p2=0x%08x\n", nParamID, p1, p2);
+
+                if (nParamID == 1 /* MM_PARM_MEDIA_DATA */ && p1 != 0) {
+                    u32 cls_data = 0, data_ptr = 0, data_size = 0;
+                    uc_mem_read(uc, p1 + 0, &cls_data, 4);
+                    uc_mem_read(uc, p1 + 4, &data_ptr, 4);
+                    uc_mem_read(uc, p1 + 8, &data_size, 4);
+                    if (cls_data == 0 /* kMmdFileName */ && data_ptr != 0) {
+                        std::string audio_fname = read_c_string(uc, data_ptr);
+                        std::string host_path = audio_fname;
+                        if (host_path.rfind("data/", 0) == 0 || host_path.rfind("data\\", 0) == 0) {
+                            host_path = ctx->data_dir + "/" + host_path.substr(5);
+                        } else if (host_path.find('/') == std::string::npos && host_path.find('\\') == std::string::npos) {
+                            host_path = ctx->data_dir + "/" + host_path;
+                        }
+                        auto audio_bytes = load_file(host_path);
+                        if (!audio_bytes.empty()) {
+                            auto parsed = parse_wav(audio_bytes.data(), audio_bytes.size());
+                            if (parsed) {
+                                ctx->current_media_pcm = std::move(parsed->samples);
+                                ctx->current_media_rate = parsed->sample_rate;
+                                ctx->current_media_channels = parsed->channels;
+                                std::printf("[IMedia] WAV carregado: '%s' (%d Hz, %d canais, %zu amostras)\n",
+                                            audio_fname.c_str(), parsed->sample_rate, parsed->channels, ctx->current_media_pcm.size());
+                            } else {
+                                std::printf("[IMedia] Arquivo de audio '%s' carregado mas nao e WAV PCM\n", audio_fname.c_str());
+                            }
+                        }
+                    }
+                }
             } else if (slot == 6 && ctx) { // Play(IMedia *po)
                 ctx->media_play_calls++;
                 std::printf("[IMedia] Play called! (total=%u)\n", ctx->media_play_calls);
+                if (ctx->on_audio_play && !ctx->current_media_pcm.empty()) {
+                    ctx->on_audio_play(ctx->current_media_pcm.data(), ctx->current_media_pcm.size(),
+                                       ctx->current_media_rate, ctx->current_media_channels);
+                }
             } else {
                 std::printf("[IMedia] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
             }
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
-        } else if (pc >= 0x50000200u && pc < 0x50000500u) {
+        } else if (pc >= 0x50000200u && pc < 0x50000300u) {
             u32 lr = 0, zero = 0;
             uc_reg_read(uc, UC_ARM_REG_LR, &lr);
             u32 slot = (pc - 0x50000200u) / 4u;
@@ -445,6 +591,196 @@ public:
                 }
             }
             // Sem dispatcher: stub honesto (slots gl* devolvem void).
+            uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+            uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+        } else if (pc >= 0x50000300u && pc < 0x50000400u) {
+            // IFileMgr vtable slots
+            u32 lr = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000300u) / 4u;
+            if (slot == 2 && ctx) { // OpenFile(IFileMgr* po, const char* pszFile, OpenFileMode mode)
+                u32 name_addr = 0, mode = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &name_addr);
+                uc_reg_read(uc, UC_ARM_REG_R2, &mode);
+                std::string fname = read_c_string(uc, name_addr);
+                ctx->file_open_calls++;
+
+                // Resolve caminho no host
+                std::string host_path = fname;
+                // Normaliza prefixo "data/" ou "data\"
+                if (host_path.rfind("data/", 0) == 0 || host_path.rfind("data\\", 0) == 0) {
+                    host_path = ctx->data_dir + "/" + host_path.substr(5);
+                } else if (host_path.find('/') == std::string::npos && host_path.find('\\') == std::string::npos) {
+                    host_path = ctx->data_dir + "/" + host_path;
+                }
+
+                auto file_bytes = load_file(host_path);
+                u32 file_handle = 0;
+                if (!file_bytes.empty()) {
+                    uint32_t handle_idx = ctx->open_files.size();
+                    file_handle = FILE_OBJ_BASE_VA + handle_idx * 0x100u;
+                    u32 f_vt = FILE_VTBL_VA;
+                    uc_mem_write(uc, file_handle, &f_vt, 4);
+
+                    ZeetrisContext::OpenFileInfo of;
+                    of.name = fname;
+                    of.data = std::move(file_bytes);
+                    of.position = 0;
+                    ctx->open_files[file_handle] = std::move(of);
+                    std::printf("[IFileMgr] OpenFile('%s' -> '%s', size=%zu) => 0x%08x\n",
+                                fname.c_str(), host_path.c_str(), ctx->open_files[file_handle].data.size(), file_handle);
+                } else {
+                    std::printf("[IFileMgr] OpenFile('%s' -> '%s') FALHOU (arquivo nao encontrado)\n",
+                                fname.c_str(), host_path.c_str());
+                }
+                uc_reg_write(uc, UC_ARM_REG_R0, &file_handle);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (slot == 7 && ctx) { // Test(IFileMgr* po, const char* pszName) -> 0 se existe, 1 se não
+                u32 name_addr = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &name_addr);
+                std::string fname = read_c_string(uc, name_addr);
+                std::string host_path = fname;
+                if (host_path.rfind("data/", 0) == 0 || host_path.rfind("data\\", 0) == 0) {
+                    host_path = ctx->data_dir + "/" + host_path.substr(5);
+                } else if (host_path.find('/') == std::string::npos && host_path.find('\\') == std::string::npos) {
+                    host_path = ctx->data_dir + "/" + host_path;
+                }
+                std::ifstream f(host_path, std::ios::binary);
+                u32 ret = f.good() ? 0u : 1u;
+                std::printf("[IFileMgr] Test('%s' -> '%s') => %u\n", fname.c_str(), host_path.c_str(), ret);
+                uc_reg_write(uc, UC_ARM_REG_R0, &ret);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (slot == 3 && ctx) { // GetInfo(IFileMgr* po, const char* pszName, FileInfo* pInfo)
+                u32 name_addr = 0, pInfo = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &name_addr);
+                uc_reg_read(uc, UC_ARM_REG_R2, &pInfo);
+                std::string fname = read_c_string(uc, name_addr);
+                std::string host_path = fname;
+                if (host_path.rfind("data/", 0) == 0 || host_path.rfind("data\\", 0) == 0) {
+                    host_path = ctx->data_dir + "/" + host_path.substr(5);
+                } else if (host_path.find('/') == std::string::npos && host_path.find('\\') == std::string::npos) {
+                    host_path = ctx->data_dir + "/" + host_path;
+                }
+                std::ifstream f(host_path, std::ios::binary | std::ios::ate);
+                u32 ret = 1;
+                if (f.good() && pInfo != 0) {
+                    ret = 0;
+                    u32 size = static_cast<u32>(f.tellg());
+                    u8 attrib = 0;
+                    u32 date = 0;
+                    uc_mem_write(uc, pInfo + 0, &attrib, 1);
+                    uc_mem_write(uc, pInfo + 4, &date, 4);
+                    uc_mem_write(uc, pInfo + 8, &size, 4);
+                    char name_buf[64] = {0};
+                    std::strncpy(name_buf, fname.c_str(), 63);
+                    uc_mem_write(uc, pInfo + 12, name_buf, 64);
+                }
+                std::printf("[IFileMgr] GetInfo('%s' -> '%s') => ret=%u\n", fname.c_str(), host_path.c_str(), ret);
+                uc_reg_write(uc, UC_ARM_REG_R0, &ret);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (slot == 8) { // GetFreeSpace(IFileMgr* po, uint32* pdwTotal)
+                u32 pdwTotal = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pdwTotal);
+                if (pdwTotal != 0) {
+                    u32 total = 1024 * 1024;
+                    uc_mem_write(uc, pdwTotal, &total, 4);
+                }
+                u32 free_sp = 1024 * 1024;
+                uc_reg_write(uc, UC_ARM_REG_R0, &free_sp);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else {
+                std::printf("[IFileMgr] Chamada ao slot %u (lr=0x%08x)\n", slot, lr);
+                uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            }
+        } else if (pc >= 0x50000600u && pc < 0x50000700u) {
+            // IFile vtable slots
+            u32 lr = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000600u) / 4u;
+            u32 handle = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &handle);
+
+            if (slot == 3 && ctx) { // Read(IFile* po, void* pDest, uint32 nWant)
+                u32 pDest = 0, nWant = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pDest);
+                uc_reg_read(uc, UC_ARM_REG_R2, &nWant);
+                ctx->file_read_calls++;
+
+                auto it = ctx->open_files.find(handle);
+                u32 bytes_read = 0;
+                if (it != ctx->open_files.end() && pDest != 0) {
+                    auto& of = it->second;
+                    if (of.position < of.data.size()) {
+                        size_t avail = of.data.size() - of.position;
+                        bytes_read = static_cast<u32>(std::min(static_cast<size_t>(nWant), avail));
+                        uc_mem_write(uc, pDest, of.data.data() + of.position, bytes_read);
+                        of.position += bytes_read;
+                    }
+                    std::printf("[IFile] Read(handle=0x%08x, want=%u, pos_after=%u) => %u bytes\n",
+                                handle, nWant, of.position, bytes_read);
+                } else {
+                    std::printf("[IFile] Read(handle=0x%08x) handle desconhecido!\n", handle);
+                }
+                uc_reg_write(uc, UC_ARM_REG_R0, &bytes_read);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (slot == 7 && ctx) { // Seek(IFile* po, FileSeekType seek, int32 moveDistance)
+                u32 seek_type = 0;
+                int32_t dist = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &seek_type);
+                uc_reg_read(uc, UC_ARM_REG_R2, &dist);
+
+                auto it = ctx->open_files.find(handle);
+                u32 ret = 0;
+                if (it != ctx->open_files.end()) {
+                    auto& of = it->second;
+                    int64_t new_pos = of.position;
+                    if (seek_type == 0) new_pos = dist; // _SEEK_START
+                    else if (seek_type == 1) new_pos = static_cast<int64_t>(of.data.size()) + dist; // _SEEK_END
+                    else if (seek_type == 2) new_pos += dist; // _SEEK_CURRENT
+
+                    if (new_pos < 0) new_pos = 0;
+                    if (new_pos > static_cast<int64_t>(of.data.size())) new_pos = of.data.size();
+                    of.position = static_cast<uint32_t>(new_pos);
+                    std::printf("[IFile] Seek(handle=0x%08x, type=%u, dist=%d) => new_pos=%u\n",
+                                handle, seek_type, dist, of.position);
+                }
+                uc_reg_write(uc, UC_ARM_REG_R0, &ret);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else if (slot == 6 && ctx) { // GetInfo(IFile* po, FileInfo* pInfo)
+                u32 pInfo = 0;
+                uc_reg_read(uc, UC_ARM_REG_R1, &pInfo);
+                auto it = ctx->open_files.find(handle);
+                if (it != ctx->open_files.end() && pInfo != 0) {
+                    const auto& of = it->second;
+                    // AEEFileInfo: { char attrib; uint32 dwCreationDate; uint32 dwSize; char szName[64]; }
+                    u8 attrib = 0;
+                    u32 date = 0;
+                    u32 size = static_cast<u32>(of.data.size());
+                    uc_mem_write(uc, pInfo + 0, &attrib, 1);
+                    uc_mem_write(uc, pInfo + 4, &date, 4);
+                    uc_mem_write(uc, pInfo + 8, &size, 4);
+                    char name_buf[64] = {0};
+                    std::strncpy(name_buf, of.name.c_str(), 63);
+                    uc_mem_write(uc, pInfo + 12, name_buf, 64);
+                }
+                uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            } else {
+                std::printf("[IFile] Chamada ao slot %u (handle=0x%08x, lr=0x%08x)\n", slot, handle, lr);
+                uc_reg_write(uc, UC_ARM_REG_R0, &zero);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+            }
+        } else if (pc >= 0x50000700u && pc < 0x50000800u) {
+            u32 lr = 0, zero = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 slot = (pc - 0x50000700u) / 4u;
+            u32 r1 = 0, r2 = 0, r3 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+            uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+            std::printf("[NOTIFY 0x01005511] Chamada ao slot %u (lr=0x%08x) r1=0x%08x r2=0x%08x r3=0x%08x\n",
+                        slot, lr, r1, r2, r3);
             uc_reg_write(uc, UC_ARM_REG_R0, &zero);
             uc_reg_write(uc, UC_ARM_REG_PC, &lr);
         } else if (pc >= 0x50000500u && pc < 0x50000600u) {
@@ -584,6 +920,28 @@ public:
         for (u32 i = 0; i < 64; ++i) {
             u32 s = 0x50000500u + i * 4u;
             uc_mem_write(uc, BITMAP_VTBL_VA + i * 4u, &s, 4);
+        }
+
+        // Objeto IFileMgr vtable
+        u32 fm_vt = FILEMGR_VTBL_VA;
+        uc_mem_write(uc, FILEMGR_OBJ_VA, &fm_vt, 4);
+        for (u32 i = 0; i < 64; ++i) {
+            u32 s = 0x50000300u + i * 4u;
+            uc_mem_write(uc, FILEMGR_VTBL_VA + i * 4u, &s, 4);
+        }
+
+        // Shared IFile vtable
+        for (u32 i = 0; i < 64; ++i) {
+            u32 s = 0x50000600u + i * 4u;
+            uc_mem_write(uc, FILE_VTBL_VA + i * 4u, &s, 4);
+        }
+
+        // Objeto 0x01005511 (Notification/Progress) vtable
+        u32 notif_vt = NOTIFY_VTBL_VA;
+        uc_mem_write(uc, NOTIFY_OBJ_VA, &notif_vt, 4);
+        for (u32 i = 0; i < 64; ++i) {
+            u32 s = 0x50000700u + i * 4u;
+            uc_mem_write(uc, NOTIFY_VTBL_VA + i * 4u, &s, 4);
         }
 
         // Seam de PLATAFORMA: o poll de botões do jogo recebe o estado do host.

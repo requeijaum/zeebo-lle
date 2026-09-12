@@ -1268,6 +1268,26 @@ public:
             rast_->begin_frame();
         }
 
+        // Conecta áudio do IMedia diretamente ao host audio device
+        if (host_audio_) {
+            zeetris_ctx_.on_audio_play = [this](const int16_t* pcm, size_t count, int /*sample_rate*/, int /*channels*/) {
+                if (!pcm || count == 0 || !host_audio_) return;
+                // Cria buffer de áudio decodificado e encaminha via pull callback
+                std::vector<int16_t> samples(pcm, pcm + count);
+                host_audio_->set_source([samples = std::move(samples), pos = size_t(0)](int16_t* out, size_t frames) mutable {
+                    for (size_t f = 0; f < frames; ++f) {
+                        if (pos < samples.size()) {
+                            out[f * 2 + 0] = samples[pos++];
+                            out[f * 2 + 1] = (pos < samples.size()) ? samples[pos++] : out[f * 2 + 0];
+                        } else {
+                            out[f * 2 + 0] = 0;
+                            out[f * 2 + 1] = 0;
+                        }
+                    }
+                });
+            };
+        }
+
         printf("[Zeetris/Loop] iniciando gameloop contínuo%s%s (headless=%d)\n",
                max_seconds > 0.0 ? " por tempo" : "",
                (!headless) ? " interativo" : "",
