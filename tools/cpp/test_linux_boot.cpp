@@ -2549,6 +2549,26 @@ int main(int argc, char** argv) {
 
     std::printf("[boot] carregado em 0x%08x, entry=0x%08x, budget=%llu insn\n",
                 KERNEL_LOAD, KERNEL_LOAD, (unsigned long long)kInsnBudget);
+    // Validacao do mapeamento PC<->simbolo: le' o texto do kernel direto da memoria do
+    // guest (VA 0xc0xxxxxx -> PA = VA - 0xc0000000 + 0x10000000) para comparar com o
+    // objdump do vmlinux do container. Se nao bater, instrumento por PC nao vale.
+    if (std::getenv("ZEEBO_PC_CHECK")) {
+        struct { const char* nome; u32 va; } syms[] = {
+            {"qh_urb_transaction 0xc018ed78", 0xc018ed78u},
+            {"ehci_qtd_alloc     0xc018e90c", 0xc018e90cu},
+            {"ehci_urb_enqueue   0xc019013c", 0xc019013cu},
+            {"handshake          0xc01893cc", 0xc01893ccu},
+        };
+        for (auto& s : syms) {
+            const u32 pa = s.va - 0xc0000000u + 0x10000000u;
+            unsigned char b[16] = {0};
+            const uc_err e = uc_mem_read(uc, pa, b, sizeof(b));
+            std::printf("[pc-check] %s  PA=0x%08x err=%d bytes: ", s.nome, pa, (int)e);
+            for (int i = 0; i < 16; ++i) std::printf("%02x ", b[i]);
+            std::printf("\n");
+        }
+        std::fflush(stdout);
+    }
 
     uc_err e = uc_emu_start(uc, KERNEL_LOAD, 0, 0, kInsnBudget);
     std::printf("[boot] parou: %s (%d) apos %llu instrucoes, last_pc=0x%08x\n",
