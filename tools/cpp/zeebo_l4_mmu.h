@@ -721,10 +721,43 @@ public:
     }
 #endif
 
+#ifdef ZEEBO_L4_MMU_WITH_UNICORN
+    // --- Deferred address-space activation (invariant enforcement) ------------
+    // activate() calls uc_mem_unmap/uc_mem_map_ptr, which MUST NOT run inside a
+    // Unicorn code/mem/intr hook (remap during TB translation corrupts the
+    // translation cache -> segfault/hang). The c0_intr_hook syscall dispatcher
+    // (L4_Ipc / L4_ThreadSwitch) selects the next thread's SID while executing
+    // INSIDE the UC_HOOK_INTR callback — i.e. inside a live uc_emu_start slice.
+    // It therefore may only QUEUE the requested switch here; the scheduler loop
+    // drains it BETWEEN slices (engine quiescent), exactly like the deferred TB
+    // invalidation queue. A queued request does NOT touch Unicorn and does NOT
+    // change active_sid_ — so the address space seen by the in-flight slice is
+    // untouched until the safe between-slice drain applies it.
+    void queue_activate(u32 sid) {
+        pending_sid_ = sid;
+        has_pending_activate_ = true;
+    }
+    bool has_pending_activate() const { return has_pending_activate_; }
+    u32  pending_activate_sid() const { return pending_sid_; }
+
+    // Applies a queued activation, if any. MUST be called between uc_emu_start
+    // slices (engine quiescent), never from inside a hook. No-op when nothing is
+    // queued or the requested SID has no registered regions.
+    uc_err drain_activate(uc_engine* uc) {
+        if (!has_pending_activate_) return UC_ERR_OK;
+        u32 sid = pending_sid_;
+        has_pending_activate_ = false;
+        pending_sid_ = 0;
+        if (!has_space(sid)) return UC_ERR_OK;
+        return activate(uc, sid);
+    }
+#endif
+
     void clear() {
         spaces_.clear(); base_of_.clear();
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
         mapped_host_.clear(); shadowed_.clear();
+        has_pending_activate_ = false; pending_sid_ = 0;
 #endif
         active_sid_ = 0; activated_once_ = false;
     }
@@ -770,6 +803,8 @@ private:
 #ifdef ZEEBO_L4_MMU_WITH_UNICORN
     std::map<u64, u8*>    mapped_host_; // VA -> host atualmente mapeado por nós
     std::map<u64, Region> shadowed_;    // VA -> estático religado a restaurar
+    bool has_pending_activate_ = false; // switch pedido dentro de hook, aplicado entre fatias
+    u32  pending_sid_ = 0;
 #endif
     u32  active_sid_ = 0;
     bool activated_once_ = false;
