@@ -1005,6 +1005,14 @@ static bool sdl_draw_fb(uc_engine* uc) {
                     ink[0], ink[1], FB_XRES * FB_YRES);
         std::fflush(stdout);
     }
+    // Amostra ao longo do tempo: o texto aparece no FB e e' apagado depois?
+    static int samples = 0, calls = 0;
+    if (++calls % 16 == 0 && samples < 30) {
+        ++samples;
+        std::printf("[fbink] t=%lluM ink0=%zu ink1=%zu\n",
+                    (unsigned long long)(g_icount / 1000000ull), ink[0], ink[1]);
+        std::fflush(stdout);
+    }
     const int half = (ink[1] > ink[0]) ? 1 : 0;
     if (ink[half] == 0) return false;                        // ainda sem imagem
     const u8* p = buf.data() + half * frame_bytes;
@@ -1057,6 +1065,38 @@ static void sdl_present(const std::string& console) {
 }
 
 // Prova honesta: quantos pixels nao-fundo a janela tem (0 = nada desenhado).
+// Tambem salva a memoria de FB do guest num BMP separado, para comparar com o
+// que a janela mostrou (se forem o mesmo conteudo, a janela esta no modo FB).
+static void sdl_fb_dump(uc_engine* uc) {
+    const u32 frame_bytes = (u32)FB_XRES * FB_YRES * 2u;
+    std::vector<u8> buf(frame_bytes * 2u, 0);
+    if (uc_mem_read(uc, FB_PA, buf.data(), buf.size()) != UC_ERR_OK) return;
+    size_t ink[2] = {0, 0};
+    for (int h = 0; h < 2; ++h) {
+        const u8* p = buf.data() + h * frame_bytes;
+        for (u32 i = 0; i < frame_bytes; i += 2) {
+            if (p[i] || p[i + 1]) ++ink[h];
+        }
+    }
+    const int half = (ink[1] > ink[0]) ? 1 : 0;
+    std::printf("[fb] memoria do guest: buffer0=%zu buffer1=%zu pixels com cor (visivel=%d)\n",
+                ink[0], ink[1], half);
+    if (ink[half] == 0) { std::printf("[fb] framebuffer vazio no fim do run\n"); std::fflush(stdout); return; }
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, FB_XRES, FB_YRES, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!s) return;
+    u32* px = static_cast<u32*>(s->pixels);
+    const u8* p = buf.data() + half * frame_bytes;
+    for (int i = 0; i < FB_XRES * FB_YRES; ++i) {
+        const u16 v = (u16)(p[i * 2] | (p[i * 2 + 1] << 8));
+        const u32 r = (v >> 11) & 0x1fu, g = (v >> 5) & 0x3fu, b = v & 0x1fu;
+        px[i] = 0xff000000u | ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+    }
+    SDL_SaveBMP(s, "/tmp/zeebo_fb.bmp");
+    std::printf("[fb] salvo /tmp/zeebo_fb.bmp (%d pixels com cor)\n", (int)ink[half]);
+    SDL_FreeSurface(s);
+    std::fflush(stdout);
+}
+
 static void sdl_shot_save() {
     if (!g_sdl_on || !g_sdl_ren) return;
     int w = 0, h = 0;
@@ -1174,6 +1214,7 @@ constexpr u32 INT_MDP         = 19u;
 
 static u32  g_mdp_status = 0;
 static bool g_mdp_log    = false;
+static u32  g_draw_cnt[6] = {0, 0, 0, 0, 0, 0};   // cfb_imageblit, fbcon_putcs, bit_putcs, fbcon_init, fbcon_switch, cfb_fillrect
 
 void on_mdp_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                   int size, int64_t value, void* ud) {
@@ -1190,11 +1231,17 @@ void on_mdp_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
         if (g_mdp_status == 0) g_vic_pending[0] &= ~(1u << INT_MDP);
         if (g_mdp_log)
             std::printf("[mdp] CLEAR=0x%x -> status=0x%x\n", v, g_mdp_status);
-    } else if (g_mdp_log && off >= 0x10000u && off < 0x10200u) {
-        // Configuracao de DMA: aqui aparece o endereco fisico do framebuffer.
-        static int cfg = 0;
-        if (cfg++ < 40)
-            std::printf("[mdp] W cfg off=0x%05x val=0x%08x\n", off, v);
+    } else if (off >= 0x10000u && off < 0x10200u) {
+        // Programacao de DMA (mdp_dma_to_mddi escreve aqui): sem engine real o DMA
+        // "termina" na hora -- senao o driver fica em "mdp irq already on / busy"
+        // para sempre e o pan_display so sai por timeout (878 vezes por boot).
+        g_mdp_status |= 0x4u;                  // DL0_DMA2_TERM_DONE
+        g_vic_pending[0] |= (1u << INT_MDP);
+        if (g_mdp_log) {
+            static int cfg = 0;
+            if (cfg++ < 40)
+                std::printf("[mdp] W cfg off=0x%05x val=0x%08x (dma->irq 19)\n", off, v);
+        }
     }
 }
 
@@ -1209,11 +1256,15 @@ void on_mdp_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
 }
 
+static u64 g_fb_writes = 0;        // total de escritas na faixa do framebuffer
+static u64 g_fb_writes_nz = 0;     // quantas com valor != 0
+
 static void on_fbprobe_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
                              int size, int64_t value, void* ud) {
     (void)uc; (void)type; (void)size; (void)ud;
-    static int n = 0;
-    if (n++ < 12) {
+    ++g_fb_writes;
+    if (value != 0) ++g_fb_writes_nz;
+    if ((g_fb_writes + g_fb_writes_nz) < 4000u && value != 0 && g_fb_writes_nz <= 8) {
         u32 pc = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         std::printf("[fbprobe] W 0x%08llx val=0x%llx pc=0x%08x\n",
@@ -1607,6 +1658,18 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
             break;
         }
     }
+    // Cadeia do fbcon: quem realmente desenha no framebuffer?
+    {
+        static const u32 kDraw[] = {0xc012b17cu, 0xc01217f0u, 0xc0128544u, 0xc0126438u, 0xc0123bccu, 0xc0129e04u};
+        static const char* kName[] = {"cfb_imageblit", "fbcon_putcs", "bit_putcs",
+                                      "fbcon_init", "fbcon_switch", "cfb_fillrect"};
+        for (u32 k = 0; k < 6u; ++k) {
+            if (static_cast<u32>(addr) != kDraw[k]) continue;
+            if (g_draw_cnt[k]++ == 0)
+                std::printf("[draw] 1a chamada: %s\n", kName[k]);
+            break;
+        }
+    }
     if (addr == 0xc01fce80u) {          // panic()
         static bool panicked = false;
         if (!panicked) {
@@ -1736,7 +1799,9 @@ int main(int argc, char** argv) {
     uc_mem_map(uc, CSR_PA, CSR_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, CSR_BASE, CSR_SIZE, UC_PROT_ALL);
     g_timer_log = (std::getenv("ZEEBO_TIMER_LOG") != nullptr);
-    g_timer_on  = (std::getenv("ZEEBO_TIMER") != nullptr);   // clockevent virtual (experimental)
+    // O clockevent virtual fica LIGADO por padrao: sem ele o fbcon/hrtimer trava o
+    // boot (jiffies nao avancam) e o "sleep" nunca retorna. ZEEBO_NOTIMER=1 desliga.
+    g_timer_on  = (std::getenv("ZEEBO_NOTIMER") == nullptr);
     uc_hook hcw = 0, hcr = 0;
     uc_hook_add(uc, &hcw, UC_HOOK_MEM_WRITE, (void*)on_csr_write, nullptr, CSR_PA, CSR_PA + CSR_SIZE);
     uc_hook_add(uc, &hcr, UC_HOOK_MEM_READ, (void*)on_csr_read, nullptr, CSR_PA, CSR_PA + CSR_SIZE);
@@ -1898,8 +1963,21 @@ int main(int argc, char** argv) {
     v.insn = g_insn;
     dump_kernel_log(uc, "fim da execucao");
 #if defined(ZEEBO_SDL)
+    sdl_fb_dump(uc);          // memoria de FB do guest -> /tmp/zeebo_fb.bmp
     sdl_shot_save();          // prova visual do que a janela desenhou
 #endif
+    std::printf("[fbprobe] escritas na faixa do FB: %llu (nao-zero: %llu)\n",
+                (unsigned long long)g_fb_writes, (unsigned long long)g_fb_writes_nz);
+    std::printf("[draw] cfb_imageblit=%u fbcon_putcs=%u bit_putcs=%u fbcon_init=%u fbcon_switch=%u cfb_fillrect=%u\n",
+                g_draw_cnt[0], g_draw_cnt[1], g_draw_cnt[2], g_draw_cnt[3], g_draw_cnt[4], g_draw_cnt[5]);
+    {   // pseudo_palette do msm_fb (static unsigned PP[16], VA c03f45d4)
+        u32 pp[16] = {0};
+        if (uc_mem_read(uc, 0x103f45d4u, pp, sizeof(pp)) == UC_ERR_OK) {
+            std::printf("[fb] pseudo_palette PP =");
+            for (int i = 0; i < 16; ++i) std::printf(" %08x", pp[i]);
+            std::printf("\n");
+        }
+    }
     if (g_probe) {
         std::printf("[probe] paginas de PC mais visitadas (top 8):\n");
         {
