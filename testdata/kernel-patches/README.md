@@ -46,3 +46,24 @@ do `cfb_fillrect`. O TEXTO nao aparece porque `msm_fb.c` guarda o estado do driv
 mesmo campo para o `fbcon_ops` -- conflito de API de framebuffer antiga, nao do
 harness. Para o proximo passo: mover o estado do msm_fb para outro lugar (ou portar
 tvenc.c/tv_ntsc.c/tv_pal.c como painel de verdade, que e' o que o Zeebo usa).
+
+## USB/HID (2026-09-12)
+
+Configs ligadas no `.config` do container (`./scripts/config --enable <opcao>`):
+`USB`, `USB_EHCI_HCD`, `USB_EHCI_MSM`, `USB_HID`, `HID`, `HID_GENERIC`,
+`INPUT_EVDEV`, `INPUT_KEYBOARD`, depois `yes "" | make oldconfig`.
+
+No guest isso ja aparece (dmesg): "usbcore: registered new interface driver
+usbfs/hub", "ehci_hcd: USB 2.0 'Enhanced' Host Controller (EHCI) Driver",
+"usbhid: USB HID core driver". Mas `ls /sys/bus/usb/devices` fica VAZIO: nenhum
+host controller foi instanciado, porque o board nao registra o device do USB do
+MSM (mesmo padrao do framebuffer: `msm_device_hsusb_host` existe em
+`devices-msm7x00.c`, falta registrar no `board-halibut.c`).
+
+Sequencia para o proximo passo:
+1. registrar `msm_device_hsusb_host` no board (junto com o clock/PHY que o
+   `ehci-msm.c` pede) e mapear os registradores do controlador no harness;
+2. modelar o minimo do EHCI (CAPLENGTH/HCIVERSION/PORTSC + a lista assincrona)
+   para o HCD subir;
+3. responder a enumeracao como um teclado HID (descritor de report + os reports de
+   tecla), que e' o que faz o guest listar o dispositivo.
