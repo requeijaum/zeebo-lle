@@ -412,6 +412,13 @@ int main(int argc, char** argv) {
     uc_mem_write(uc, entry, img.data(), img.size());
     g_uc_global = uc;
     if (const char* hb = std::getenv("ZEEBO_XV6_HB")) g_hb_ms = std::atoi(hb);
+    // Alavanca de diagnostico: o default do Unicorn e' UC_TLB_VIRTUAL (TLB virtual proprio);
+    // UC_TLB_CPU usa o softmmu classico, com caminhada de tabela por acesso. O travamento
+    // medido e' na GERACAO do bloco da primeira busca em modo usuario -- se o modo de TLB
+    // muda o sintoma, o problema esta' na caminhada, nao no tradutor.
+    if (const char* tm = std::getenv("ZEEBO_TLB")) {
+        uc_ctl_tlb_mode(uc, std::strcmp(tm, "cpu") == 0 ? UC_TLB_CPU : UC_TLB_VIRTUAL);
+    }
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = on_signal_dump;
@@ -426,7 +433,35 @@ int main(int argc, char** argv) {
         it.it_value = it.it_interval;
         setitimer(ITIMER_REAL, &it, nullptr);
     }
-    uc_err e = uc_emu_start(uc, entry, 0, 0, g_budget);
+    // O Unicorn restringe a execucao ao intervalo [begin, until). Com begin = endereco do kernel
+    // (0x10000000) o retorno de trap do xv6 para o codigo de usuario -- que vive em VA 0, o
+    // `initcode` -- CAI FORA da faixa e a emulacao encerra (medido: "parou: OK ... pc=0x0").
+    // Solucao: FATIAS, cada uma comecando no PC atual, entao a faixa acompanha o guest quando
+    // ele desce para o espaco de usuario. `g_icount` (contador de hooks) mede o progresso real,
+    // entao o laco termina por orcamento, por erro, ou por ausencia de progresso.
+    const unsigned long long SLICE = 4000000ull;
+    unsigned long long feito = 0ull;
+    // O ponto de entrada tem de ser ESCRITO no registrador: com fatias quem manda no PC e' o
+    // proprio guest a partir daqui (antes, o PC vinha do argumento `begin` do uc_emu_start).
+    uc_reg_write(uc, UC_ARM_REG_PC, &entry);
+    uc_err e = UC_ERR_OK;
+    int fatias = 0;
+    while ((feito < (unsigned long long)g_budget) && (fatias < 10000)) {
+        u32 pc_now = 0;
+        unsigned long long antes = g_icount;
+        unsigned long long n = ((unsigned long long)g_budget - feito) < SLICE
+                                   ? ((unsigned long long)g_budget - feito) : SLICE;
+
+        if (uc_reg_read(uc, UC_ARM_REG_PC, &pc_now) != UC_ERR_OK) break;
+        // `until` = 0xFFFFFFFF (e nao 0): com begin=0 e until=0 o intervalo fica degenerado e o
+        // Unicorn retorna sem executar NADA (medido: fatia em pc=0 -> 0 instrucoes). Uma faixa
+        // real que cobre o espaco inteiro deixa a fatia executar a partir do PC atual.
+        e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 0, n);
+        feito += (g_icount - antes);
+        ++fatias;
+        if (e != UC_ERR_OK) break;
+        if (g_icount == antes) break;   // sem progresso: para em vez de girar
+    }
     // O PC da parada e' o que diz ONDE o SO desistiu; sem ele o veredito so' aponta o
     // sintoma. Resolve-se contra o kernel.nm do mesmo build.
     u32 pc_stop = 0;
