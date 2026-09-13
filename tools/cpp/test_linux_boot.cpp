@@ -34,6 +34,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <deque>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -1082,7 +1083,7 @@ static int vic_test() {
 // Auto-teste deterministico da tabela de teclas (env ZEEBO_KEY_TEST=1): alimenta
 // eventos sinteticos e confere os bytes que iriam para a RX da UART. Roda antes da
 // emulacao, entao a verificacao e' rapida e nao depende de janela.
-static void key_test() {
+static int key_test() {
     struct Case { SDL_Keycode sym; Uint16 mod; const char* want; const char* name; };
     static const Case k[] = {
         {SDLK_a, 0, "a", "a"}, {SDLK_a, KMOD_SHIFT, "A", "shift+a"},
@@ -1111,6 +1112,77 @@ static void key_test() {
     g_rx_buf.clear();
     std::printf("[key-test] %d OK, %d falhas\n", ok, fail);
     std::fflush(stdout);
+    // Retorna o verdict: o alvo do Makefile reprovava um teste 18/18 porque a
+    // chamada ficava depois do SKIP(77) e o programa seguia para o boot com o
+    // orcamento default, saindo RED por um motivo que nada tinha a ver com teclas.
+    return fail ? 1 : 0;
+}
+
+
+// --- Fila de relatorios HID (teclado USB emulado) ---------------------------
+// O endpoint de interrupcao (EP1 IN) so' tem o que entregar quando ha tecla. Sem
+// isso o teclado enumera, o usbhid faz bind e nasce o event0 -- mas nenhuma tecla
+// chega nunca, porque todo qTD do EP1 responde NAK para sempre.
+//
+// Relatorio boot-protocol (8 bytes): [modificadores, reservado, keycode x6].
+// Usage IDs do HID Usage Table cap.10: a-z = 0x04..0x1d, 1-9 = 0x1e..0x26,
+// 0 = 0x27, Enter = 0x28, Esc = 0x29, Backspace = 0x2a, Tab = 0x2b, Espaco = 0x2c.
+// Modificador bit0 = LeftCtrl, bit1 = LeftShift.
+static bool g_usb_on = false;         // espelha ZEEBO_USB (EHCI ligado)
+static u64  g_hid_type_at = 0;        // instrucao em que ZEEBO_HID_TYPE dispara
+struct HidReport { u8 b[8]; };
+static std::deque<HidReport> g_hid_reports;
+
+// Injeta uma string como teclas HID (para teste headless, sem janela SDL).
+// Usado por ZEEBO_HID_TYPE="ls\n" etc. So' cobre o que o mapa abaixo conhece.
+static void hid_queue_key(u8 usage, u8 mods);
+static void hid_type_ascii(const char* s) {
+    for (const char* p = s; *p; ++p) {
+        const char c = *p;
+        u8 usage = 0, mods = 0;
+        if (c >= 'a' && c <= 'z')      usage = static_cast<u8>(0x04 + (c - 'a'));
+        else if (c >= 'A' && c <= 'Z') { usage = static_cast<u8>(0x04 + (c - 'A')); mods = 0x02; }
+        else if (c >= '1' && c <= '9') usage = static_cast<u8>(0x1e + (c - '1'));
+        else if (c == '0')             usage = 0x27;
+        else if (c == '\n')            usage = 0x28;
+        else if (c == ' ')             usage = 0x2c;
+        else if (c == '.')             usage = 0x37;
+        else if (c == '/')             usage = 0x38;
+        else if (c == '-')             usage = 0x2d;
+        hid_queue_key(usage, mods);
+    }
+}
+
+static void hid_queue_key(u8 usage, u8 mods) {
+    if (!usage) return;
+    HidReport down{}; down.b[0] = mods; down.b[2] = usage;
+    HidReport up{};                       // key-up: relatorio todo zero
+    g_hid_reports.push_back(down);
+    g_hid_reports.push_back(up);
+}
+
+// Traduz o evento do SDL para usage HID. Devolve 0 quando nao ha mapeamento.
+static u8 hid_usage_from_sdl(const SDL_Keysym& ks, u8* mods_out) {
+    u8 mods = 0;
+    if (ks.mod & KMOD_SHIFT) mods |= 0x02;
+    if (ks.mod & KMOD_CTRL)  mods |= 0x01;
+    *mods_out = mods;
+    const SDL_Keycode k = ks.sym;
+    if (k >= SDLK_a && k <= SDLK_z) return static_cast<u8>(0x04 + (k - SDLK_a));
+    if (k >= SDLK_1 && k <= SDLK_9) return static_cast<u8>(0x1e + (k - SDLK_1));
+    switch (k) {
+        case SDLK_0:         return 0x27;
+        case SDLK_RETURN:    return 0x28;
+        case SDLK_ESCAPE:    return 0x29;
+        case SDLK_BACKSPACE: return 0x2a;
+        case SDLK_TAB:       return 0x2b;
+        case SDLK_SPACE:     return 0x2c;
+        case SDLK_MINUS:     return 0x2d;
+        case SDLK_EQUALS:    return 0x2e;
+        case SDLK_PERIOD:    return 0x37;
+        case SDLK_SLASH:     return 0x38;
+        default:             return 0;
+    }
 }
 
 static void sdl_pump() {
@@ -1118,7 +1190,12 @@ static void sdl_pump() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { g_sdl_quit = true; continue; }
         if (e.type != SDL_KEYDOWN) continue;
-        key_to_rx(e.key);
+        key_to_rx(e.key);                 // caminho UART (console serial / vtbridge)
+        if (g_usb_on) {                   // caminho USB HID (event0 -> fbcon/VT)
+            u8 mods = 0;
+            const u8 usage = hid_usage_from_sdl(e.key.keysym, &mods);
+            hid_queue_key(usage, mods);
+        }
     }
 }
 
@@ -1576,6 +1653,7 @@ static bool g_pc_check_on = false;     // ZEEBO_PC_CHECK
 static bool g_pc_check_done = false;
 static void pc_check_run(uc_engine* uc);
 static void pc_check_poll(uc_engine* uc);
+static void hid_type_ascii(const char* s);
 
 static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
@@ -1662,12 +1740,29 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     // A definicao de usb_async_poll esta' mais abaixo, junto do modelo do USB.
     void usb_async_poll(uc_engine*);
     void usb_engine_run(uc_engine*);
+    void usb_periodic_run(uc_engine*);
+
     static const bool usb_async_on = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
     if (usb_async_on && (g_icount & 0x3FFFFu) == 0u) usb_async_poll(uc);
     // MOTOR de qTD: executa a lista assincrona (a cada 4k instrucoes -- precisa ser
     // bem mais frequente que o observador, senao o HCD estoura o timeout do URB
     // antes de a transferencia acontecer).
-    if ((g_icount & 0x3FFu) == 0u) usb_engine_run(uc);
+    // Periodico ANTES do assincrono: o qTD do EP1 e' alcancavel pelas duas varreduras
+    // (o HCD reaproveita o bloco), e rodando o assincrono primeiro ele completava o
+    // qTD como transferencia de controle, deixando o relatorio HID sem entregar.
+    if ((g_icount & 0x3FFu) == 0u) { usb_periodic_run(uc); usb_engine_run(uc); }
+    // ZEEBO_HID_TYPE: digita uma string pelo teclado USB emulado depois que o guest
+    // ja' chegou na shell. Serve para provar ponta-a-ponta (sem janela) que a tecla
+    // sai do host, atravessa o EP1 de interrupcao, o usbhid e o VT ate' o fbcon.
+    if (g_hid_type_at && g_icount >= g_hid_type_at) {
+        g_hid_type_at = 0;
+        if (const char* s = std::getenv("ZEEBO_HID_TYPE")) {
+            hid_type_ascii(s);
+            std::printf("[usb-hid] ZEEBO_HID_TYPE disparou em %llu insn: %zu relatorios na fila\n",
+                        (unsigned long long)g_icount, g_hid_reports.size());
+            std::fflush(stdout);
+        }
+    }
     void fb_decode_text(uc_engine*);
     static const bool fb_text_on = (std::getenv("ZEEBO_FB_TEXT") != nullptr);
     if (fb_text_on && (g_icount & 0x3FFFFFu) == 0u) fb_decode_text(uc);
@@ -2064,6 +2159,17 @@ static bool g_usb_log = false;
 static u32  g_usb_portsc = 0x0800100Fu;
 static bool g_usb_port_reset_pending = false;
 
+// FRINDEX (0x14c). O scan_periodic() do guest monta a janela de frames que vai
+// varrer a partir daqui: `clock = ehci_read_frame_index()` e depois anda de
+// next_uframe ate' clock_frame. Com o registrador congelado em zero (nosso caso:
+// nunca foi escrito nem sintetizado) o driver so' reexaminava o frame 0, e o qH do
+// EP1 -- que fica pendurado em alguns frames do frame list -- nunca era revisitado.
+// O primeiro relatorio HID era entregue porque a varredura inicial do enqueue
+// percorre o anel inteiro; do segundo em diante a fila travava. Medido: apos a
+// entrega #1 o guest escrevia USBSTS (ack do USBINT) e nao armava mais nenhum qTD.
+static u32 g_usb_frame = 0;
+static u32 usb_frame_index() { return (g_usb_frame << 3) & 0x3fffu; }
+
 static u32 usb_reg_read(u32 off) {
     switch (off & ~0x3u) {
     // O driver faz `ehci->caps = MSM_USB_BASE + 0x100`, mas o ehci_setup do core
@@ -2076,6 +2182,7 @@ static u32 usb_reg_read(u32 off) {
     case 0x104: return 0x00000011u;          // HCSPARAMS: N_PORTS=1, PPC=1
     case 0x108: return 0x00000006u;          // HCCPARAMS: lista de frames programavel
     case 0x10c: return 0x00000000u;          // HCSP-PORTROUTE
+    case 0x14c: return usb_frame_index();    // FRINDEX (ver nota acima)
     case 0x184: {                            // PORTSC1
         if (g_usb_port_reset_pending) {
             g_usb_port_reset_pending = false;
@@ -2234,6 +2341,7 @@ static const unsigned char* descriptor(u16 wValue, u16 /*wIndex*/, u32* len) {
 //          bits 16-30 Total Bytes, bit 15 IOC, bits 10-11 CERR
 static bool g_usb_engine_log = false;
 static u32  g_usb_xfers = 0;         // qTDs executados
+static u32  g_hid_delivered = 0;     // relatorios HID entregues ao guest
 static u32  g_usb_irq_raised = 0;    // vezes que levantamos a IRQ 47
 
 // Ultimo setup packet visto (o control transfer chega em 3 estagios: SETUP, DATA,
@@ -2313,6 +2421,29 @@ static u32 usb_control(uc_engine* uc, u32 pid, const u32 bufs[5], u32 want) {
 // Executa um qTD. Devolve true se completou (Active limpo).
 // 'qtd_addr' aponta para o inicio da struct de qTD (token em +0x08, buffers em +0x0c).
 // ATENCAO: o overlay do qH NAO comeca em qh+0x10 com esse layout -- ver usb_run_overlay.
+// Levanta USBSTS.USBINT (bit 0) e, se habilitado em USBINTR, a IRQ 47 para o guest.
+// Compartilhado pelos dois schedules (assincrono e periodico).
+static void usb_raise_irq(uc_engine* uc) {
+    (void)uc;
+    g_usb_regs[(0x144u & 0x1ffu) >> 2] |= 0x1u;
+    const u32 intr = g_usb_regs[(0x148u & 0x1ffu) >> 2];
+    if (g_usb_engine_log) {
+        static u32 last_intr = 0xffffffffu;
+        if (intr != last_intr) {
+            last_intr = intr;
+            std::printf("[usb-irq] USBINTR=0x%08x (bit0=%u) irqs=%u\n",
+                        intr, (unsigned)(intr & 1u), g_usb_irq_raised);
+        }
+    }
+    if (intr & 0x1u) {
+        g_vic_pending[1] |= (1u << (INT_USB_HS - 32u));
+        ++g_usb_irq_raised;
+        if (g_usb_engine_log && g_usb_irq_raised <= 3u)
+            std::printf("[usb-irq] raise 47: vic_en[1]=0x%08x pend[1]=0x%08x\n",
+                        g_vic_en[1], g_vic_pending[1]);
+    }
+}
+
 static bool usb_run_qtd(uc_engine* uc, u32 qtd_addr, bool is_control, bool is_intr) {
     u32 q[8];
     if (uc_mem_read(uc, qtd_addr, q, sizeof(q)) != UC_ERR_OK) return false;
@@ -2326,10 +2457,20 @@ static bool usb_run_qtd(uc_engine* uc, u32 qtd_addr, bool is_control, bool is_in
     if (is_control) {
         moved = usb_control(uc, pid, bufs, total);
     } else if (is_intr && pid == 1u) {
-        // Endpoint de interrupcao (EP1 IN): sem tecla pendente o teclado responde
-        // NAK -- o qTD fica Active e o hardware tenta de novo no proximo frame.
-        // Modelamos exatamente isso: nao completar o qTD e' o comportamento correto.
-        return false;
+        // Endpoint de interrupcao (EP1 IN). Sem tecla pendente o teclado responde
+        // NAK: o qTD fica Active e o hardware tenta de novo no proximo frame --
+        // nao completar e' o comportamento correto. Com tecla na fila, entregamos
+        // um relatorio boot-protocol de 8 bytes e completamos o qTD, o que faz o
+        // usbhid gerar o evento de tecla.
+        if (g_hid_reports.empty() || total < 8u || !bufs[0]) return false;
+        const HidReport rep = g_hid_reports.front();
+        g_hid_reports.pop_front();
+        if (uc_mem_write(uc, bufs[0], rep.b, sizeof(rep.b)) != UC_ERR_OK) return false;
+        moved = 8u;
+        ++g_hid_delivered;
+        if (g_usb_engine_log && g_hid_delivered <= 12u)
+            std::printf("[usb-hid] relatorio #%u entregue: mods=%02x key=%02x (restam %zu)\n",
+                        g_hid_delivered, rep.b[0], rep.b[2], g_hid_reports.size());
     } else {
         moved = 0;
     }
@@ -2349,10 +2490,107 @@ static bool usb_run_qtd(uc_engine* uc, u32 qtd_addr, bool is_control, bool is_in
 
 // Varre a lista assincrona e executa o que estiver Active. Chamada periodicamente
 // pelo hook de instrucoes.
+// Schedule PERIODICO (interrupt transfers). O teclado HID vive aqui, nao na lista
+// assincrona: EP1 IN e' um endpoint de interrupcao, e o HCD o pendura no frame list
+// apontado por PERIODICLISTBASE (0x154), nao em ASYNCLISTADDR (0x158). Varrer so' a
+// lista assincrona fazia o motor ver apenas os qH de EP0 (controle) -- por isso o
+// teclado enumerava, nascia o event0 e nenhuma tecla chegava nunca.
+//
+// Frame list: 1024 entradas de 32 bits. Cada uma e' um ponteiro com tipo nos bits
+// 1-2 (0 = iTD, 1 = qH, 2 = siTD, 3 = FSTN) e Terminate no bit 0. Seguimos so' os
+// qH (typ=1), que e' o que o usbhid usa.
+void usb_periodic_run(uc_engine* uc) {
+    // O clock do controlador anda um frame por tick do motor: e' o que faz o
+    // scan_periodic() do guest deslizar a janela e reexaminar o qH do EP1.
+    g_usb_frame = (g_usb_frame + 1u) & 0x7ffu;
+    const u32 usbcmd = g_usb_regs[(0x140u & 0x1ffu) >> 2];
+    const u32 flbase = g_usb_regs[(0x154u & 0x1ffu) >> 2] & ~0xfffu;
+    if (!(usbcmd & 0x10u)) return;                    // Periodic Schedule Enable (PSE)
+    if (!flbase) return;
+
+    // O qH de interrupcao esta' pendurado em ALGUNS frames do frame list (o usbhid
+    // pede intervalo de 10ms). Avancar um frame por chamada faz o motor cair na
+    // entrada certa raramente, e a fila de teclas nunca drenava. Enquanto houver
+    // relatorio pendente, procuramos o proximo frame nao-vazio em vez de esperar.
+    static u32 frame = 0;
+    u32 entry = 0;
+    const int varredura = g_hid_reports.empty() ? 1 : 1024;
+    for (int tent = 0; tent < varredura; ++tent) {
+        frame = (frame + 1u) & 1023u;
+        if (uc_mem_read(uc, flbase + frame * 4u, &entry, 4) != UC_ERR_OK) return;
+        if (entry && !(entry & 1u)) break;             // achou entrada valida
+        entry = 0;
+    }
+    if (!entry) return;
+    for (int n = 0; n < 16 && entry && !(entry & 1u); ++n) {
+        const u32 typ = (entry >> 1) & 3u;
+        const u32 ptr = entry & ~0x1fu;
+        if (typ != 1u) break;                         // so' qH interessa aqui
+        u32 w[12];
+        if (uc_mem_read(uc, ptr, w, sizeof(w)) != UC_ERR_OK) break;
+        const u32 ep = (w[1] >> 8) & 0xfu;
+        if (g_usb_engine_log) {
+            static u32 shown = 0, shown_q = 0;
+            // com fila pendente o log e' o que importa: mostra o token do overlay
+            // para saber se o qTD do EP1 esta' Active (bit7) ou se o HCD o retirou.
+            if (!g_hid_reports.empty() ? (shown_q++ < 40u) : (shown++ < 4u))
+                std::printf("[usb-per] f=%u EP%u fila=%zu entregues=%u cur=%08x ovnext=%08x ovtok=%08x\n",
+                            frame, ep, g_hid_reports.size(), g_hid_delivered, w[3], w[4], w[6]);
+        }
+        // overlay em +0x10 (mesmo layout do caminho assincrono)
+        const u32 cur_qtd = w[3] & ~0x1fu;
+        if (usb_run_qtd(uc, ptr + 0x10u, false, true)) {
+            if (cur_qtd) {
+                u32 ovtok = 0;
+                if (uc_mem_read(uc, ptr + 0x18u, &ovtok, 4) == UC_ERR_OK)
+                    uc_mem_write(uc, cur_qtd + 0x08u, &ovtok, 4);
+            }
+            usb_raise_irq(uc);
+        }
+        // Percorre AS DUAS cadeias. Num qH de interrupcao recem-primado o HCD deixa
+        // hw_current = 0 e pendura o qTD em overlay.next (+0x10): seguir so' o
+        // hw_current fazia o motor concluir "nao ha trabalho" com a fila de teclas
+        // cheia (medido: ovtok=0 cur=0 mas ovnext=0x138a4180 com qTD Active).
+        const u32 cadeias[2] = {cur_qtd, w[4] & ~0x1fu};
+        for (u32 inicio : cadeias) {
+            u32 cur = inicio;
+            for (int k = 0; k < 8 && cur && !(cur & 1u); ++k) {
+                if (usb_run_qtd(uc, cur, false, true)) {
+                    // O HCD le' a conclusao no OVERLAY do qH, nao no qTD solto:
+                    // sem espelhar, o ehci_urb_dequeue nunca via' a transferencia
+                    // terminar e so' o primeiro relatorio passava.
+                    u32 q2[8];
+                    if (uc_mem_read(uc, cur, q2, sizeof(q2)) == UC_ERR_OK) {
+                        uc_mem_write(uc, ptr + 0x10u, q2, sizeof(q2));   // overlay
+                        uc_mem_write(uc, ptr + 0x0cu, &cur, 4);          // hw_current
+                    }
+                    usb_raise_irq(uc);
+                }
+                u32 nx = 0;
+                if (uc_mem_read(uc, cur, &nx, 4) != UC_ERR_OK) break;
+                if (nx & 1u) break;
+                cur = nx & ~0x1fu;
+            }
+        }
+        entry = w[0];                                  // proximo na cadeia do frame
+    }
+}
+
 void usb_engine_run(uc_engine* uc) {
     const u32 usbcmd = g_usb_regs[(0x140u & 0x1ffu) >> 2];
-    if (!(usbcmd & 0x20u)) return;                    // Async Schedule Enable (ASE)
     const u32 list = g_usb_regs[(0x158u & 0x1ffu) >> 2] & ~0x1fu;
+    // DIAGNOSTICO (ZEEBO_USB_ENGINE_LOG): conta as vezes em que havia lista mas o
+    // motor desistiu por ASE=0. Se o SETUP perdido cair nessa janela, a hipotese
+    // (a) -- HCD desliga ASE durante unlink/relink -- esta' confirmada.
+    if (!(usbcmd & 0x20u)) {
+        if (list) {
+            static u32 skipped = 0;
+            if (g_usb_engine_log && (skipped++ < 8u))
+                std::printf("[usb-ase] motor pulou: ASE=0 com ASYNCLISTADDR=0x%08x (skip #%u)\n",
+                            list, skipped);
+        }
+        return;                                       // Async Schedule Enable (ASE)
+    }
     if (!list) return;
 
     bool any = false;
@@ -2364,6 +2602,12 @@ void usb_engine_run(uc_engine* uc) {
         const u32 ep = (w[1] >> 8) & 0xfu;
         const bool is_control = (ep == 0);
         const bool is_intr    = (ep == 1);
+        if (g_usb_engine_log) {
+            static u32 seen_ep[16] = {0};
+            if (ep < 16u && seen_ep[ep]++ < 3u)
+                std::printf("[usb-ep] qh=0x%08x visita EP%u (control=%d intr=%d) fila_hid=%zu\n",
+                            qh, ep, (int)is_control, (int)is_intr, g_hid_reports.size());
+        }
         // O overlay e' uma COPIA do qTD corrente. Ao completar o overlay o hardware
         // real escreve o status de volta no qTD apontado por hw_current -- e e' esse
         // qTD que o ehci_irq/qh_completions varre (lista de software). Completar so'
@@ -2411,27 +2655,7 @@ void usb_engine_run(uc_engine* uc) {
         if (qh == list) break;                        // deu a volta
     }
 
-    if (any) {
-        // USBSTS.USBINT (bit 0) e, se habilitado em USBINTR, a IRQ 47 para o guest.
-        u32 sts = g_usb_regs[(0x144u & 0x1ffu) >> 2] | 0x1u;
-        g_usb_regs[(0x144u & 0x1ffu) >> 2] = sts;
-        const u32 intr = g_usb_regs[(0x148u & 0x1ffu) >> 2];
-        if (g_usb_engine_log) {
-            static u32 last_intr = 0xffffffffu;
-            if (intr != last_intr) {
-                last_intr = intr;
-                std::printf("[usb-irq] USBINTR=0x%08x (bit0=%u) irqs=%u\n",
-                            intr, (unsigned)(intr & 1u), g_usb_irq_raised);
-            }
-        }
-        if (intr & 0x1u) {
-            g_vic_pending[1] |= (1u << (INT_USB_HS - 32u));
-            ++g_usb_irq_raised;
-            if (g_usb_engine_log && g_usb_irq_raised <= 3u)
-                std::printf("[usb-irq] raise 47: vic_en[1]=0x%08x pend[1]=0x%08x\n",
-                            g_vic_en[1], g_vic_pending[1]);
-        }
-    }
+    if (any) usb_raise_irq(uc);
 }
 
 // ---------------------------------------------------------------------------
@@ -2685,6 +2909,10 @@ void fb_decode_text(uc_engine* uc) {
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
     if (std::getenv("ZEEBO_VIC_TEST")) return vic_test() == 0 ? 0 : 1;
+    // A tabela de teclas nao depende de kernel nenhum: tem que ser decidida AQUI,
+    // antes do SKIP(77) da imagem -- antes ela ficava depois e o alvo do Makefile
+    // nem chegava a executa-la sem ZEEBO_KERNEL.
+    if (std::getenv("ZEEBO_KEY_TEST")) return key_test() == 0 ? 0 : 1;
     if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
 
     std::printf("=== Test boot de kernel Linux no MSM7201A (Zeebo) ===\n");
@@ -2740,7 +2968,6 @@ int main(int argc, char** argv) {
     g_usb_log = (std::getenv("ZEEBO_USB_LOG") != nullptr);
     g_usb_engine_log = (std::getenv("ZEEBO_USB_ENGINE_LOG") != nullptr);
     g_usb_async_log = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
-    if (std::getenv("ZEEBO_KEY_TEST")) key_test();     // tabela de teclas (rapido, sem janela)
     uc_hook hu_w = 0, hu_r = 0;
     uc_hook_add(uc, &hu_w, UC_HOOK_MEM_WRITE, (void*)on_usb_write, nullptr, 0xa0800000u, 0xa0801000u);
     uc_hook_add(uc, &hu_r, UC_HOOK_MEM_READ,  (void*)on_usb_read,  nullptr, 0xa0800000u, 0xa0801000u);
@@ -2909,7 +3136,12 @@ int main(int argc, char** argv) {
         // completa e o HCD re-tenta em laco, poluindo o console e gastando budget. Ate'
         // fechar aquilo o EHCI fica FORA por padrao; ZEEBO_USB=1 religa para trabalhar
         // no problema. (Antes era o contrario: ligado por padrao com ZEEBO_NOUSB=1.)
-        if (std::getenv("ZEEBO_USB")) cmdline += " zeebo_usb=1";
+        g_usb_on = (std::getenv("ZEEBO_USB") != nullptr);
+        if (std::getenv("ZEEBO_HID_TYPE")) {
+            const char* at = std::getenv("ZEEBO_HID_AT");
+            g_hid_type_at = at ? std::strtoull(at, nullptr, 0) : 380000000ull;
+        }
+        if (g_usb_on) cmdline += " zeebo_usb=1";
         // Epoch de RTC: o 3.4.113 do console sobe sem CONFIG_RTC_CLASS e a placa nao
         // tem RTC modelado, entao o kernel comeca em 1970 e `date` mente. Nao ha
         // hardware para emular aqui -- passamos a hora do host pela cmdline e o
