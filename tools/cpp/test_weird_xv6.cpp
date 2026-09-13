@@ -66,6 +66,7 @@ static uc_engine* g_uc_global = nullptr;
 static u32 g_kpt_mem_addr = 0;   // endereco do kpt_mem do guest (vem do .nm, para o dump)
 static bool g_no_deliver = false;  // ZEEBO_NODELIVER=1: A/B -- nao entrega IRQ (ver on_code)
 static bool g_no_hook = false;     // ZEEBO_NOHOOK=1: A/B -- sem hook de codigo por instrucao
+static bool g_no_count = false;    // ZEEBO_NOCOUNT=1: A/B -- fatia por tempo, sem `count`
 static int g_hb_ms = 0;   // ZEEBO_XV6_HB=<ms> liga o batimento
 // Caminha a tabela do guest e PROCURA CICLO. O host backtrace mostrou o emulador girando
 // em get_phys_addr_arm/tb_htable_lookup (pagina de CODIGO): walk que nao termina e' o
@@ -476,6 +477,12 @@ static std::vector<u8> read_file(const std::string& p) {
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    // Alavancas lidas NO INICIO: o registro do hook de codigo acontece muito antes do meio do
+    // main, e ler o env la' embaixo faz a alavanca nao valer nada (custou um A/B inteiro).
+    g_no_hook = (std::getenv("ZEEBO_NOHOOK") != nullptr);
+    g_no_count = (std::getenv("ZEEBO_NOCOUNT") != nullptr);
+    g_no_deliver = (std::getenv("ZEEBO_NODELIVER") != nullptr);
+    if (const char* hb0 = std::getenv("ZEEBO_XV6_HB")) g_hb_ms = std::atoi(hb0);
     std::printf("=== xv6-zeebo no modelo REAL do MSM7201A (nao no runner Python) ===\n");
 
     const char* env = std::getenv("ZEEBO_XV6_KERNEL");
@@ -619,9 +626,11 @@ int main(int argc, char** argv) {
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
     g_uc_global = uc;
-    if (const char* hb = std::getenv("ZEEBO_XV6_HB")) g_hb_ms = std::atoi(hb);
-    g_no_deliver = (std::getenv("ZEEBO_NODELIVER") != nullptr);
-    g_no_hook = (std::getenv("ZEEBO_NOHOOK") != nullptr);
+    // ARMADILHA (custou um A/B inteiro): estas leituras TEM de vir ANTES do registro do hook de
+    // codigo -- senao o `g_no_hook` ainda vale false no registro e a alavanca nao faz nada (e o
+    // "A/B sem hook" roda COM hook, mentindo sobre o resultado).
+    std::printf("[xv6] alavancas: no_hook=%d no_deliver=%d tlb=%s\n", (int)g_no_hook,
+                (int)g_no_deliver, std::getenv("ZEEBO_TLB") ? std::getenv("ZEEBO_TLB") : "cpu");
     // Alavanca de diagnostico: o default do Unicorn e' UC_TLB_VIRTUAL (TLB virtual proprio);
     // UC_TLB_CPU usa o softmmu classico, com caminhada de tabela por acesso. O travamento
     // medido e' na GERACAO do bloco da primeira busca em modo usuario -- se o modo de TLB
@@ -684,12 +693,59 @@ int main(int argc, char** argv) {
             ++feito; ++fatias;
             if (e != UC_ERR_OK) break;
             if (fatias > 300) break;
+            // O medidor de PC vale TAMBEM aqui: sem hook nao ha' contador, entao a unica forma de
+            // saber se o guest avanca e' o proprio PC.
+            {
+                static u64 pc_ant2 = ~0ull;
+                static u32 preso2 = 0;
+                u32 pc2 = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc2);
+                if ((u64)pc2 == pc_ant2) {
+                    if (++preso2 == 3u) {
+                        std::printf("\n[xv6] (sem hook) PC TRAVADO em 0x%08x por 3 fatias de "
+                                    "200 ms -- o guest NAO avanca; e' laco do guest ou do motor.\n",
+                                    pc2);
+                        std::fflush(stdout);
+                    }
+                } else {
+                    pc_ant2 = (u64)pc2;
+                    preso2 = 0;
+                }
+            }
             continue;
         }
-        e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 0, n);
+        // `ZEEBO_NOCOUNT=1`: com HOOK (que forca a sincronia do PC por instrucao, entao o medidor
+        // de PC vale) mas SEM `count` (sem mecanismo de contagem) -- fatia por tempo. Se o guest
+        // avancar assim, o culpado e' a contagem/slicing; se nao avancar, e' o motor/guest.
+        if (g_no_count) {
+            e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 200000ull, 0);
+        } else {
+            e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 0, n);
+        }
         feito += (g_icount - antes);
         ++fatias;
         if (e != UC_ERR_OK) break;
+        // MEDIDOR HONESTO: `g_icount` conta CHAMADAS DO HOOK, e o Unicorn consume a contagem
+        // nesse caminho -- ele pode crescer com o PC do guest parado (medido: anel 8/8 no mesmo
+        // PC com o orcamento inteiro consumido). Progresso de verdade e' o PC MUDAR.
+        {
+            static u64 pc_ant = ~0ull;
+            static u32 preso = 0;
+            u32 pc_pos = 0;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc_pos);
+            if ((u64)pc_pos == pc_ant) {
+                if (++preso == 3u) {
+                    std::printf("\n[xv6] PC TRAVADO em 0x%08x com o contador correndo "
+                                "(%llu 'instrucoes'): o guest NAO avanca -- e' o motor no "
+                                "caminho do hook/contagem, nao o SO.\n",
+                                pc_pos, (unsigned long long)g_icount);
+                    std::fflush(stdout);
+                }
+            } else {
+                pc_ant = (u64)pc_pos;
+                preso = 0;
+            }
+        }
         if (g_stall_pc != 0) {
             if (std::getenv("ZEEBO_STALL_TRAP") != nullptr) {
                 // Parar AQUI para o gdb (iniciado por ele, ptrace nao bloqueia): e' a unica forma
