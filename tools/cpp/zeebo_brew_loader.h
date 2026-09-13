@@ -64,15 +64,15 @@ struct AppletModule {
     u32         reserved_hi_va = 0; // load_va - 4
 };
 
-// VAs dos símbolos BREW resolvidos no APPS.bin (AEECShell). Todos [infer] até
-// serem confirmados por RE. Zero = desconhecido -> dispatch honesto/no-op.
+// VAs BREW só podem entrar aqui após prova semântica (objeto/vtable/call chain).
+// Zero = desconhecido -> dispatch honesto/no-op. Dois rótulos históricos foram
+// refutados pelos gates de proveniência e permanecem apenas como âncoras
+// diagnósticas; nunca são defaults de dispatch.
+inline constexpr u32 DISPROVEN_BOOTSTRAP_ENV_VA = 0x10c874f4;
+inline constexpr u32 DISPROVEN_ISHELL_RODATA_VA = 0x105c7fb4;
 struct BrewSymbols {
-    // Vetor da AEECShell onde ela decide criar a instância do applet do jogo.
-    // Confirmado subindo no boot recente (commit "vetor BREW/AEECShell").
-    u32 aeecshell_dispatch_va = 0x10c874f4;
-    // Entradas de despacho a resolver via RE / reaproveitar do mod_probe.
-    // Localizadas no segmento 11 do APPS.bin (VA base 0x1013a000):
-    u32 ishell_create_va   = 0x105c7fb4;  // ISHELL_CreateInstance(pShell, clsid, ppOut)
+    u32 aeecshell_dispatch_va = 0; // nenhum dispatch AEECShell provado
+    u32 ishell_create_va   = 0;    // nenhum ISHELL_CreateInstance provado
     u32 aeemod_load_va     = 0;           // AEEMod_Load(pIModule, ...)
     u32 aeeclscreate_va    = 0;           // AEEClsCreateInstance(clsid, pShell, pModule, ppObj)
     u32 aeeappletnew_va    = 0x105322f2;  // AEEAppletNew (ZeeboApp applet entry)
@@ -87,23 +87,21 @@ enum : u32 {
     EVT_KEY         = 0x0102, // 258
 };
 
-// Códigos de tecla AVK do Zeebo / Z-Pad (subconjunto usado no console).
+// Códigos de tecla AVK do Zeebo / Z-Pad (padrão oficial Qualcomm SDK - AEEVCodes.h).
 enum : u32 {
-    AVK_LEFT   = 0xFF51,
-    AVK_UP     = 0xFF52,
-    AVK_RIGHT  = 0xFF53,
-    AVK_DOWN   = 0xFF54,
-    AVK_SELECT = 0xFF0D, // Enter / Botão A (confirmar)
-    AVK_CLR    = 0xFF08, // Backspace / Botão B (voltar/limpar)
-    AVK_0      = 0x30,   // '0'..'9' = 0x30..0x39
-    AVK_9      = 0x39,
-    // Botões de jogo do Z-Pad. [infer] AVK_SOFT1/2 e AVK_INFO/SPACE seguem a
-    // faixa AVK_* padrão do BREW SDK; usados p/ mapear C/V/Espaço/Esc do host.
-    AVK_SOFT1  = 0xFF57, // Z-Pad botão 1
-    AVK_SOFT2  = 0xFF58, // Z-Pad botão 2
-    AVK_INFO   = 0xFF59, // Z-Pad botão 3
-    AVK_SPACE  = 0x20,   // Z-Pad botão 4 (Espaço)
-    AVK_FUNC   = 0xFF1B, // Home / Escape (menu)
+    AVK_0      = 0xE021, // 0xE021..0xE02A = '0'..'9'
+    AVK_9      = 0xE02A,
+    AVK_CLR    = 0xE030, // Escape / Backspace / Botão B (voltar/limpar)
+    AVK_UP     = 0xE031, // Direcional Cima
+    AVK_DOWN   = 0xE032, // Direcional Baixo
+    AVK_LEFT   = 0xE033, // Direcional Esquerda
+    AVK_RIGHT  = 0xE034, // Direcional Direita
+    AVK_SELECT = 0xE035, // Enter / Espaço / Botão A (confirmar)
+    AVK_SOFT1  = 0xE036, // Z-Pad botão 1
+    AVK_SOFT2  = 0xE037, // Z-Pad botão 2
+    AVK_INFO   = 0xE038, // Z-Pad botão 3
+    AVK_SPACE  = 0xE039, // Z-Pad botão 4
+    AVK_FUNC   = 0xE03A, // Home / Escape (menu)
 };
 
 // Botões lógicos do Z-Pad (independente do backend de entrada). O mapa
@@ -357,7 +355,7 @@ public:
     // então redirecionar o PC / parar a fatia conforme sua convenção de hook).
     // NÃO altera PC aqui — devolve a decisão ao orquestrador (desacoplamento).
     bool on_code(u32 pc) {
-        if (pc == sym_.aeecshell_dispatch_va) { on_aeecshell_dispatch(); return true; }
+        if (sym_.aeecshell_dispatch_va && pc == sym_.aeecshell_dispatch_va) { on_aeecshell_dispatch(); return true; }
         if (sym_.ishell_create_va && pc == sym_.ishell_create_va) { on_create_instance(); return true; }
         if (sym_.aeemod_load_va && pc == sym_.aeemod_load_va)       { on_aeemod_load();     return true; }
         if (sym_.aeeclscreate_va && pc == sym_.aeeclscreate_va)     { on_cls_create();      return true; }

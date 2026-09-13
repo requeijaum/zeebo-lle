@@ -1,0 +1,45 @@
+[System] Mode: Headless (CLI/Test runner)
+[System] Boot target: BREW Appmgr (Jailbreak default) (FIRSTAPP:0)
+===================================================================
+  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          
+===================================================================
+[System] Initializing EBI2 NAND Controller and DMOV DMA...
+[System] Initializing MDDI Display, Adreno 130 GPU, and Host Video Sink...
+[System] Initialized SoftRasterizer, IglHook and IGL guest-vtable bridge on Core 0 memory space.
+[System] Initializing Core 0 (ARM1176JZ-S Apps Processor)...
+[System] Initializing Core 1 (ARM926EJ-S Modem Processor)...
+[System] APPS_RAM pool host-backed @0x10000000 (96 MB), VTLB LUT armada
+[KIP] Kernel Interface Page @ 0xf0f00000 (bootinfo -> 0xb0d00000, RAM 0x10000000-0x16000000, PageInfo[0xc8]=0x01111006 min-page=4K)
+[System] Loading APPS via Hardware DMOV DMA from NAND copy (../../nand/1.1.2_APPS.bin)...
+[APPSBL] Emulating partition '0:APPS' lookup & EBI2 DMA handoff at 0x0de8...
+[System] Notice: NAND direct header 0x00000000, using fallback APPS stream
+[System] Loading APPS image (../../nand/1.1.2_AMSS.bin) into Core 0...
+[System] APPS ELF Entrypoint: 0x00a00000, Segments: 18
+[System] IglGuestBridge armado com 9 intervalos executáveis do APPS.bin (resolução determinística de gpIGL/gpIEGL)
+[System] Loading AMSS via Hardware DMOV DMA from NAND copy (../../nand/1.1.2_APPS.bin)...
+[System] Loading AMSS image (../../nand/1.1.2_AMSS.bin) into Core 1...
+[System] AMSS ELF Entrypoint (e_entry/PA): 0x00a00000, Segments: 18
+[System][Core1] Reset vector real (VA) = 0xf0000000  (e_entry PA 0x00a00000 traduzido)
+[System][Core1] Preambulo: CPSR=0xd3 (SVC,IRQ/FIQ off) SP=0x00a197f8
+[System][Core1] Tabela de regioes REX semeada @0x00a1d73c (base=0x00a00000 teto=0x00c00000 attr=0x0f) - checagem 0xf0017448 -> 0
+[System][Core1] Split I/D do heap REX armado: janela 0xf0000000+2048KB (código pristino preservado, dados -> shadow PA 0x00a00000)
+[Q0.1] capture hook instalado @ consumer=0x16e8cb96 dispatcher=0x16e8cba0
+[System] Initialization complete. Both cores ready.
+[System] Beginning interleaved execution: 250 cycles x 10000 insns...
+  [Cycle 00] Core0(ARM11): pc=0x00a09c40 insns=10000 (ok) | Core1(ARM9): pc=0xf0017544 insns=10000 (ok)
+  [Cycle 01] Core0(ARM11): pc=0x00a13880 insns=20000 (ok) | Core1(ARM9): pc=0xf0017890 insns=20000 (ok)
+  [Cycle 02] Core0(ARM11): pc=0x00a1d4c0 insns=30000 (ok) | Core1(ARM9): pc=0xf0017890 insns=30000 (ok)
+  [Cycle 03] Core0(ARM11): pc=0x00a27100 insns=40000 (ok) | Core1(ARM9): pc=0xf0017890 insns=40000 (ok)
+  [Cycle 04] Core0(ARM11): pc=0x00a30d40 insns=50000 (ok) | Core1(ARM9): pc=0xf0017890 insns=50000 (ok)
+  [Cycle 10] Core0(ARM11): pc=0x00a6b6c0 insns=110000 (ok) | Core1(ARM9): pc=0xf0017890 insns=110000 (ok)
+  [Cycle 20] Core0(ARM11): pc=0x00acd140 insns=210000 (ok) | Core1(ARM9): pc=0xf0017890 insns=210000 (ok)
+  [Cycle 30] Core0(ARM11): pc=0x00b2ebc0 insns=310000 (ok) | Core1(ARM9): pc=0xf0017890 insns=310000 (ok)
+  [Cycle 40] Core0(ARM11): pc=0x00b90640 insns=410000 (ok) | Core1(ARM9): pc=0xf0017890 insns=410000 (ok)
+  [Cycle 50] Core0(ARM11): pc=0x00bf20c0 insns=510000 (ok) | Core1(ARM9): pc=0xf0017890 insns=510000 (ok)
+  [Cycle 60] Core0(ARM11): pc=0x00c53b40 insns=610000 (ok) | Core1(ARM9): pc=0xf0017890 insns=610000 (ok)
+  [Cycle 70] Core0(ARM11): pc=0x00cb55c0 insns=710000 (ok) | Core1(ARM9): pc=0xf0017890 insns=710000 (ok)
+  [Cycle 80] Core0(ARM11): pc=0x00d17040 insns=810000 (ok) | Core1(ARM9): pc=0xf0017890 insns=810000 (ok)
+  [Cycle 90] Core0(ARM11): pc=0x00d78ac0 insns=910000 (ok) | Core1(ARM9): pc=0xf0017890 insns=910000 (ok)
+  [Cycle 100] Core0(ARM11): pc=0x00dda540 insns=1010000 (ok) | Core1(ARM9): pc=0xf0017890 insns=1010000 (ok)
+zeebo_lle_main: ./qemu/exec.c:837: phys_section_add: Assertion `map->sections_nb < TARGET_PAGE_SIZE' failed.
+timeout: o comando monitorado despejou núcleo

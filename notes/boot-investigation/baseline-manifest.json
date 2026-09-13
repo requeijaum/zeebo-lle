@@ -1,0 +1,19 @@
+{
+  "head": "ea1b48f6938dd404763136e923a11a2202ad59b1",
+  "scope": "source and working APPS identity; not a machine snapshot or executable validation",
+  "unicorn_python": "2.1.2",
+  "capstone_python": "5.0.7",
+  "files": [
+    {"path": "nand/1.1.2_APPS.bin", "bytes": 22151168, "sha256": "be45dae7c6fd71d615a6247f7e56e9c64bf5ac40d164df99eded475e85f9c909"},
+    {"path": "tools/cpp/zeebo_lle_main.cpp", "bytes": 154805, "sha256": "f9aca53fd224f7c13cb62aac35df73e15d1b08577d11726a4136af80b2ca3bad"},
+    {"path": "tools/cpp/zeebo_l4_mmu.h", "bytes": 21736, "sha256": "d38444aab359c9784c625069e4d0c4c65d5c4784c24643e3424c3b1b5b8a5b4c"},
+    {"path": "tools/cpp/zeebo_save_state.h", "bytes": 7993, "sha256": "6ee26e298f58f91fde44739b3849d839d9cb17a5dc1bb18fee8cc12d53660c69"}
+  ],
+  "workers": {
+    "abi": {"worktree": "/tmp/zeebo-boot-abi", "port": 49101},
+    "fuzz": {"worktree": "/tmp/zeebo-boot-fuzz", "full_emulator": false},
+    "replay": {"worktree": "/tmp/zeebo-boot-replay", "port": 49103},
+    "corpus": {"read_only": true},
+    "control_audit": {"read_only": true}
+  }
+}

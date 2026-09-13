@@ -1,0 +1,36 @@
+{
+  "port": 49103,
+  "initial_state": {
+    "ok": true,
+    "cycle": 0,
+    "c0_pc": 0,
+    "c0_insns": 0,
+    "c1_pc": 0,
+    "c1_insns": 0,
+    "running": false
+  },
+  "byte_validation": {
+    "0xb000c738": {
+      "got16": "140000ef000054e300108415000055e3",
+      "expect_apps": "140000ef000054e3",
+      "expect_amss": "03f0a0e10e30a0e1",
+      "matches_apps": true,
+      "matches_amss": false
+    },
+    "0xb000d494": {
+      "got16": "a1fcffebc83090e5ff2fc3e30320c2e3",
+      "expect_apps": "a1fcffebc83090e5",
+      "expect_amss": "012052e2000483e5",
+      "matches_apps": true,
+      "matches_amss": false
+    },
+    "0xb000d6dc": {
+      "got16": "004084e01833a011070054e1035085e0",
+      "expect_apps": "004084e01833a011",
+      "expect_amss": "a220b0e1013083e2",
+      "matches_apps": true,
+      "matches_amss": false
+    }
+  },
+  "verdict": "APPS_CORRECT"
+}

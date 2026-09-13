@@ -1,0 +1,48 @@
+diff --git a/tools/cpp/zeebo_lle_main.cpp b/tools/cpp/zeebo_lle_main.cpp
+index 0189256..aa9e55d 100644
+--- a/tools/cpp/zeebo_lle_main.cpp
++++ b/tools/cpp/zeebo_lle_main.cpp
+@@ -2732,6 +2732,29 @@ private:
+ 
+ 
+ 
++        // [DIAG-TAB] tabela de tamanhos de pagina do OKL4 em 0xf000efc8.
++        // Pristino (AMSS) = {0c,10,14,1a,20}. Se ler zero, o fpage sai com size=0.
++        static uc_hook h_diag_tab_ = 0;
++        uc_hook_add(core1_.uc, &h_diag_tab_, UC_HOOK_CODE,
++                    (void*)+[](uc_engine* uc, uint64_t addr, uint32_t, void* ud) {
++                        u32 a = (u32)addr;
++                        // laco de busca do tamanho: f0016a2c..f0016a54, e a saida f0016a60+
++                        if (a != 0xf0016a2c && a != 0xf0016a30 && a != 0xf0016a48 &&
++                            a != 0xf0016a4c && a != 0xf0016a50 && a != 0xf0016a60 &&
++                            a != 0xf0016a78 && a != 0xf0016a88) return;
++                        (void)ud;
++                        static int n = 0; if (++n > 40) return;
++                        u32 r1=0,r2=0,r5=0,r6=0,r7=0,r8=0;
++                        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
++                        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
++                        uc_reg_read(uc, UC_ARM_REG_R5, &r5);
++                        uc_reg_read(uc, UC_ARM_REG_R6, &r6);
++                        uc_reg_read(uc, UC_ARM_REG_R7, &r7);
++                        uc_reg_read(uc, UC_ARM_REG_R8, &r8);
++                        fprintf(stderr, "[TAB] pc=%08x r1=%08x r2=%08x r5=%d r6=%08x r7=%08x r8=%08x\n",
++                                a, r1, r2, (int)r5, r6, r7, r8);
++                    }, this, 1, 0);
++
+         // Console do kernel OKL4 (Core1). O putchar do kernel (0xf000e6e0) grava
+         // byte a byte num ring buffer em 0xf001da68 com indice em 0xf001da64
+         // (`strb r0,[r2,r3]` / `str r1,[ip]`, wrap em 0x800). Espelhar essas
+@@ -3841,6 +3864,13 @@ private:
+             }
+         }
+ 
++        // PROBE: .rodata do kernel (tabela de tamanhos de pagina em f000efc8) cai
++        // dentro da janela do heap e o laco de zeragem apaga a copia do shadow.
++        // Serve o pristino para confirmar causalidade.
++        if (a >= 0xf000e000u && a < 0xf0010000u) {
++            uc_mem_write(uc, a, &sys->rex_heap_pristine_[off], n);
++            return;
++        }
+         uc_mem_write(uc, a, &sys->rex_heap_shadow_[off], n);
+         for (u32 w=a&~3u; w<a+n; w+=4) sys->rex_heap_dirty_.insert(w);
+     }

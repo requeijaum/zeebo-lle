@@ -56,17 +56,15 @@ from zeebo_debug_scripting import ZeeboDebugClient  # noqa: E402
 
 # ─── Catálogo de applets EFS2 a testar ──────────────────────────────────────
 # mode:
-#   "lifecycle"   -> applet dispara EVT_APP_START e renderiza (Z-Wheel/ZeeboApp);
-#                    a prova de pixels vem do lifecycle (framebuffer soma > 0).
-#                    NÃO permanece no loop de drain do ControlServer, então a
-#                    telemetria vem do stdout estruturado do próprio emulador.
-#   "interleaved" -> applet é injetado via BrewLoader e a execução segue no
-#                    run_interleaved(), que drena o ControlServer ao vivo. Aqui
-#                    coletamos vram_stat()/backtrace() por TCP em tempo real.
+#   "lifecycle"   -> lifecycle-only probe. Current EFS2 catalog entries are
+#                    rejection controls until inode→cluster provenance exists.
+#   "interleaved" -> attempts injection and continues run_interleaved() so the
+#                    agent can prove clean refusal, core progress and no forged
+#                    execution via live ControlServer telemetry.
 CATALOG = [
-    {"id": "274755",     "mode": "lifecycle",   "desc": "Z-Wheel / ZeeboApp (AEECLSID 0x01070798)"},
-    {"id": "reksio.mod", "mode": "interleaved", "desc": "Reksio applet (bloco indireto 0x3b1d400)"},
-    {"id": "tectoy.mod", "mode": "interleaved", "desc": "TecToy/Claro applet (0x6026200)"},
+    {"id": "274755",     "mode": "lifecycle",   "desc": "Z-Wheel candidate; gnode provenance unresolved"},
+    {"id": "reksio.mod", "mode": "interleaved", "desc": "Reksio candidate; old KnownIB was modem/NV data"},
+    {"id": "tectoy.mod", "mode": "interleaved", "desc": "TecToy candidate; old KnownIB was non-code data"},
 ]
 
 

@@ -37,7 +37,7 @@ static bool run_case(const uint8_t* code, size_t len, u32 slide_limit,
     uc_engine* uc = nullptr;
     if (uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc) != UC_ERR_OK) { printf("uc_open FAIL\n"); return false; }
     // ARM11 (ARMv6) — interpretador; nao habilitamos JIT em lugar nenhum.
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, BASE, 0x10000, UC_PROT_ALL);
     uc_mem_write(uc, BASE, code, len);
 

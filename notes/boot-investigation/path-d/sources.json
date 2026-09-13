@@ -1,0 +1,57 @@
+{
+  "task": "Path D: firmware rehosting/snapshot fuzzing survey + OKL4 2.1.x ABI corpus match",
+  "generated": "2026-09-08",
+  "clean_room_note": "a1Sim black-box only; qdsp5 frozen; refs/ read-only; upstream OKL4 used for ABI/architecture transfer under license review, no verbatim code copied into project source.",
+  "sources": [
+    {
+      "id": 1,
+      "url": "https://github.com/rochus-keller/OKL4",
+      "title": "rochus-keller/OKL4 (public mirror of OKL4 v2.x open-source release)",
+      "provenance": "GitHub public repo, default branch 'master'. No git tags. PINNED commit 2f80ba36b59870ade7dbb41a0e16c3f3b7e70e43 (2025-10-20T14:51:47Z). README claims tree == okl4-2.1.1-fix7 (cross-checked vs SourceForge emboslab + archive.org) but this is a mirror claim, not a signed release. Files carry NICTA (2004-2006) + Open Kernel Labs 2007 copyright with OzPLB/OKL4 open-source licence header.",
+      "used_for": "l4e ABI + min_pagesize algorithm + L4_KernelInterface ARM stub match"
+    },
+    {
+      "id": 2,
+      "url": "https://raw.githubusercontent.com/rochus-keller/OKL4/master/libs/l4e/src/min_pagebits.c",
+      "title": "l4e_min_pagebits() source",
+      "provenance": "raw fetch via curl, verbatim",
+      "used_for": "matches local iguana/server/src/pd.c:732 l4e_min_pagesize() usage"
+    },
+    {
+      "id": 3,
+      "url": "https://raw.githubusercontent.com/rochus-keller/OKL4/master/libs/l4e/include/misc.h",
+      "title": "l4e/misc.h — l4e_min_pagesize/l4e_min_pagebits/l4e_biggest_fpage decls",
+      "provenance": "raw fetch, verbatim",
+      "used_for": "ABI of min_pagesize = 1<<min_pagebits; page-mask bit-scan"
+    },
+    {
+      "id": 4,
+      "url": "https://raw.githubusercontent.com/rochus-keller/OKL4/master/libs/l4e/src/biggest_fpage.c",
+      "title": "l4e_biggest_fpage() — largest aligned fpage decomposition",
+      "provenance": "raw fetch, verbatim",
+      "used_for": "matches local mempool_init largest_aligned_fpage (0xb000d4dc) shift-by-bits loop"
+    },
+    {
+      "id": 5,
+      "url": "https://raw.githubusercontent.com/rochus-keller/OKL4/master/arch/arm/libs/l4/src/kernelinterface.spp",
+      "title": "L4_KernelInterface ARM assembly stub",
+      "provenance": "raw fetch; BYTE-IDENTICAL to local refs/okl4-2.1.1-fix7/arch/arm/libs/l4/src/kernelinterface.spp",
+      "used_for": "PRIMARY ABI evidence for the r4/r5/r6 saved-frame bug"
+    },
+    {
+      "id": 6,
+      "url": "https://raw.githubusercontent.com/rochus-keller/OKL4/master/libs/l4e/package.cfg",
+      "title": "l4e package.cfg",
+      "provenance": "raw fetch, verbatim",
+      "used_for": "license/provenance: Author Ben Leslie/NICTA, License OzPLB, 'L4-easy' library"
+    },
+    {
+      "id": 7,
+      "url": "https://shellphish.net/aixcc/publications/2022_USENIXSecurity_Fuzzware.pdf",
+      "title": "Fuzzware: Using Precise MMIO Modeling for Effective Firmware Fuzzing (USENIX Security 2022)",
+      "provenance": "web_search primary PDF; NOT extracted in full — cited at technique level only",
+      "used_for": "snapshot/MMIO-modeling rehosting technique (Cortex-M scope caveat)"
+    }
+  ],
+  "search_reliability": "web_search backend returned empty for 1 of 3 ABI queries; pivoted to GitHub REST API + raw.githubusercontent via urllib/curl for all upstream primary fetches (no guessed URLs)."
+}

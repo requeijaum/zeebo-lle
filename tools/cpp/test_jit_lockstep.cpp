@@ -75,7 +75,7 @@ static int lockstep(const std::vector<uint32_t>& code,
         std::printf("  (erro) uc_open falhou\n");
         return -2;
     }
-    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+    uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     uc_mem_map(uc, 0, kMemSize, UC_PROT_ALL);
     uc_mem_write(uc, 0, g_mem.data(), kMemSize);
     for (int i = 0; i < 15; i++) uc_reg_write(uc, UC_ARM_REG_R0 + i, &init_regs[i]);
@@ -296,7 +296,7 @@ int main() {
 
         uc_engine* uc = nullptr;
         uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
         uc_mem_map(uc, 0, kMemSize, UC_PROT_ALL);
         for (size_t i = 0; i < code.size(); i++) {
             uint32_t w = code[i];

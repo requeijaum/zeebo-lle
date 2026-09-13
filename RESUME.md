@@ -1,5 +1,15 @@
 # Zeebo LLE — RESUMO / RESUME (2026-09-06)
 
+> **Atualização 2026-09-12** — este resumo é o retrato de 06/09 e fica como registro
+> daquele momento. O estado atual vive em: `ROADMAP.md` (fases 13–16, com a **Fase 16:
+> boot de Linux real**), `docs/linux-boot.md` (harness do kernel 3.4.113, mapa de
+> periféricos, janela de depuração 1x2 UART|framebuffer, EHCI), `notes/` (KERNELS_TRICKS,
+> STATS_TECHNIQUES, boot-investigation) e os `*_TODO.md` (áudio/GPU/QDSP5/disclosure,
+> atualizados em 11–12/09). A linha `linux-boot` está publicada em `origin/linux-boot`:
+> shell + framebuffer + SDL2/Wayland + host controller USB subindo e enumerando; falta o
+> teclado HID. Ver também `PUBLIC_DISCLOSURE_TODO.md` — há bloqueador jurídico aberto
+> (`refs/` de terceiros versionado em repo público).
+
 Estado honesto ao parar. Tudo commitado em `~/projects/zeebo-lle/`; para retomar,
 leia `ROADMAP.md` + `notes/FINDINGS.md` (log completo, sessões 2a–2m).
 

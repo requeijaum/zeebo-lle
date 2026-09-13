@@ -94,9 +94,13 @@ int main(int argc, char** argv) {
     }
 
     // --- Expanded applet catalog: additional proven indirect blocks ---------
-    // Each entry is byte-verified: exact payload length + FNV-1a checksum, plus
-    // an embedded ASCII signature confirming the applet/asset identity. These
-    // are the same anchors registered in zeebo_lle_main.cpp (efs2_extract).
+    // Each entry is byte-verified: exact payload length + FNV-1a checksum. These
+    // checks validate the EFS2 indirect-block CHAINING (parser correctness) only.
+    // HONEST NOTE (audit-efs2): these blobs are NOT executable applet modules —
+    // their first words are 0xfd19f297 / 0x00000000, neither ELF nor a valid
+    // initial ARM branch. The former KnownIB claims that reported/injected them
+    // as applets were removed; see test_efs2_module_guard / test_efs2_guard_real,
+    // which prove the fail-closed guard rejects them.
     auto has_sig = [](const std::vector<u8>& v, const char* s) -> bool {
         std::string n(s);
         return std::search(v.begin(), v.end(), n.begin(), n.end()) != v.end();

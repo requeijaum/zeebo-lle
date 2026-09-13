@@ -121,6 +121,33 @@ test_nand_relocator_bounds: test_nand_relocator_bounds.cpp
 test_vic_irq: test_vic_irq.cpp zeebo_vic_irq.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_VIC_WITH_UNICORN -o $@ test_vic_irq.cpp -lunicorn
 
+# Seletor de IRQ do harness de Linux: cobre as DUAS palavras do VIC (0-63). O bug
+# real era varrer so' a palavra 0, o que tornava a IRQ 47 (USB HS) inespera'vel.
+# Roda sem kernel (puro host), por isso cabe no check-fast.
+test-linux-vic: test_linux_boot
+	@echo '--- VIC 64 linhas: seletor round-robin cobre IRQ >= 32 ---'
+	ZEEBO_VIC_TEST=1 ./test_linux_boot
+
+# Tabela de teclas do harness (SDL -> bytes na RX da UART). Tambem host-only.
+# exit 77 = SKIP (sem zImage no ambiente); nao e' sucesso nem falha.
+test-linux-keys: test_linux_boot
+	@echo '--- tabela de teclas: SDL -> RX da UART (sem boot, sem kernel) ---'
+	ZEEBO_KEY_TEST=1 ./test_linux_boot
+
+# HID: teclas viram relatorios USB e chegam na shell do guest. O teste digita
+# "uname" PELO TECLADO EMULADO (nenhum byte vai pela UART) e exige que o guest
+# ecoe o comando e responda. Sem o kernel o harness sai 77 = SKIP.
+test-linux-hid: test_linux_boot
+	@echo '--- HID: digitacao pelo teclado USB chega na shell do framebuffer ---'
+	@out=`ZEEBO_USB=1 ZEEBO_HID_TYPE="uname\n" ZEEBO_HID_AT=340000000 ZEEBO_FB_TEXT=1 \
+		ZEEBO_BUDGET=760000000 ZEEBO_KERNEL=../../testdata/kernels/zImage-3.4.113-rootfs.bin \
+		./test_linux_boot </dev/null 2>&1`; \
+		st=$$?; \
+		if [ $$st -eq 77 ]; then echo 'SKIP: kernel ausente'; exit 77; fi; \
+		printf '%s\n' "$$out" | grep -q '1|~ # uname' || { echo 'RED: o guest nao recebeu o comando digitado'; exit 1; }; \
+		printf '%s\n' "$$out" | grep -q 'Linux' || { echo 'RED: shell nao executou o comando'; exit 1; }; \
+		echo 'OK: digitacao HID chega na shell do guest'
+
 test-vic-irq: test_vic_irq
 	./test_vic_irq
 	@# Negative mutation: mask-ignoring delivery MUST fail (RED reproduced).
@@ -242,6 +269,35 @@ test-module-gate: test_module_gate
 	else echo "OK: mutante PASS-on-load fica vermelho (RED reproduzido)"; \
 	  rm -f test_module_gate_mutant; fi
 
+# Auditoria audit-efs2: gate FAIL-CLOSED da extração/lançamento EFS2. Um payload
+# cru só vira applet com entry de módulo plausível (ELF e_entry OU branch ARM
+# inicial na faixa). Bateria sintética host-only (positivos + negativos). O
+# controle mutacional reintroduz o fallback raw-start (aceita qualquer blob) e
+# DEVE deixar os negativos vermelhos.
+test_efs2_module_guard: test_efs2_module_guard.cpp zeebo_efs2_module_guard.h
+	$(CXX) $(CXXFLAGS) -o $@ test_efs2_module_guard.cpp
+
+test-efs2-module-guard: test_efs2_module_guard
+	./test_efs2_module_guard
+	@$(CXX) $(CXXFLAGS) -DZEEBO_EFS2_GUARD_MUTANT_ACCEPT_ALL=1 -o test_efs2_module_guard_mutant test_efs2_module_guard.cpp
+	@if ./test_efs2_module_guard_mutant >/dev/null 2>&1; then \
+	  echo "FAIL: mutante accept-all passou inesperadamente (guard não é fail-closed)"; \
+	  rm -f test_efs2_module_guard_mutant; exit 1; \
+	else echo "OK: mutante accept-all fica vermelho (RED reproduzido)"; \
+	  rm -f test_efs2_module_guard_mutant; fi
+
+# Controle negativo REAL: os 3 blobs KnownIB históricos (reksio.mod/274755/
+# tectoy.mod) extraídos da NAND real DEVEM ser rejeitados pelo guard. Sem a NAND
+# proprietária -> SKIP (exit 77), nunca PASS silencioso. Tier B (firmware).
+test_efs2_guard_real: test_efs2_guard_real.cpp zeebo_efs2_module_guard.h zeebo_efs2_fs.h
+	$(CXX) $(CXXFLAGS) -o $@ test_efs2_guard_real.cpp
+
+test-efs2-guard-real: test_efs2_guard_real
+	@./test_efs2_guard_real ../../nand/1.1.2.bin; rc=$$?; \
+	if [ $$rc -eq 0 ]; then echo "test-efs2-guard-real: PASS (blobs rejeitados)"; \
+	elif [ $$rc -eq 77 ]; then echo "test-efs2-guard-real: SKIP (exit 77, NAND ausente)"; \
+	else echo "test-efs2-guard-real: FAIL (rc=$$rc)"; exit 1; fi
+
 # Bug 4 (gap fechado): prova REAL, sob Unicorn, de que o gate exige permissão de
 # EXECUÇÃO do guest (UC_PROT_EXEC via uc_mem_regions), não apenas legibilidade de
 # host. Página RO/RW/não-mapeada/parcial → REJECT; RX/RWX → ACEITA. Mutante que
@@ -286,6 +342,18 @@ test_l4_space_switch: test_l4_space_switch.cpp zeebo_l4_mmu.h
 	@if ./test_l4_space_switch buggy >/dev/null 2>&1; then \
 	  echo "FAIL: flat-mapping (buggy) unexpectedly passed"; exit 1; \
 	else echo "OK: flat-mapping (buggy) fails as expected (RED reproduced)"; fi
+
+# MMU invariant: address-space activation requested from INSIDE a Unicorn hook
+# must be DEFERRED (queued) and applied only BETWEEN uc_emu_start slices, mirror
+# of the deferred TB-invalidation queue. Default run is the GREEN gate (hook only
+# queues; drain switches). `buggy` reproduces the pre-fix activate()-in-hook that
+# remaps mid-slice and violates the invariant -> MUST fail (RED).
+test_l4_deferred_space_switch: test_l4_deferred_space_switch.cpp zeebo_l4_mmu.h
+	$(CXX) $(CXXFLAGS) -DZEEBO_L4_MMU_WITH_UNICORN -o $@ test_l4_deferred_space_switch.cpp -lunicorn
+	./test_l4_deferred_space_switch
+	@if ./test_l4_deferred_space_switch buggy >/dev/null 2>&1; then \
+	  echo "FAIL: in-hook activate() (buggy) unexpectedly passed"; exit 1; \
+	else echo "OK: in-hook activate() (buggy) fails as expected (RED reproduced)"; fi
 
 # QW99: OKL4 base<-extension PD domain/window sharing. Positivo: o espaco de
 # extensao resolve a pagina-fonte que so existe no espaco base (pager). Negativo
@@ -359,8 +427,9 @@ test-dd1a: test_dd1a_diag
 	./test_dd1a_diag || [ $$? -eq 77 ]
 	@# Mutação negativa: force_success fabrica entrada no módulo → controle
 	@# negativo passa a alegar execução; o gate DEVE ficar VERMELHO.
-	@if ./test_dd1a_diag buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
+	@./test_dd1a_diag buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante force_success pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante force_success passou (fabricação não detectada)"; exit 1; \
 	else echo "OK: mutante force_success falha como esperado (RED reproduzido)"; fi
 
 # Zeetris lifecycle probe (evidence-only): deriva o CLASS ID estrutural do MIF e
@@ -377,8 +446,9 @@ test-zeetris-lifecycle: test_zeetris_lifecycle
 	./test_zeetris_lifecycle || [ $$? -eq 77 ]
 	@# Mutação negativa: fingir que o entry ARM roda como Thumb (premissa da v1)
 	@# → o controle exige execução limpa que não ocorre; o gate DEVE ficar VERMELHO.
-	@if ./test_zeetris_lifecycle buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
+	@./test_zeetris_lifecycle buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (ABI Thumb) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (ABI Thumb) passou (premissa v1 não refutada)"; exit 1; \
 	else echo "OK: mutante (ABI Thumb) falha como esperado (RED reproduzido)"; fi
 
 # Zeetris IShell lifecycle: prova que o VA-0 read (0x123c1bdc) é o ARGUMENTO DE
@@ -393,23 +463,179 @@ test_zeetris_ishell: test_zeetris_ishell.cpp zeebo_brew_ishell.h zeebo_brew_load
 # mutação (vtable NULL "roda limpo") que DEVE falhar (RED reproduzido).
 test-zeetris-ishell: test_zeetris_ishell
 	./test_zeetris_ishell || [ $$? -eq 77 ]
-	@if ./test_zeetris_ishell buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (vtable NULL) passou"; exit 1; \
-	else echo "OK: mutante (vtable NULL) falha como esperado (RED reproduzido)"; fi
+	@./test_zeetris_ishell buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (vtable NULL limpa) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (vtable NULL limpa) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
+
+# Zeetris full lifecycle gate: AEEMod_Load -> IModule::CreateInstance -> HandleEvent(EVT_APP_START)
+# Sem Dynarmic. Sem zeetris.mod real -> SKIP (exit 77).
+test_zeetris_full_lifecycle: test_zeetris_full_lifecycle.cpp zeebo_brew_ishell.h zeebo_brew_loader.h
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_full_lifecycle.cpp -lunicorn
+
+test-zeetris-full-lifecycle: test_zeetris_full_lifecycle
+	./test_zeetris_full_lifecycle || [ $$? -eq 77 ]
+	@./test_zeetris_full_lifecycle buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (malloc NULL aceito) pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (malloc NULL aceito) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
+
+test_zeetris_runner_contract: test_zeetris_runner_contract.cpp zeebo_zeetris_runner.h zeebo_brew_loader.h
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_runner_contract.cpp -lunicorn
+
+# Pure synthetic contract gate: catches instruction-budget false success and
+# keeps Zeetris key events aligned with canonical Qualcomm BREW constants.
+test-zeetris-runner-contract: test_zeetris_runner_contract
+	./test_zeetris_runner_contract
+
+test_zeetris_runner: test_zeetris_runner.cpp zeebo_zeetris_runner.h gpu/igl_hook.h \
+                    gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_runner.cpp \
+	  gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp -lunicorn
+
+test-zeetris-runner: test_zeetris_runner
+	./test_zeetris_runner || [ $$? -eq 77 ]
+	@./test_zeetris_runner buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante pulado (exit 77, ROM real ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (RED reproduzido)"; fi
+
+# Criterios de SIMULACAO (nao de execucao): carga de textura, evolucao do
+# framebuffer e input chegando ao jogo. RED enquanto o loader BREW (secao RW +
+# relocacao) nao existir. Nao entra em `check` ainda — e o alvo do trabalho.
+test_zeetris_playable: test_zeetris_playable.cpp zeebo_zeetris_runner.h gpu/igl_hook.h \
+                    gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_playable.cpp \
+	  gpu/igl_hook.cpp gpu/soft_rasterizer.cpp gpu/rasterizer_factory.cpp -lunicorn
+
+# Valida o INSTRUMENTO (controle positivo + negativo dos detectores). Este alvo
+# precisa ficar verde sempre; se ele quebrar, nenhum veredito RED/GREEN vale.
+# O binario e 77-capable (SKIP quando o .mod falta), entao o guard TEM de tratar
+# 77 explicitamente: um SKIP nunca pode ser contado como instrumento validado.
+test-zeetris-playable-selftest: test_zeetris_playable
+	@./test_zeetris_playable selftest; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: selftest pulado (exit 77) — NÃO conta como instrumento validado"; \
+	elif [ $$rc -eq 0 ]; then echo "OK: instrumento validado (acusa saudavel, reprova doente)"; \
+	else echo "FAIL: instrumento quebrado (rc=$$rc)"; exit 1; fi
+
+test-zeetris-playable: test_zeetris_playable test-zeetris-playable-selftest
+	./test_zeetris_playable || [ $$? -eq 77 ]
+
+# --- Pivo: boot de kernel Linux no MSM7201A ---
+# Carga de trabalho ABERTA e verificavel para exercitar os backends de CPU e GPU,
+# em contraste com o BREW/Zeetris onde silencio e ambiguo entre bug e estado
+# legitimo do jogo. L1 imagem valida / L2 CPU executa / L3 console fala.
+test_linux_boot: test_linux_boot.cpp
+	$(CXX) $(CXXFLAGS) -DZEEBO_SDL -o $@ test_linux_boot.cpp -lunicorn -lSDL2 -lSDL2_ttf
+
+# Carga bare-metal real do TripleOxygen (blinkenlichten.bin, 244B).
+# Substituto honesto do kernel: o zImage do Fausto nunca foi publicado.
+test_linux_mmu_contract: test_linux_mmu_contract.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_linux_mmu_contract.cpp -lunicorn
+
+test-linux-mmu-contract: test_linux_mmu_contract test-linux-mmu-contract-selftest
+	./test_linux_mmu_contract || [ $$? -eq 77 ]
+
+test-linux-mmu-contract-selftest: test_linux_mmu_contract
+	@./test_linux_mmu_contract --selftest; s=$$?; \
+	if [ $$s -eq 77 ]; then echo "SKIP (77)"; exit 0; \
+	elif [ $$s -ne 0 ]; then echo "FALHA: instrumento mmu-contract nao se valida"; exit 1; \
+	else echo "selftest mmu-contract OK"; fi
+
+test_o3_baremetal: test_o3_baremetal.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_o3_baremetal.cpp -lunicorn
+
+test-o3-baremetal: test_o3_baremetal test-o3-baremetal-selftest
+	./test_o3_baremetal || [ $$? -eq 77 ]
+
+test-o3-baremetal-selftest: test_o3_baremetal
+	@./test_o3_baremetal --selftest; s=$$?; \
+	if [ $$s -eq 77 ]; then echo "SKIP: sem blob (exit 77)"; exit 0; \
+	elif [ $$s -ne 0 ]; then echo "FALHA: instrumento o3-baremetal nao se valida"; exit 1; \
+	else echo "selftest o3-baremetal OK"; fi
+
+# Controle positivo dos detectores (captura de TX real, sem falso positivo de
+# assinatura). 77-capable, entao o guard trata exit 77 explicitamente.
+test-linux-boot-selftest: test_linux_boot
+	@./test_linux_boot selftest; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: selftest pulado (exit 77) — NÃO conta como instrumento validado"; \
+	elif [ $$rc -eq 0 ]; then echo "OK: instrumento de console validado"; \
+	else echo "FAIL: instrumento de console quebrado (rc=$$rc)"; exit 1; fi
+
+# Gate do harness de boot de Linux real. Fica FORA do check-fast de proposito: com o
+# zImage em testdata/kernels/ ele boota o kernel inteiro (minutos), e sem imagem sai com
+# exit 77 (SKIP, e' o que o `||` abaixo aceita). O gate rapido que roda sempre e' o
+# `test-linux-boot-selftest` (controle positivo do instrumento, sem emulacao longa).
+test-linux-boot: test_linux_boot test-linux-boot-selftest
+	./test_linux_boot || [ $$? -eq 77 ]
+
 
 # Blocker-witness (Tier B): drives the REAL Unicorn AppMgr boot and MEASURES
 # that Core0 never reaches ISHELL_CreateInstance/AEECShell/APPS user-space,
-# proving a LIVE pIShell context is NOT yet derivable. Requires the real NAND +
-# the built orchestrator; without them -> SKIP (exit 77). Mutant ("buggy")
-# claims the live boot DOES reach the shell and MUST fail.
+# proving a LIVE pIShell context IS derivable (positive witness since the boot
+# started reaching the anchor). Requires the real NAND + the built orchestrator;
+# without them -> SKIP (exit 77). Mutant ("buggy") now carries the OLD claim
+# ("the live boot never reaches the shell") and MUST fail.
 test_zeetris_live_shell: test_zeetris_live_shell.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_live_shell.cpp
 
 test-zeetris-live-shell: test_zeetris_live_shell zeebo_lle_main
 	./test_zeetris_live_shell || [ $$? -eq 77 ]
-	@if ./test_zeetris_live_shell buggy >/dev/null 2>&1; then \
-	  echo "FAIL: mutante (boot ao vivo alcanca o shell) passou"; exit 1; \
-	else echo "OK: mutante falha como esperado (boot NAO alcanca o shell)"; fi
+	@./test_zeetris_live_shell buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante (afirmacao antiga) pulado (exit 77, NAND/orquestrador ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (afirmacao antiga: ancora inalcancavel) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (o boot ALCANCA o shell)"; fi
+
+# SEMANTIC gate (Tier B, negative control): drives the REAL Unicorn AppMgr boot
+# with the read-only ZEEBO_SHELL_SEM instrument and MEASURES whether the exact
+# AEECShell/ISHELL_CreateInstance anchor yields a LIVE IShell object+vtable (r0 ->
+# *r0 vtable of code) and a real ppOut return pathway. Proves the old "r0 present
+# at dispatch == pIShell" inference INVALID; goes GREEN only after the exact
+# semantic chain is captured. Real NAND + orchestrator required; else SKIP (77).
+# Mutant ("buggy") accepts a NON_SEMANTIC hit as a live shell and MUST fail.
+test_zeetris_shell_semantics: test_zeetris_shell_semantics.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_semantics.cpp
+
+# Gate com controles: mede que o dispatch AEECShell r0=0xb0d02000 e' NON_SEMANTIC
+# (env_base Iguana, nao IShell vivo) e reprova a inferencia antiga (exit 1). Mutante
+# que aceita NON_SEMANTIC como prova de shell vivo DEVE falhar. Sem NAND -> SKIP (77).
+test-zeetris-shell-semantics: test_zeetris_shell_semantics zeebo_lle_main
+	@./test_zeetris_shell_semantics; rc=$$?; \
+	if [ $$rc -eq 1 ]; then echo "test-zeetris-shell-semantics: OK (non-semantic provado; inferencia antiga REFUTADA)"; \
+	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-semantics: SKIP (exit 77)"; \
+	elif [ $$rc -eq 0 ]; then echo "test-zeetris-shell-semantics: PASS (live IShell medido)"; \
+	else echo "test-zeetris-shell-semantics: FAIL (exit $$rc)"; exit 1; fi
+	@./test_zeetris_shell_semantics buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante NON_SEMANTIC pulado (exit 77, NAND ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (NON_SEMANTIC tratado como shell vivo) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (NON_SEMANTIC nao e' shell vivo)"; fi
+
+# CALL-PROVENANCE gate: prova ESTATICAMENTE (bytes reais do APPS.bin) que o
+# anchor 0x10c874f4 rotulado "AEECShell_dispatch" e' na verdade um instalador de
+# env do bootstrap APPS/AMSS (chamada direta absoluta cujo retorno ajusta o sp;
+# callee THUMB folha que guarda o env num global e retorna constante), NAO um
+# dispatch BREW por vtable — e que o simbolo ISHELL_CreateInstance (0x105c7fb4) e'
+# uma string rodata. Read-only; nunca inicializa/muda o guest. Exige o APPS.bin
+# real; ausente -> SKIP (77). Mutante ("buggy") afirma ser dispatch BREW e falha.
+APPS_BIN := ../../nand/1.1.2_APPS.bin
+
+test_zeetris_shell_provenance: test_zeetris_shell_provenance.cpp
+	$(CXX) $(CXXFLAGS) -o $@ test_zeetris_shell_provenance.cpp
+
+# CALL-PROVENANCE gate: mede que 0x10c874f4 e' bootstrap AMSS (retorna exit 1)
+# e que a premissa de que era um dispatch BREW e' REFUTADA. Mutante afirma que
+# e' dispatch BREW e DEVE falhar.
+test-zeetris-shell-provenance: test_zeetris_shell_provenance
+	@if [ ! -s "$(APPS_BIN)" ]; then \
+	  echo "OK: APPS.bin real ausente ($(APPS_BIN)) — SKIP (77) esperado"; fi
+	@./test_zeetris_shell_provenance; rc=$$?; \
+	if [ $$rc -eq 1 ]; then echo "test-zeetris-shell-provenance: OK (provenance confirmada: AMSS_BOOTSTRAP; premissa BREW refutada)"; \
+	elif [ $$rc -eq 77 ]; then echo "test-zeetris-shell-provenance: SKIP (exit 77)"; \
+	else echo "test-zeetris-shell-provenance: FAIL (exit $$rc)"; exit 1; fi
+	@./test_zeetris_shell_provenance buggy >/dev/null 2>&1; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP: mutante de provenance pulado (exit 77, APPS.bin ausente) — NÃO conta como RED"; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL: mutante (AMSS_BOOTSTRAP tratado como dispatch BREW) passou"; exit 1; \
+	else echo "OK: mutante falha como esperado (bootstrap nao e' dispatch BREW)"; fi
 
 # Inventário ESTÁTICO de dependências de vtable/static-base do .mod (Bloco 0).
 # Gate: o scanner deve prever retroativamente as 8 fronteiras que foram
@@ -502,6 +728,18 @@ test-gpu: gpu
 test-qdsp5:
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 test
 
+# QDSP5 doorbell RPC-probe gate: proves production doorbells do NOT mutate the
+# AMSS ONCRPC queue with the probe OFF (default), and inject only when the
+# opt-in ZEEBO_QDSP5_RPC_PROBE diagnostic is ON. See QDSP5_TODO.md Q1.5.
+test_qdsp5_doorbell_probe: test_qdsp5_doorbell_probe.cpp zeebo_smd_bridge_unified.h qdsp5_doorbell_probe.h
+	$(CXX) $(CXXFLAGS) -o $@ test_qdsp5_doorbell_probe.cpp -lunicorn
+
+test-qdsp5-doorbell-probe: test_qdsp5_doorbell_probe
+	./test_qdsp5_doorbell_probe
+
+clean-qdsp5-doorbell-probe:
+	rm -f test_qdsp5_doorbell_probe
+
 # Z-Wheel harness: executa o manipulador de eventos Thumb do ZeeboApp (0:APPS)
 # sob Unicorn com EVT_APP_START e captura a chamada gráfica via a vtable em
 # [applet+0x2c] → SoftRasterizer/IglGuestBridge.
@@ -528,15 +766,14 @@ test-core1: test-rex
 test-zwheel-preview: zeebo_lle_main
 	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --zwheel-preview-headless
 
-# Ciclo de vida do applet Z-Wheel (274755) carregado do EFS2: extrai o gnode de
-# 274755 da NAND 0:EFS2APPS, injeta via BrewLoader e despacha EVT_APP_START ao
-# manipulador ZeeboApp pré-mapeado em 0:APPS (0x10532344), roteando a chamada
-# gráfica ao SoftRasterizer. Valida sem crash e exige o PASS do ciclo de vida.
+# Honest EFS2 launch guard: 274755 is catalogued, but inode→cluster (gnode)
+# provenance is not reversed. The former 64 KiB KnownIB payload was modem/NV
+# data, so production must refuse it rather than fabricate a Z-Wheel launch.
 test-efs2-zwheel: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=0 --cycles=1 \
-	  | grep -q "Z-Wheel/Life] PASS" \
-	  && echo "PASS: --efs2-run=274755 instanciou o ciclo de vida do ZeeboApp (EVT_APP_START, r0=1)." \
-	  || (echo "FAIL: ciclo de vida do applet 274755 não completou EVT_APP_START"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=0 --cycles=1); \
+	echo "$$out" | grep -q "sem bloco indireto comprovado" && \
+	! echo "$$out" | grep -q "Z-Wheel/Life] PASS" && \
+	echo "PASS: 274755 recusado sem gnode comprovado; nenhum lifecycle fabricado."
 
 # Passo 5: mapeamento Z-Pad/SDL2 → AVK e despacho contínuo de EVT_KEY_PRESS/
 # EVT_KEY_RELEASE ao manipulador BREW (HandleEvent), provado por execução real
@@ -547,21 +784,19 @@ zeebo_input_harness: zeebo_input_harness.cpp zeebo_brew_loader.h zeebo_l4_mmu.h
 test-input: zeebo_input_harness
 	./zeebo_input_harness
 
-# Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) sob SDL2.
-# Roda o ciclo de vida + loop por tempo real (--seconds=1) em headless (dummy),
-# apresentando o framebuffer à taxa de quadros e drenando eventos Z-Pad→AVK.
-# Valida que o loop entra e encerra organicamente sem crash.
+# Long-run negative control: refusal must remain stable and must not enter the
+# former fabricated interactive loop.
 test-efs2-zwheel-loop: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=1 \
-	  | grep -q "Z-Wheel/Loop] loop encerrado" \
-	  && echo "PASS: --efs2-run=274755 --seconds=1 executou o loop interativo contínuo (Passo 11)." \
-	  || (echo "FAIL: loop interativo do applet 274755 não encerrou corretamente"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=274755 --seconds=1); \
+	echo "$$out" | grep -q "Sem payload extraível para '274755'" && \
+	! echo "$$out" | grep -q "Z-Wheel/Loop] loop encerrado" && \
+	echo "PASS: 274755 permaneceu recusado durante execução prolongada."
 
 test-efs2-game-reksio: zeebo_lle_main
-	SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=reksio.mod --seconds=1 \
-	  | grep -q "PASS: Jogo/Applet 'Reksio (reksio.mod)' entrou em execução" \
-	  && echo "PASS: --efs2-run=reksio.mod --seconds=1 executou o jogo comercial Reksio." \
-	  || (echo "FAIL: execução do jogo reksio.mod falhou"; exit 1)
+	@out=$$(SDL_VIDEODRIVER=dummy ./zeebo_lle_main --efs2-run=reksio.mod --seconds=1); \
+	echo "$$out" | grep -q "Sem payload extraível para 'reksio.mod'" && \
+	! echo "$$out" | grep -q "entrou em execução" && \
+	echo "PASS: reksio.mod recusado sem gnode comprovado; execução não fabricada."
 
 test-debug-agent: zeebo_lle_main
 	python3 test_zeebo_debug_agent.py
@@ -690,6 +925,8 @@ test_cli_paths: test_cli_paths.cpp zeebo_cli_paths.h
 # alvo clean. Mutação negativa (remover 1 nome do clean) torna o gate VERMELHO.
 test-clean-hygiene:
 	python3 test_clean_hygiene.py
+	python3 test_mutation_gate_hygiene.py
+	python3 test_binary_ignore_hygiene.py
 
 # ---------------------------------------------------------------------------
 # QW99 Part 1 — truthful test tiers. The aggregate `check` mixes two classes of
@@ -712,14 +949,16 @@ test-clean-hygiene:
 # loads NAND) plus test-rex test-zwheel test-efs2-fs test-efs2-zwheel
 # test-efs2-zwheel-loop test-debug-agent.
 NAND_REQUIRED_BINS := ../../nand/1.1.2_AMSS.bin ../../nand/1.1.2_APPS.bin ../../nand/1.1.2.bin
-FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-zeetris-live-shell
+FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs test-efs2-zwheel test-efs2-zwheel-loop test-debug-agent test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-shell-semantics test-efs2-guard-real
 
 check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
        test-cli \
-       test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_base_ext_activate test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
+       test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_deferred_space_switch test_l4_base_ext_activate test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer test_zeetris_runner_contract zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_jit_code_hook test_efs2_module_guard test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-linux-vic test-linux-keys test-linux-hid test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
 	./test_applet_dispatch
 	./test_applet_exec_perm
+	./test_zeetris_runner_contract
+	$(MAKE) test-efs2-module-guard
 	./test_brew_timer
 	./test_audio_sink
 	./test_audio_lifetime
@@ -760,12 +999,18 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
 	./test_smd_bridge_bounds
 	@echo '--- bug 5/6: VIC IRQ delivery, GPT timer, ProcComm (positivo + controle negativo) ---'
 	$(MAKE) test-vic-irq
+	$(MAKE) test-linux-vic
+	$(MAKE) test-linux-keys
+	$(MAKE) test-linux-hid
 	$(MAKE) test-gpt-timer
 	$(MAKE) test-peripheral-bus
 	$(MAKE) test-proccomm
 	$(MAKE) test-proccomm-integration
 	$(MAKE) test-proccomm-production-order
 	$(MAKE) test-zeetris-lifecycle
+	$(MAKE) test-zeetris-ishell
+	$(MAKE) test-zeetris-full-lifecycle
+	$(MAKE) test-zeetris-runner
 	@echo '--- bateria L4/MMU/IPC/brew (executada AQUI, nao so na receita de build) ---'
 	./test_l4_mmu
 	./test_l4_thread_table
@@ -811,15 +1056,16 @@ check: check-full
 clean:
 	-rm -f test_pc14_r0_preserve
 	rm -f zeebo_harness zeebo_devices_test zeebo_lle_main zeebo_lle_mod_probe \
-	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx \
+	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx test_l4_deferred_space_switch \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_efs2_module_guard test_efs2_module_guard_mutant test_efs2_guard_real test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner test_zeetris_playable test_linux_boot test_o3_baremetal test_linux_mmu_contract test_zeetris_runner_contract *.o
 	rm -rf testkit/build
+	rm -f test_qdsp5_doorbell_probe
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-mddi-scanout test-zeetris-lifecycle gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell
+.PHONY: test-linux-vic test-linux-keys test-linux-hid all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

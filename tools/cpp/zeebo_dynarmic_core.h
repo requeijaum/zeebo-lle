@@ -39,15 +39,29 @@ struct MemoryBridge {
 // interpretado. Manter os dois backends com a mesma identidade e pre-requisito
 // para o lockstep valer.
 //
-// Padrao = arm1176, porque e o modelo que o emulador realmente configura
-// (UC_CPU_ARM_1176 em zeebo_lle_main.cpp, zeebo_boot.cpp, zeebo_dual_core.cpp).
-// ATENCAO: se um dia o Core0 for alinhado a familia ARM1136 (o TRM que temos e
-// do ARM1136 r1p5), trocar TAMBEM estes valores — ver ROADMAP, "Incoerencia de
-// identidade de CPU". Referencia do QEMU:
-//   arm1136_r2: midr=0x4107b362  arm1136: midr=0x4117b363  arm1176: midr=0x410fb767
-//   ctr=0x01dd20d2 e reset_sctlr=0x00050078 nos tres.
+// Padrao = ARM1136, alinhado ao HARDWARE REAL. O log de boot do Linux
+// 2.6.29-zeebo publicado pelo TripleOxygen (pastebin.com/raw/pdVwuLUV) imprime
+//   "CPU: ARMv6-compatible processor [4117b362] revision 2 (ARMv6TEJ)"
+// ou seja MIDR 0x4117b362 = part 0xb36 (ARM1136), variant 1, revision 2.
+// Antes o projeto usava arm1176 (part 0xb76), que era divergencia de fato --
+// e contradizia o proprio TRM que temos em maos (ARM1136 r1p5).
+//
+// O Unicorn nao expoe um modelo com revision 2 E variant 1 ao mesmo tempo:
+//   arm1136_r2: midr=0x4107b362 (variant 0)  arm1136: midr=0x4117b363 (rev 3)
+//   arm1176:    midr=0x410fb767 (part errado)
+// Usamos UC_CPU_ARM_1136, que erra o alvo em UM bit (revision 3 vs 2) e acerta
+// part e variant. Medido: a ISA observavel e identica entre 1136 e 1176 (unica
+// diferenca e FPSID, tambem so na revisao), entao a troca e de identidade, nao
+// de comportamento.
+//
+// Este campo e a identidade do motor RECOMPILADO; o interpretado recebe a mesma
+// via uc_ctl_set_cpu_model. test_jit_cp15_reset cruza os dois e FALHA se
+// divergirem -- foi ele que pegou esta troca pela metade.
+//   ctr=0x01dd20d2 e reset_sctlr=0x00050078 em todos os tres.
 struct Cp15Ids {
-    uint32_t midr = 0x410FB767; // arm1176 (QEMU cpu32.c)
+    // 0x4117b363 = UC_CPU_ARM_1136 do Unicorn. Difere do silicio real
+    // (0x4117b362) apenas na revision; ver nota acima.
+    uint32_t midr = 0x4117B363; // ARM1136 (part 0xb36), casa com UC_CPU_ARM_1136
     uint32_t ctr  = 0x01DD20D2; // idem
     // Valor de RESET do registrador de controle do sistema (SCTLR, c1,c0,0).
     // NAO e zero: traz W/P/D/L ligados. Um banco zerado fazia o boot perder

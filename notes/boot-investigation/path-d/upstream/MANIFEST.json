@@ -1,0 +1,56 @@
+{
+  "pinned_commit": "2f80ba36b59870ade7dbb41a0e16c3f3b7e70e43",
+  "commit_date": "2025-10-20T14:51:47Z",
+  "base_url": "https://raw.githubusercontent.com/rochus-keller/OKL4/2f80ba36b59870ade7dbb41a0e16c3f3b7e70e43/",
+  "files": [
+    {
+      "name": "min_pagebits.c",
+      "repo_path": "libs/l4e/src/min_pagebits.c",
+      "http_status": "200",
+      "bytes": 3643,
+      "sha256": "98a3ad4c74f890064affe65b47f7e941b07aae4476d6f352d15b3dfcc90c09e4"
+    },
+    {
+      "name": "biggest_fpage.c",
+      "repo_path": "libs/l4e/src/biggest_fpage.c",
+      "http_status": "200",
+      "bytes": 3847,
+      "sha256": "6183a677f9c83ca9ce39ee3e29a4c04812c275e0ce98989980ddbf1b157e4dea"
+    },
+    {
+      "name": "misc.h",
+      "repo_path": "libs/l4e/include/misc.h",
+      "http_status": "200",
+      "bytes": 4068,
+      "sha256": "2b0413f707c0c7856858a882d6d644f36206307029082841ddf1167b0b98b51f"
+    },
+    {
+      "name": "map.c",
+      "repo_path": "libs/l4e/src/map.c",
+      "http_status": "200",
+      "bytes": 4304,
+      "sha256": "04afceb54adac93d80b6ee7225db190f82c525877cd21485881f8377502010f5"
+    },
+    {
+      "name": "map.h",
+      "repo_path": "libs/l4e/include/map.h",
+      "http_status": "200",
+      "bytes": 4113,
+      "sha256": "f54a1ff87da77f57e16ae8e65f72b8dba211802df2db14952b7e216709e9804e"
+    },
+    {
+      "name": "kernelinterface.spp",
+      "repo_path": "arch/arm/libs/l4/src/kernelinterface.spp",
+      "http_status": "200",
+      "bytes": 4159,
+      "sha256": "e4626e56a681db3436f2341d82b944939532fb901983db42fb9df22d401a81fb"
+    }
+  ],
+  "local_kernelinterface": {
+    "path": "/home/rafaelfrequiao/projects/zeebo-lle/refs/okl4-2.1.1-fix7/arch/arm/libs/l4/src/kernelinterface.spp",
+    "sha256": "e4626e56a681db3436f2341d82b944939532fb901983db42fb9df22d401a81fb",
+    "bytes": 4159
+  },
+  "kernelinterface_byte_identical": true,
+  "kernelinterface_semantic_identical": true
+}

@@ -1792,3 +1792,158 @@ Menor page size = 4KB (bit 12), condizente com `l4e_min_pagesize()==0x1000`.
   inalterado por esta correção.
 CONCLUSÃO: KIP+0xc8 destravado legitimamente via spec. Próxima fronteira Core0 =
 0xb000d6b8 / MAP_CONTROL mapping (já conhecido).
+
+## 2026-09-12 — Linha `linux-boot`: kernel Linux 3.4.113 real, framebuffer, janela 1x2 e EHCI
+
+Frente separada do boot do firmware: bootar um **kernel Linux real** no LLE para
+exercitar os modelos de SoC ponta a ponta. Harness `tools/cpp/test_linux_boot.cpp`
+(alvo `test_linux_boot`), documentação em `docs/linux-boot.md`, ROADMAP §Fase 16.
+
+**O que passou a funcionar, verificado por execução:**
+- o kernel 3.4.113 boota até a shell BusyBox com `/proc` montado (`Freeing init memory`,
+  `~ #`), com o teclado do host entrando pelo RX da UART;
+- `fb0` instalado (`msmfb_probe() installing 720 x 480 panel`, fbcon em 90x30) e o texto
+  do console de VT na memória de framebuffer (PA 0x15000000, RGB565, line_length 1440,
+  buffer duplo) — conferido decodificando o FB como texto com a fonte 8x16 do próprio
+  kernel;
+- janela SDL2/Wayland **1x2** (UART | framebuffer), ~55 fps efetivos e releitura do FB
+  só quando o guest escreve nele;
+- host controller **EHCI** subindo (`new USB bus registered, assigned bus number 1`) e o
+  hub enumerando um dispositivo high-speed
+  (`usb 1-1: new high-speed USB device number 2`).
+
+**Causas raiz que custaram tempo** (medidas, não inferidas):
+1. o Unicorn não entrega exceção do guest ao vetor do guest — o host emula a entrada de
+   exceção ARM1136; para escrita o FSR correto é `0x807` (bit 11 = FSR_WRITE) e `0x407`
+   cai em `do_bad` → SIGBUS → `Attempted to kill init`;
+2. hooks do Unicorn reportam o endereço **físico** com a MMU ligada: o CSR/GPT (VA
+   0xE0001000) precisa ser hookado por PA 0xC0100000, e mapear o espelho de 96MB em
+   0xc0000000 corrompia a RAM do kernel;
+3. ler CP15 (`uc_arm_cp_reg`) de dentro do `UC_HOOK_INTR` travava o emulador (exit 124) —
+   abandonado em favor da emulação de exceção no host;
+4. o `ehci-msm.c` do 3.4 é um **stub**: cria o HCD com `usb_create_hcd` e retorna sem
+   chamar `usb_add_hcd` (por isso o guest não tinha host controller nenhum);
+5. CAPLENGTH tem de ser **0x40** (não 0x20) para o USBCMD cair em 0x140, como o
+   `msm_hsusb_hw.h` define — e o modelo de registradores **precisa escrever as leituras
+   na memória do guest**, senão o kernel lê zero no CAPLENGTH, calcula `HC_LENGTH = 0` e
+   passa a acreditar que o USBCMD é 0x100; foi isso que prendia o `ehci_reset` em ~180
+   mil leituras de polling no handshake do HCRESET;
+6. `ASYNCLISTADDR` aponta para o `struct ehci_qh_hw` (bloco DMA só de hardware): a
+   `qtd_list` de software não é alcançável por ali.
+
+**Pendente (critério da frente)**: enumerar o **teclado HID**. O hub para em
+`device descriptor read/64, error -110` porque falta o motor de transferência —
+executar os qTD da lista assíncrona (status/bytes de volta, `USBSTS.USBINT`) — e a
+entrega da IRQ 47 (`INT_USB_HS`; o VIC só entrega IRQs 0-31, com os dois pontos a mudar
+já mapeados em `testdata/kernel-patches/usb-ehci-msm.md`), mais os descritores do HID
+(device/config/report) e o endpoint de interrupção.
+
+## 2026-09-13 — `linux-boot`: VIC de 64 linhas, `dma_mask` do hsusb, e dois bugs fantasma de instrumento
+
+### 1. O seletor do VIC nao enxergava metade das IRQs (bug real)
+`vic_pick_irq()` e o despacho do loop principal liam so' `g_vic_pending[0]`/
+`g_vic_en[0]`. O MSM7201A tem **64 linhas** em duas palavras, entao qualquer IRQ
+>= 32 era literalmente inespera'vel — inclusive a **47 (`INT_USB_HS`)**. Nenhuma
+quantidade de conserto no modelo de EHCI ia funcionar enquanto isso valesse.
+Corrigido nos dois pontos, preservando o round-robin.
+
+Segundo defeito no mesmo caminho: `VIC_OFF_CLEAR0+4` (ack da palavra 1) nao
+limpava `g_irq_in_service`, entao a **primeira** IRQ alta entregue travava todas
+as seguintes.
+
+Auto-teste `ZEEBO_VIC_TEST=1`, 6 casos, com **controle negativo**: uma
+reimplementacao do seletor word-0-only devolve `NO_PEND` para a IRQ 47 e o teste
+reprova; o seletor novo passa 6/6. Esta' no `check-fast` como `test-linux-vic`.
+
+### 2. `dma_mask` NULL zerava os buffers dos qTD (bug real)
+O motor de qTD nao via pacote SETUP nenhum: `hw_buf[0] = 0x00000000` em todo qTD.
+Causa: o `platform_device` do hsusb (`devices-msm7x00.c`) so' define
+`coherent_dma_mask` e deixa **`dma_mask` NULL**. `usb_create_hcd()` le'
+`dev->dma_mask` para decidir `hcd->self.uses_dma`; com NULL o HCD monta os qTD
+**sem mapear buffer**, e o controlador nao tem de onde ler o SETUP. Nao era bug
+do modelo — era o driver. Patch em `testdata/kernel-patches/ehci-msm-dma-mask.patch`
+(verificado com `patch -R --dry-run` contra a arvore do container).
+
+Com isso completam: device descriptor (64 B -> 18 B), `SET_ADDRESS`, strings
+(`idVendor=1827 idProduct=2b01`, `Manufacturer: Zeebo-L`) e o **cabecalho (9 B)**
+do config descriptor. **Ainda falha** o config descriptor inteiro (34 B) com
+`-110`: o SETUP dele nunca chega ao motor. Suspeitos: a janela em que o HCD
+desliga `USBCMD.ASE` ao relinkar, ou o avanco do overlay a partir de `hw_current`
+(o HC real copia o qTD para o overlay; o modelo nao). **Parado aqui por decisao
+do usuario**; EHCI passou a ficar fora por padrao (`ZEEBO_USB=1` religa).
+
+### 3. Dois bugs FANTASMA: VA de simbolo de kernel congelado
+Esta e' a licao cara do dia. **Instrumento que le' estrutura do kernel por
+endereco fixo apodrece a cada rebuild — e falha em silencio, lendo memoria
+qualquer sem nunca dar erro.**
+
+- **"flakiness do fbcon"**: estava no ROADMAP como defeito nao-deterministico
+  (texto do console saindo preto em alguns runs). **Nao existe.** O probe lia a
+  `pseudo_palette` em `0xc03f45d4`, VA de um kernel anterior; o atual e'
+  `0xc05b36b4`. Imprimia o mesmo ponteiro 16x (`e7fddef0`) e isso *parecia* paleta
+  corrompida. A paleta sempre esteve correta: rampa RGB565 de `0x0000` a `0xffff`.
+- **`cfb_imageblit=0` com `fbcon_putcs=60`**: os 6 VAs da tabela `kDraw[]`
+  estavam todos desatualizados. Com os enderecos do #21: `imageblit=1176`,
+  `putcs=93`, `bit_putcs=93`, coerentes entre si.
+
+Mitigacoes: os tres pontos (`PP`, `kDraw[]`, `fontdata_8x16`) carregam agora, ao
+lado da constante, o `grep` do `System.map` que os reconfere; e
+`fb_decode_text` ganhou `fb_font_looks_sane()`, que avisa quando o VA da fonte
+deixa de parecer uma font em vez de desenhar lixo calado. **Controle negativo do
+guard**: com `FONT_PA` errado de proposito, o aviso dispara e o decodificador
+acusa `ink=0/0`; com o VA certo, silencio.
+
+### 4. Relogio de parede validado no guest
+`date +%s` -> 44, `sleep 2`, `date +%s` -> 48; `/proc/uptime` 49.53. GPT/DGT
+sadios ponta-a-ponta. O que faltava ao `date` era epoch de RTC, nao timer.
+
+### Metodo (para a proxima vez)
+Antes de suspeitar do modelo de hardware, **confira se o instrumento ainda esta'
+olhando para onde acha que olha**. Dois dos quatro itens abertos da fase evaporaram
+com um `grep` no `System.map`, e um deles ja' tinha virado entrada de ROADMAP.
+
+---
+
+## 2026-09-13 (2) — lista periodica, FRINDEX e `overlay.next`: o teclado HID chega na shell
+
+**Resultado**: digitar (`u n a m e` + Enter) chega na shell do guest. Prova no
+framebuffer, sem nenhum byte pela UART: `~ # uname` -> `Linux`.
+
+### 1. O motor so' percorria a lista assincrona
+O guest escrevia `PERIODICLISTBASE` (0x154) e ligava `USBCMD.PSE` (bit 4) e o modelo
+nao lia nenhum dos dois. Endpoint de **interrupcao** (o teclado) vive na lista
+**periodica**, nao na assincrona: sem ela o qTD do EP1 nunca era executado.
+
+### 2. Seguir so' o `hw_current` perde o primeiro qTD
+qH recem-armado: `hw_current = 0` e o qTD pendurado em `overlay.next` (+0x10), com o
+token Active. Medido antes do conserto: `cur=00000000 ovnext=138a4180 ovtok=00000000`
+com 12 relatorios na fila -- a varredura concluia "sem trabalho" e nao entregava nada.
+
+### 3. FRINDEX (0x14c) -- o que explicava o "so' o 1o relatorio passa"
+O `scan_periodic()` do guest monta a janela de varredura a partir de
+`ehci_read_frame_index()` (`ehci-sched.c:2305`) e anda de `next_uframe` ate'
+`clock_frame`. Com o registrador congelado em zero (nunca foi escrito nem
+sintetizado) o driver reexaminava **apenas o frame 0**; o qH do EP1 fica pendurado em
+alguns frames do frame list, entao nunca mais era revisitado. O primeiro relatorio
+passava porque a varredura inicial do enqueue percorre o anel inteiro. Depois da
+entrega #1 o guest escrevia `USBSTS <- 0x1` (ack do USBINT) e **nao armava mais
+nenhum qTD** -- dava para ver isso sem adivinhar: nenhuma varredura encontrava qTD
+Active. Agora o FRINDEX anda um frame por tick do motor.
+
+### 4. Duas correcoes de protocolo no motor
+- A conclusao e' espelhada no **overlay do qH** (o HCD le' ali, nao no qTD solto);
+  sem isso o `ehci_urb_dequeue` nunca via' a transferencia terminar.
+- O **periodico roda antes do assincrono**: o mesmo bloco de qTD era alcancavel pelas
+  duas varreduras e o assincrono o completava como control transfer.
+
+### Metodo (de novo, e vale repetir)
+O relatorio `-110` do config descriptor apontava para "janela do ASE no relink" ou
+"avanco do overlay". Nenhum dos dois: era a **lista inteira** que nao existia, mais um
+registrador de tempo (FRINDEX) que o driver usa para decidir o que varrer. Antes de
+modelar mais hardware, conferir **quais registradores o driver le' e o modelo ignora**.
+
+### O que NAO tem prova
+`hid_key_from_sdl` (SDL -> relatorio HID) esta' escrito mas nao foi exercitado com
+tecla real; o que esta' provado ponta-a-ponta e' a **fila de relatorios -> guest**
+(`ZEEBO_HID_TYPE`, mesmo caminho que o SDL alimenta). Gate novo: `make test-linux-hid`
+(com controle negativo: congelando o FRINDEX ele vai RED).

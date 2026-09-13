@@ -1,0 +1,19 @@
+{
+  "unicorn": "2.1.2",
+  "escopo": "semantics witness; nao e' regressao do boot",
+  "conclusao": "o 2o argumento e' END; passar TAMANHO => UC_ERR_ARG => invalidacao nunca ocorreu",
+  "cases": [
+    {
+      "caso": "como_o_projeto_chama__addr_size",
+      "address": "0xb0000720",
+      "arg2": "0x100",
+      "erro": "Invalid argument (UC_ERR_ARG)"
+    },
+    {
+      "caso": "forma_correta__addr_end",
+      "address": "0xb0000720",
+      "arg2": "0xb0000820",
+      "erro": null
+    }
+  ]
+}

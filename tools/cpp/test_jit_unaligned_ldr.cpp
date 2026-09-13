@@ -100,7 +100,7 @@ void compare(const char* nome, std::uint32_t data_word, std::uint32_t addr) {
     {
         uc_engine* uc = nullptr;
         uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
-        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1176);
+        uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
         uc_mem_map(uc, kBase, kSize, UC_PROT_ALL);
         uc_mem_write(uc, kBase, g_mem.data(), g_mem.size());
         std::uint32_t sp = kBase + 0x8000;

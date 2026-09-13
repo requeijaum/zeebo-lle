@@ -51,6 +51,31 @@
 #include "zeebo_applet_dispatch.h"  // Bug 4: seleção honesta de manipulador por módulo
 #include "zeebo_uc_exec.h"          // Bug 4: prova REAL de permissão executável (UC_PROT_EXEC)
 #include "zeebo_module_gate.h"      // DD0: gate honesto de módulo — sem PASS por carga isolada
+#include "zeebo_efs2_module_guard.h" // Fail-closed: não reporta/injeta blob sem entry de módulo plausível
+#include "zeebo_zeetris_runner.h"
+
+// Mapa medido no .mod do Zeetris: a máscara de botões que o gameloop faz poll
+// (0x1200c3dc -> [0x123c16ac+0x10]) tem 8 bits, e cada bit leva a um handler que
+// chama o dispatcher do jogo (0x1200a7bc) com um código AVK lido do pool:
+//   0x001->AVK_UP(0xE031) 0x002->AVK_DOWN(0xE032) 0x004->AVK_LEFT(0xE033)
+//   0x008->AVK_RIGHT(0xE034) 0x010->AVK_1(0xE022) 0x020->AVK_2(0xE023)
+//   0x080->0xE02E          0x200->AVK_5(0xE026)
+// Leitura direta dos literais dos handlers; nada inferido.
+static inline uint16_t avk_to_platform_bit(uint32_t avk) {
+    switch (avk) {
+        case 0xE031u: return 0x001u;
+        case 0xE032u: return 0x002u;
+        case 0xE033u: return 0x004u;
+        case 0xE034u: return 0x008u;
+        case 0xE022u: return 0x010u;
+        case 0xE023u: return 0x020u;
+        case 0xE02Eu: return 0x080u;
+        case 0xE026u: return 0x200u;
+        default: return 0;
+    }
+}
+
+   // Zeetris full lifecycle runner
 #include "zeebo_efs2_fs.h"
 #include "zeebo_shared_memory.h"
 #define ZEEBO_VIC_WITH_UNICORN
@@ -76,7 +101,7 @@ enum {
     MSM_VIC_BASE        = 0xc0000000,
     MSM_VIC_SIZE        = 0x00010000, // 64KB
     GPT_TIMER_BASE      = 0xc5000000,
-    GPT_TIMER_SIZE      = 0x00100000, // 1MB
+    GPT_TIMER_SIZE      = 0x00500000, // 5MB (cobre 0xc5000000..0xc5500000, incluindo 0xc5400000)
     
     // MDDI Display
     MSM_MDDI_BASE       = 0xaa600000,
@@ -175,6 +200,13 @@ private:
 };
 
 // 4. Shared Memory SMD / ONCRPC Subsystem (Zeebo AMSS Messaging)
+// Structs, constants and the UnifiedSMDBridge injector now live in the
+// extracted, unit-testable header so the doorbell RPC path can be exercised in
+// isolation (see test_qdsp5_doorbell_probe.cpp). No behavior change here.
+#include "zeebo_smd_bridge_unified.h"
+#include "qdsp5_doorbell_probe.h"
+
+#if 0  // Superseded by zeebo_smd_bridge_unified.h — kept for provenance only.
 enum {
     AMSS_SMD_CHANNEL_ADDR   = 0x1755d1dc,
     AMSS_RPC_QUEUE_HEAD     = 0x17571748,
@@ -279,6 +311,7 @@ public:
 private:
     u32 packets_injected_;
 };
+#endif  // Superseded UnifiedSMDBridge / AMSS structs (see zeebo_smd_bridge_unified.h)
 
 // 5. Host Display Sink (SDL2 + Snapshot)
 class UnifiedDisplaySink {
@@ -307,7 +340,7 @@ public:
             }
         }
 
-        window_ = SDL_CreateWindow("Zeebo LLE Unified Emulator (MSM7201A)",
+        window_ = SDL_CreateWindow("beLLEZeebo - LLE Zeebo Emulator (MSM7201A)",
                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                    FB_WIDTH, FB_HEIGHT,
                                    SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
@@ -802,15 +835,17 @@ public:
             const char* sig;               // assinatura ASCII de confirmação (nullptr = nenhuma)
         };
         static const KnownIB kKnown[] = {
-            // reksio.mod: bloco indireto @0x3b1d400 -> 128 clusters (64 KiB).
-            // Jogo / Applet Zeebo (Reksio) verificado no EFS2 da NAND 1.1.2.
-            { "reksio.mod", 0x3b1d400ULL, 65536ULL, 0xd9339103u, nullptr },
-            // 274755 (App ID da Z-Wheel / ZeeboApp, AEECLSID 0x01070798): bloco
-            // indireto @0x3a92000, payload carrega a string literal "274755".
-            { "274755",     0x3a92000ULL, 65536ULL, 0x544a6f30u, "274755" },
-            // tectoy.mod: bloco indireto @0x6026200 carrega a config do applet
-            // TecToy/Claro ("tectoy.claro.com.br"), filiado ao dirente inode 0x7ff13.
-            { "tectoy.mod", 0x6026200ULL, 65536ULL, 0xf7c3c740u, "tectoy.claro.com.br" },
+            // QUARENTENA (auditoria audit-efs2): as antigas entradas reksio.mod
+            // (@0x3b1d400), 274755 (@0x3a92000) e tectoy.mod (@0x6026200) foram
+            // REMOVIDAS por serem enganosas. Os checksums FNV-1a validavam bytes
+            // REAIS, mas esses bytes NÃO são módulos executáveis: as primeiras
+            // palavras são 0x9cd3ffff / 0xfd19f297 / 0x00000000 — nem ELF, nem um
+            // branch ARM inicial cujo alvo caia na faixa de carga. São metadados
+            // de gnode / dados de modem/NV / zeros. Reportá-los ou injetá-los como
+            // applet era propagar garbage. A extração genérica da tabela de gnodes
+            // ainda não foi revertida por bytes; até lá, retornamos vazio (honesto)
+            // e o guard fail-closed (zeebo_efs2_module_guard.h) impede que
+            // qualquer blob sem entry de módulo plausível seja lançado.
         };
         for (const auto& k : kKnown) {
             if (de->name == k.name) {
@@ -854,9 +889,54 @@ public:
             printf("[EFS2/Applet] Sem payload extraível para '%s'.\n", path_or_name.c_str());
             return false;
         }
+        // Instrumento env-gated: mostra o que REALMENTE será injetado (o payload
+        // do EFS2), com hexdump curto e as primeiras strings ASCII. Existe porque
+        // uma reconstrução manual da cadeia de clusters deu conteúdo de modem —
+        // ou seja, o encoding da tabela não é "índice * 512" — então verificar o
+        // payload tem de ser feito sobre o que o código monta, não por fora.
+        if (std::getenv("ZEEBO_EFS2_DUMP")) {
+            printf("[EFS2/Dump] '%s': %zu bytes; 32 primeiros:", path_or_name.c_str(), payload.size());
+            for (size_t i = 0; i < 32 && i < payload.size(); ++i) printf(" %02x", payload[i]);
+            printf("\n[EFS2/Dump] strings ASCII (>=6):");
+            size_t shown = 0;
+            for (size_t i = 0; i + 6 <= payload.size() && shown < 10; ) {
+                size_t j = i;
+                while (j < payload.size() && payload[j] >= 0x20 && payload[j] < 0x7f) ++j;
+                if (j - i >= 6) {
+                    printf(" '%.*s'", (int)std::min<size_t>(j - i, 40), (const char*)payload.data() + i);
+                    ++shown;
+                }
+                i = (j > i) ? j : i + 1;
+            }
+            printf("\n");
+            u32 w0 = 0; if (payload.size() >= 4) std::memcpy(&w0, payload.data(), 4);
+            printf("[EFS2/Dump] primeira palavra=0x%08x branch=%s\n", w0,
+                   ((w0 >> 28) == 0xa || (w0 >> 28) == 0xb) ? "SIM" : "nao");
+        }
         if (!brew_) {
             printf("[EFS2/Applet] BrewLoader indisponível (init incompleto).\n");
             return false;
+        }
+        // GATE FAIL-CLOSED (auditoria audit-efs2): NUNCA injeta um payload cru sem
+        // uma entrada de módulo executável plausível — ELF e_entry resolvido, ou
+        // um branch ARM inicial cujo alvo cai na faixa de carga. Metadados de
+        // gnode, dados de modem/NV e zeros (os antigos "KnownIB" reksio.mod/274755/
+        // tectoy.mod) são REJEITADOS aqui, antes de qualquer inject_bytes. MIF é
+        // exceção legítima: é validado logo abaixo pelo MifParser, não é módulo.
+        bool is_mif = path_or_name.size() >= 4 &&
+                      path_or_name.substr(path_or_name.size() - 4) == ".mif";
+        if (!is_mif) {
+            uint32_t guard_entry = 0;
+            auto verdict = zeebo::efs2_guard::classify_payload(payload, base_addr, &guard_entry);
+            if (verdict == zeebo::efs2_guard::MOD_REJECT) {
+                printf("[EFS2/Applet] REJEITADO (fail-closed): '%s' (%zu bytes) não tem entry "
+                       "de módulo plausível (nem ELF, nem branch ARM inicial na faixa @0x%08x). "
+                       "Não injetado.\n", path_or_name.c_str(), payload.size(), base_addr);
+                return false;
+            }
+            printf("[EFS2/Applet] guard OK: '%s' é módulo plausível (%s, entry=0x%08x).\n",
+                   path_or_name.c_str(),
+                   zeebo::efs2_guard::verdict_label(verdict), guard_entry);
         }
         std::string origin = "efs2:" + path_or_name;
         // QW35: Se o arquivo for um MIF (.mif), efetua o parse dos metadados e do CLSID
@@ -1106,6 +1186,248 @@ public:
         return ok;
     }
 
+    bool load_zeetris_applet(const std::string& mod_path) {
+        printf("[Zeetris] Inicializando ZeetrisRunner para '%s'...\n", mod_path.c_str());
+        if (!core0_.uc) {
+            printf("[Zeetris][ERRO] Core0 Unicorn não inicializado.\n");
+            return false;
+        }
+        auto bytes = zeebo::zeetris::ZeetrisRunner::load_file(mod_path);
+        if (bytes.empty()) {
+            printf("[Zeetris][ERRO] Não foi possível ler arquivo '%s'.\n", mod_path.c_str());
+            return false;
+        }
+        if (!zeebo::zeetris::ZeetrisRunner::is_zeetris_mod(bytes)) {
+            printf("[Zeetris][ERRO] '%s' não possui assinatura válida de zeetris.mod.\n", mod_path.c_str());
+            return false;
+        }
+
+        // Mapeia o binário em 0x12000000
+        u32 load_va = zeebo::zeetris::ZeetrisRunner::LOAD_VA;
+        u32 size = static_cast<u32>(bytes.size());
+        u32 aligned_size = (size + 0xFFFu) & ~0xFFFu;
+        uc_mem_map(core0_.uc, load_va, aligned_size, UC_PROT_ALL);
+        uc_mem_write(core0_.uc, load_va, bytes.data(), bytes.size());
+
+        zeetris_ctx_ = zeebo::zeetris::ZeetrisContext{};
+        bool ok = zeebo::zeetris::ZeetrisRunner::setup_and_start(core0_.uc, zeetris_ctx_);
+        if (ok) {
+            zeetris_life_armed_ = true;
+            printf("[Zeetris] Ciclo de vida completo armado com sucesso! (Applet @ 0x%08x)\n",
+                   zeetris_ctx_.pApplet);
+        } else {
+            printf("[Zeetris][ERRO] Falha no setup_and_start do Zeetris.\n");
+        }
+        return ok;
+    }
+
+    bool is_zeetris_armed() const { return zeetris_life_armed_; }
+
+    void run_zeetris_interactive(bool headless, double max_seconds,
+                                 const std::string& dump_frames_dir = "") {
+        if (!zeetris_life_armed_ || !core0_.uc) {
+            printf("[Zeetris/Loop] ciclo de vida não armado — pulando loop interativo.\n");
+            return;
+        }
+        // Roteiro de teclas headless, env-gated (ver membro scripted_keys_).
+        scripted_keys_.clear();
+        if (const char* spec = std::getenv("ZEEBO_ZEETRIS_KEYS")) {
+            std::string s(spec), tok;
+            std::stringstream ss(s);
+            while (std::getline(ss, tok, ',')) {
+                auto colon = tok.find(':');
+                if (colon == std::string::npos) continue;
+                u64 fr = (u64)std::strtoull(tok.substr(0, colon).c_str(), nullptr, 10);
+                u32 avk = (u32)std::strtoul(tok.substr(colon + 1).c_str(), nullptr, 16);
+                scripted_keys_.emplace_back(fr, avk);
+            }
+            printf("[Zeetris/Loop] roteiro de teclas: %zu entradas\n", scripted_keys_.size());
+        }
+        // Atualiza a máscara de botões da plataforma -- é o que o jogo lê de
+        // verdade (o HandleEvent consome evento mas não move a máscara).
+        // Registra o pico AQUI (no instante do aperto): amostrar a máscara no fim
+        // da iteração não serve, porque o roteiro/teclado já soltou o botão.
+        auto set_btn = [this](u32 avk, bool pressed) {
+            uint16_t bit = avk_to_platform_bit(avk);
+            if (!bit) return;
+            if (pressed) {
+                zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons | bit);
+                if (zeetris_ctx_.platform_buttons > peak_buttons_)
+                    peak_buttons_ = zeetris_ctx_.platform_buttons;
+            } else {
+                zeetris_ctx_.platform_buttons = (uint16_t)(zeetris_ctx_.platform_buttons & ~bit);
+            }
+        };
+
+        // Liga a vtable IGL do guest ao rasterizador real: sem isto os comandos
+        // GL do jogo caem no stub contador e nada é desenhado.
+        if (igl_hook_ && rast_) {
+            zeetris_ctx_.igl_dispatcher = [this](int slot, zeebo::gpu::GuestMachine& gm) {
+                return igl_hook_->dispatch_igl(slot, gm);
+            };
+            rast_->begin_frame();
+        }
+
+        // Conecta áudio do IMedia diretamente ao host audio device
+        if (host_audio_) {
+            zeetris_ctx_.on_audio_play = [this](const int16_t* pcm, size_t count, int /*sample_rate*/, int /*channels*/) {
+                if (!pcm || count == 0 || !host_audio_) return;
+                // Cria buffer de áudio decodificado e encaminha via pull callback
+                std::vector<int16_t> samples(pcm, pcm + count);
+                host_audio_->set_source([samples = std::move(samples), pos = size_t(0)](int16_t* out, size_t frames) mutable {
+                    for (size_t f = 0; f < frames; ++f) {
+                        if (pos < samples.size()) {
+                            out[f * 2 + 0] = samples[pos++];
+                            out[f * 2 + 1] = (pos < samples.size()) ? samples[pos++] : out[f * 2 + 0];
+                        } else {
+                            out[f * 2 + 0] = 0;
+                            out[f * 2 + 1] = 0;
+                        }
+                    }
+                });
+            };
+        }
+
+        printf("[Zeetris/Loop] iniciando gameloop contínuo%s%s (headless=%d)\n",
+               max_seconds > 0.0 ? " por tempo" : "",
+               (!headless) ? " interativo" : "",
+               (int)headless);
+
+        const u16* fb = rast_ ? rast_->framebuffer_rgb565() : nullptr;
+        if (fb && sink_) sink_->update_frame(fb);
+
+        auto t_start = std::chrono::steady_clock::now();
+        auto t_last  = t_start;
+        uint64_t frames = 0, key_dispatches = 0;
+        bool run = true;
+
+        while (run) {
+            if (control_) {
+                auto reqs = control_->Drain();
+                for (auto& req : reqs) process_control_request(req, (int)frames);
+                if (quit_requested_) { run = false; break; }
+            }
+
+            // Bombeia eventos SDL2 → Zeetris HandleEvent (0x1200aa88)
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) { run = false; break; }
+                if (ev.type == SDL_KEYDOWN) {
+                    if (ev.key.keysym.sym == SDLK_ESCAPE || ev.key.keysym.sym == SDLK_q) {
+                        // Quit
+                    }
+                    zeebo::brew::ZpadButton b;
+                    if (sdl_to_zpad(ev.key.keysym.sym, b)) {
+                        u32 avk = zeebo::brew::avk_for_zpad(b);
+                        set_btn(avk, true);
+                        if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, true)) {
+                            key_dispatches++;
+                        }
+                    }
+                } else if (ev.type == SDL_KEYUP) {
+                    zeebo::brew::ZpadButton b;
+                    if (sdl_to_zpad(ev.key.keysym.sym, b)) {
+                        u32 avk = zeebo::brew::avk_for_zpad(b);
+                        set_btn(avk, false);
+                        if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, false)) {
+                            key_dispatches++;
+                        }
+                    }
+                } else if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+                    zeebo::brew::ZpadButton b;
+                    if (pad_to_zpad(ev.cbutton.button, b)) {
+                        u32 avk = zeebo::brew::avk_for_zpad(b);
+                        bool pressed = (ev.type == SDL_CONTROLLERBUTTONDOWN);
+                        set_btn(avk, pressed);
+                        if (avk && zeebo::zeetris::ZeetrisRunner::dispatch_key(core0_.uc, zeetris_ctx_, avk, pressed)) {
+                            key_dispatches++;
+                        }
+                    }
+                }
+            }
+
+            // Instrumento env-gated: roteiro de teclas para rodadas headless.
+            // ZEEBO_ZEETRIS_KEYS="frame:AVK,frame:AVK,..." (ex.: "10:E035,60:E032").
+            // Permite provar se um evento de tecla destrava o jogo, sem SDL.
+            if (!scripted_keys_.empty()) {
+                for (const auto& ka : scripted_keys_) {
+                    if ((u64)frames == ka.first) {
+                        set_btn(ka.second, true);
+                        zeebo::zeetris::ZeetrisRunner::step_frame(core0_.uc, zeetris_ctx_);
+                        set_btn(ka.second, false);
+                        bool ok_press = zeebo::zeetris::ZeetrisRunner::dispatch_key(
+                            core0_.uc, zeetris_ctx_, ka.second, true);
+                        bool ok_rel = zeebo::zeetris::ZeetrisRunner::dispatch_key(
+                            core0_.uc, zeetris_ctx_, ka.second, false);
+                        if (ok_press && ok_rel) key_dispatches++;
+                        printf("[Zeetris/Keys] frame=%llu AVK=0x%08x press=%d release=%d\n",
+                               (unsigned long long)frames, ka.second,
+                               (int)ok_press, (int)ok_rel);
+                    }
+                }
+            }
+
+            // Executa 1 frame real do gameloop do Zeetris (0x1200ac5c)
+            bool frame_ok = zeebo::zeetris::ZeetrisRunner::step_frame(core0_.uc, zeetris_ctx_);
+            if (!frame_ok) {
+                printf("[Zeetris/Loop] gameloop step_frame falhou! Encerrando loop.\n");
+                break;
+            }
+
+            // Apresenta o frame do rasterizador (o jogo desenha via IGL/GL ES).
+            // NOTA: zeetris_ctx_.framebuffer era o alvo da antiga HLE de IDisplay,
+            // que se provou errada — o alvo real é o rasterizador.
+            if (rast_) {
+                rast_->end_frame();
+                fb = rast_->framebuffer_rgb565();
+                rast_->begin_frame();
+            }
+            if (fb && sink_) sink_->update_frame(fb);
+            frames++;
+
+            if (!dump_frames_dir.empty() && frames <= 60) {
+                char p[512];
+                snprintf(p, sizeof(p), "%s/zeetris_frame_%06llu.ppm",
+                         dump_frames_dir.c_str(), (unsigned long long)frames);
+                save_ppm(fb, p);
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            double total = std::chrono::duration<double>(now - t_start).count();
+            if (max_seconds > 0.0 && total >= max_seconds) { run = false; }
+
+            double since = std::chrono::duration<double>(now - t_last).count();
+            if (since >= 1.0) {
+                printf("[Zeetris/Loop] FPS=%.1f | frames=%llu | teclas_consumidas=%llu | t=%.1fs\n",
+                       (double)frames / (total > 0 ? total : 1.0),
+                       (unsigned long long)frames,
+                       (unsigned long long)key_dispatches, total);
+                t_last = now;
+            }
+            if (!headless) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            else if (control_) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+
+        printf("[Zeetris/Loop] loop encerrado: frames=%llu, teclas consumidas=%llu.\n",
+               (unsigned long long)frames, (unsigned long long)key_dispatches);
+        // Prova de integração no binário real: os comandos GL do guest foram
+        // despachados ao IglHook (handled>0), não só contados pelo stub.
+        printf("[Zeetris/Loop] IGL: %u chamadas, %u aceitas pelo hook, %zu slots\n",
+               zeetris_ctx_.igl_calls, zeetris_ctx_.igl_handled,
+               zeetris_ctx_.igl_slot_calls.size());
+        if (rast_) {
+            const u16* p = rast_->framebuffer_rgb565();
+            u16 c0 = p ? p[0] : 0; size_t diff = 0;
+            const size_t n = (size_t)zeebo::gpu::kFbWidth * zeebo::gpu::kFbHeight;
+            for (size_t i = 0; p && i < n; ++i) if (p[i] != c0) diff++;
+            printf("[Zeetris/Loop] rasterizador: pixel0=0x%04x, pixels diferentes=%zu/%zu\n",
+                   c0, diff, n);
+        printf("[Zeetris/Loop] mascara de botoes final=0x%04x | PICO=0x%04x "
+               "(prova de que o input do host chegou ao jogo)\n",
+               (unsigned)zeetris_ctx_.platform_buttons, (unsigned)peak_buttons_);
+        }
+    }
+
     // ── Passo 11: loop interativo/contínuo do applet Z-Wheel (274755) ──
     // Após dispatch_zwheel_app_start(), mantém um ciclo que (a) apresenta o
     // framebuffer RGB565 no HostVideoSink/tela SDL2 à taxa de quadros e (b)
@@ -1303,10 +1625,11 @@ public:
     int boot_target() const { return boot_firstapp_; }
     void set_jit_solo(bool solo) { jit_solo_ = solo; }
     bool jit_solo() const { return jit_solo_; }
+    UnifiedHostAudio* host_audio() { return host_audio_.get(); }
 
     bool init(const std::string& nand_path, const std::string& apps_path, const std::string& amss_path, bool headless = true, bool use_dynarmic = false) {
         printf("===================================================================\n");
-        printf("  ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine          \n");
+        printf("  beLLEZeebo SYSTEM ORCHESTRATOR: Unified MSM7201A Engine               \n");
         printf("===================================================================\n");
 
         // 1. Initialize Hardware Flash Controller & DMOV DMA
@@ -1364,7 +1687,7 @@ public:
             return false;
         }
         uc_ctl_tlb_mode(core0_.uc, UC_TLB_VIRTUAL);
-        uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1176);
+        uc_ctl_set_cpu_model(core0_.uc, UC_CPU_ARM_1136);
         core0_.name = "ARM11-Apps";
         if (brew_) { brew_->bind_uc(core0_.uc); brew_->bind_lut(&vtlb_); }
 
@@ -1568,6 +1891,9 @@ public:
             printf("[Z-Wheel][ERRO] SoftRasterizer não inicializado.\n");
             return 0;
         }
+        if (host_audio_) {
+            // Conexão limpa sem gerador de tom falso
+        }
         // Caminho idêntico ao roteamento da vtable IGL da Z-Wheel no harness:
         // set_viewport / clear_color / clear (fachada Adreno 130 → SoftRasterizer).
         rast_->begin_frame();
@@ -1734,6 +2060,14 @@ public:
                 u32 start_addr0 = core0_.entry | ((cpsr0 >> 5) & 1u);
                 e0 = uc_emu_start(core0_.uc, start_addr0, 0, 0, slice_insns);
                 uc_reg_read(core0_.uc, UC_ARM_REG_PC, &core0_.entry);
+                // Bug 1 (deferred): um L4_Ipc/L4_ThreadSwitch pode ter ENFILEIRADO
+                // uma troca de address space DENTRO do UC_HOOK_INTR. Aqui o motor
+                // está quiescente ENTRE fatias — contexto seguro para aplicar o
+                // uc_mem_unmap/map_ptr real. Sem isto, activate() rodaria dentro do
+                // hook e corromperia o cache de tradução (SIGSEGV/hang).
+                if (space_manager_.has_pending_activate()) {
+                    space_manager_.drain_activate(core0_.uc);
+                }
                 if (e0 != UC_ERR_OK && e0 != UC_ERR_INSN_INVALID) {
                     printf("[E0-ERROR] cycle=%d err=%d (%s) pc=0x%08x\\n", c, (int)e0, uc_strerror(e0), core0_.entry);
                 }
@@ -2947,6 +3281,72 @@ private:
         uc_hook_add(core0_.uc, &h_u0, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, (void*)c0_unmapped_hook, this, 0, ~0ULL);
         uc_hook_add(core0_.uc, &h_i0, UC_HOOK_INTR, (void*)c0_intr_hook, this, 0, ~0ULL);
 
+        // Hook AMSS-EXEC gateado por env var ZEEBO_AMSS_EXEC
+        if (std::getenv("ZEEBO_AMSS_EXEC") != nullptr) {
+            static u32 g_c0_amss_insn_count = 0;
+            uc_hook h_amss_code;
+            using hook_fn = void (*)(uc_engine*, uint64_t, uint32_t, void*);
+            hook_fn amss_fn = [](uc_engine* uc, uint64_t addr, uint32_t size, void* user_data) {
+                (void)user_data; (void)size;
+                // Instrumentação de diagnóstico AMSS
+                if (addr >= 0x10c87320 && addr <= 0x10c87348) {
+                    static int amss_diag = 0;
+                    if (amss_diag++ < 30) {
+                        u32 lr=0, sp=0, r0=0, r1=0, r4=0, r5=0;
+                        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                        uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                        uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+                        printf("[AMSS-7320] pc=0x%08llx sp=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x r4=0x%08x r5=0x%08x\n",
+                               (unsigned long long)addr, sp, lr, r0, r1, r4, r5);
+                    }
+                }
+                if (addr >= 0x10d07e9c && addr <= 0x10d07eb4) {
+                    static int amss_7e9c = 0;
+                    if (amss_7e9c++ < 30) {
+                        u32 lr=0, sp=0, r0=0, r1=0, r2=0;
+                        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                        printf("[AMSS-7E9C] pc=0x%08llx sp=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x\n",
+                               (unsigned long long)addr, sp, lr, r0, r1, r2);
+                    }
+                }
+                if (addr >= 0x1041c300 && addr <= 0x1041c320) {
+                    static int amss_41c = 0;
+                    if (amss_41c++ < 20) {
+                        u32 lr=0, sp=0, r0=0, r4=0, cpsr=0;
+                        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                        uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+                        printf("[AMSS-41C] pc=0x%08llx sp=0x%08x lr=0x%08x r0=0x%08x r4=0x%08x cpsr=0x%08x (T=%d)\n",
+                               (unsigned long long)addr, sp, lr, r0, r4, cpsr, (cpsr >> 5) & 1);
+                    }
+                }
+                if (addr >= 0x103b4c18 && addr <= 0x103b4c2c) {
+                    static int amss_loop_cnt = 0;
+                    if (amss_loop_cnt++ < 20) {
+                        u32 r0=0, r1=0, r7=0, lr=0, sp=0;
+                        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                        uc_reg_read(uc, UC_ARM_REG_R7, &r7);
+                        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                        uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                        printf("[AMSS-LOOP] pc=0x%08llx r0=0x%08x r1=0x%08x r7=0x%08x lr=0x%08x sp=0x%08x\n",
+                               (unsigned long long)addr, r0, r1, r7, lr, sp);
+                    }
+                }
+                g_c0_amss_insn_count++;
+            };
+            uc_hook_add(core0_.uc, &h_amss_code, UC_HOOK_CODE, (void*)amss_fn, nullptr, 0x10000000, 0x12000000);
+        }
+
         // Core 1 hooks
         uc_hook h_c1, h_m1, h_u1, h_r1;
         uc_hook_add(core1_.uc, &h_c1, UC_HOOK_CODE, (void*)c1_code_hook, this, 0, ~0ULL);
@@ -3117,8 +3517,12 @@ private:
                                 fprintf(stderr,"[QW99/IPC-sched] cur=0x%x next=0x%x nsid=0x%x has=%d spaces=%zu\n",
                                     cur_tid, next_tid, nsid, (int)sys->space_manager_.has_space(nsid),
                                     sys->space_manager_.space_count());
+                            // INVARIANTE: este handler roda DENTRO do UC_HOOK_INTR
+                            // (fatia uc_emu_start viva). activate() faz uc_mem_unmap/
+                            // map_ptr e NÃO pode rodar aqui — apenas ENFILEIRA. O laço
+                            // de escalonamento drena entre fatias (motor quiescente).
                             if (nsid && sys->space_manager_.has_space(nsid))
-                                sys->space_manager_.activate(uc, nsid);
+                                sys->space_manager_.queue_activate(nsid);
                         }
 
                         // Bug 2: restaura o CONTEXTO COMPLETO da próxima thread se
@@ -3136,14 +3540,41 @@ private:
                             }
                             break;
                         }
-                        // QW41: T-bit inferido na primeira ativação (LSB do PC).
-                        bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
+                        // QW41/QW101: T-bit inferido na primeira ativação (LSB do PC).
+                        // O AMSS/BREW tem entrypoint ARM (0x10137000: ldr pc, [pc, #-4]), NÃO Thumb!
+                        // Forçar want_thumb em 0x10137000 faz Unicorn decodificar a instrução ARM 0xe51ff004 como Thumb inválido.
+                        bool want_thumb = (target_ip & 1);
                         u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
                         uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
-                        if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        if (target_sp) {
+                            uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                            // Iguana run_thread ABI (bootinfo.c:697-723):
+                            // [sp+0] = obj_env_ptr (env_base). Se estiver zerado no handoff para AMSS,
+                            // popula com o descritor de bootinfo/env 0xb0d00000.
+                            if (sys->service_registry_.is_amss_thread(next_tid)) {
+                                u32 cur_env = 0;
+                                uc_mem_read(uc, target_sp, &cur_env, 4);
+                                if (cur_env == 0) {
+                                    // Iguana env format: table of pairs {u32 key, u32 val} terminated by key==0
+                                    // Derived from APPS.bin BootInfo (Rec 99: key=6 val=0x500000, Rec 100: key=5 val=0x11800000)
+                                    // We write this table at 0xb0d02000 (virtual pool registered in BootInfo Rec 11).
+                                    u32 env_ptr = 0xb0d02000u;
+                                    struct EnvEntry { u32 key; u32 val; };
+                                    EnvEntry entries[] = {
+                                        { 5, 0x11800000u }, // AMSS heap pool base (memsection 0x18)
+                                        { 6, 0x00500000u }, // AMSS heap pool size (5 MiB, Rec 99)
+                                        { 0, 0 }            // terminator
+                                    };
+                                    uc_mem_write(uc, env_ptr, entries, sizeof(entries));
+                                    uc_mem_write(uc, target_sp, &env_ptr, 4);
+                                    printf("[AMSS/BOOT] Injected Iguana env_base 0x%08x (heap base=0x%08x size=0x%08x) at initial SP 0x%08x\n",
+                                           env_ptr, entries[0].val, entries[1].val, target_sp);
+                                }
+                            }
+                        }
                         did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
-                            printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                            printf("[L4/IPC] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\\n",
                                    next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
                         }
                     }
@@ -3175,8 +3606,11 @@ private:
                         // registradas, mantém a view atual (boot plano).
                         {
                             u32 nsid = sys->thread_table_.thread_space(next_tid);
+                            // INVARIANTE: rodando DENTRO do UC_HOOK_INTR. Só ENFILEIRA
+                            // — activate() (uc_mem_unmap/map_ptr) é aplicado no drain
+                            // entre fatias, jamais dentro deste hook.
                             if (nsid && sys->space_manager_.has_space(nsid))
-                                sys->space_manager_.activate(uc, nsid);
+                                sys->space_manager_.queue_activate(nsid);
                         }
 
                         // Bug 2: se a próxima thread tem contexto salvo, restaura o
@@ -3199,14 +3633,39 @@ private:
                             break;
                         }
                         // Sem contexto salvo: primeira ativação — usa ip/sp iniciais.
-                        // QW41: T-bit inferido (escrita direta de PC com bit0).
-                        bool want_thumb = (target_ip & 1) || sys->service_registry_.is_amss_thread(next_tid);
+                        // QW41/QW101: T-bit inferido na primeira ativação (LSB do PC).
+                        bool want_thumb = (target_ip & 1);
                         u32 pc_write = want_thumb ? (target_ip | 1u) : (target_ip & ~1u);
                         uc_reg_write(uc, UC_ARM_REG_PC, &pc_write);
-                        if (target_sp) uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                        if (target_sp) {
+                            uc_reg_write(uc, UC_ARM_REG_SP, &target_sp);
+                            // Iguana run_thread ABI (bootinfo.c:697-723):
+                            // [sp+0] = obj_env_ptr (env_base). Se estiver zerado no handoff para AMSS,
+                            // popula com o descritor de bootinfo/env 0xb0d00000.
+                            if (sys->service_registry_.is_amss_thread(next_tid)) {
+                                u32 cur_env = 0;
+                                uc_mem_read(uc, target_sp, &cur_env, 4);
+                                if (cur_env == 0) {
+                                    // Iguana env format: table of pairs {u32 key, u32 val} terminated by key==0
+                                    // Derived from APPS.bin BootInfo (Rec 99: key=6 val=0x500000, Rec 100: key=5 val=0x11800000)
+                                    // We write this table at 0xb0d02000 (virtual pool registered in BootInfo Rec 11).
+                                    u32 env_ptr = 0xb0d02000u;
+                                    struct EnvEntry { u32 key; u32 val; };
+                                    EnvEntry entries[] = {
+                                        { 5, 0x11800000u }, // AMSS heap pool base (memsection 0x18)
+                                        { 6, 0x00500000u }, // AMSS heap pool size (5 MiB, Rec 99)
+                                        { 0, 0 }            // terminator
+                                    };
+                                    uc_mem_write(uc, env_ptr, entries, sizeof(entries));
+                                    uc_mem_write(uc, target_sp, &env_ptr, 4);
+                                    printf("[AMSS/BOOT] Injected Iguana env_base 0x%08x (heap base=0x%08x size=0x%08x) at initial SP 0x%08x\n",
+                                           env_ptr, entries[0].val, entries[1].val, target_sp);
+                                }
+                            }
+                        }
                         did_handoff = true;
                         if (sys->service_registry_.is_amss_thread(next_tid)) {
-                            printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\n",
+                            printf("[L4/ThreadSwitch] Handoff para AMSS/BREW thread %u @0x%08x (target: %s)\\n",
                                    next_tid, target_ip, sys->boot_target() == 0 ? "AppMgr" : "Z-Wheel");
                         }
                     }
@@ -3262,9 +3721,23 @@ private:
                 uc_reg_read(uc, UC_ARM_REG_R3, &new_ip);
                 uc_reg_read(uc, UC_ARM_REG_R4, &flags);
                 res_r0 = dest; // L4_ExchangeRegisters retorna o dest ThreadId
+
+                const zeebo_l4::ThreadInfo* th_dest = sys->thread_table_.get_thread(dest);
+                u32 old_sp = th_dest ? th_dest->sp : 0;
+                u32 old_ip = th_dest ? th_dest->ip : 0;
+                u32 old_flags = th_dest ? th_dest->flags : 0;
+                u32 old_udh = th_dest ? th_dest->user_def_handle : 0;
+                u32 old_pager = th_dest ? th_dest->pager : 0;
+
+                // Iguana roottask (0x80000100) carreador do bootinfo/environment:
+                // Se dest for a roottask e user_def_handle ainda for 0, provê o descritor de bootinfo/env 0xb0d00000.
+                if (dest == 0x80000100u && old_udh == 0) {
+                    old_udh = 0xb0d00000u;
+                }
+
                 if (getenv("ZEEBO_SYSCALL_HIST")) {
-                    fprintf(stderr, "[EXREGS] dest=0x%08x control=0x%08x new_sp=0x%08x new_ip=0x%08x flags=0x%08x DELIVER=%d\n",
-                            dest, control, new_sp, new_ip, flags, (control & zeebo_l4::EXREGS_CTRL_DELIVER) ? 1 : 0);
+                    fprintf(stderr, "[EXREGS] pc=0x%08x lr=0x%08x sp=0x%08x dest=0x%08x control=0x%08x new_sp=0x%08x new_ip=0x%08x flags=0x%08x DELIVER=%d old_udh=0x%08x\n",
+                            pc, lr, sp_val, dest, control, new_sp, new_ip, flags, (control & zeebo_l4::EXREGS_CTRL_DELIVER) ? 1 : 0, old_udh);
                 }
                 sys->thread_table_.on_exchange_registers(dest, control, new_sp, new_ip, flags);
                 // Bug 2: r5 do ExchangeRegisters é UserDefHandle, NÃO o SID.
@@ -3277,11 +3750,24 @@ private:
                 {
                     u32 udh = 0;
                     uc_reg_read(uc, UC_ARM_REG_R5, &udh);
-                    sys->thread_table_.set_user_def_handle(dest, udh);
+                    if (control & zeebo_l4::EXREGS_CTRL_UHANDLE) {
+                        sys->thread_table_.set_user_def_handle(dest, udh);
+                    }
                     if (sys->thread_table_.thread_space(dest) == 0) {
                         u32 inherit = sys->thread_table_.thread_space(sys->thread_table_.current_tid());
                         if (inherit) sys->thread_table_.set_thread_space(dest, inherit);
                     }
+                }
+                // ABI ARM Pistachio OKL4 (pistachio/src/exregs.cc:517, syscalls.h:245):
+                // Quando DELIVER ativo, retorna r1=0, r2=old_sp, r3=old_ip, r4=old_flags, r5=old_UserDefHandle, r6=old_pager.
+                if (control & zeebo_l4::EXREGS_CTRL_DELIVER) {
+                    u32 zero = 0;
+                    uc_reg_write(uc, UC_ARM_REG_R1, &zero);
+                    uc_reg_write(uc, UC_ARM_REG_R2, &old_sp);
+                    uc_reg_write(uc, UC_ARM_REG_R3, &old_ip);
+                    uc_reg_write(uc, UC_ARM_REG_R4, &old_flags);
+                    uc_reg_write(uc, UC_ARM_REG_R5, &old_udh);
+                    uc_reg_write(uc, UC_ARM_REG_R6, &old_pager);
                 }
                 if (new_ip >= 0xb0100000 && new_ip < 0xb0120000) {
                     sys->service_registry_.register_service("ig_naming", dest, 1, 0xb0100000, 0x20000);
@@ -3354,13 +3840,23 @@ private:
                 res_r0 = 0xff000fff & ~0xFFu;  // base da página UTCB (ref escrita pelo kernel)
                 break;
             }
+            case 0xe0: {                                     // L4_TRAP_GETTICK
+                // Pistachio exception.cc: context->r0 = (u32_t)(get_current_time() / get_timer_tick_length());
+                // Fornece um timestamp monotônico baseado na contagem de instruções / GPT.
+                res_r0 = (u32)(sys->core0_.insns / 1000u + 1u);
+                break;
+            }
             case 0xb4: {                                     // L4_KernelInterface (KIP)
                 res_r0 = KIP_BASE;
                 kip_r1 = 0x0000000c;           // api_version
                 kip_r2 = 0x00000002;           // api_flags
                 kip_r3 = 0;                    // kernel_desc_ptr
                 set_kip_ret = true;
-                printf("[Syscall] L4_KernelInterface -> KIP@0x%08x (av052, api_flags)\n", KIP_BASE);
+                printf("[Syscall] L4_KernelInterface -> KIP@0x%08x (av052, api_flags) from pc=0x%08x sp=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x\n",
+                       KIP_BASE, pc, sp_val,
+                       (u32)[&](){ u32 v=0; uc_reg_read(uc, UC_ARM_REG_R0, &v); return v; }(),
+                       (u32)[&](){ u32 v=0; uc_reg_read(uc, UC_ARM_REG_R1, &v); return v; }(),
+                       (u32)[&](){ u32 v=0; uc_reg_read(uc, UC_ARM_REG_R2, &v); return v; }());
                 // Grava nos ponteiros que o Iguana passou (se r4/r5/r6 != 0)
                 u32 r4 = 0, r5 = 0, r6 = 0;
                 uc_reg_read(uc, UC_ARM_REG_R4, &r4);
@@ -3420,12 +3916,15 @@ private:
         // setado manualmente antes. Por isso o bit é aplicado diretamente em
         // cada `target_pc = pc;` abaixo, não como side-effect de CPSR aqui.
         bool caller_is_kernel_stub = (pc >= 0xb0000000u && pc < 0xb0020000u);
-        // QW43: ig_naming (0xb0100000-0xb0120000) mantém UMA CÓPIA LOCAL ARM dos stubs
-        // de trap L4 (confirmada por disassembly svc #0x1400/0x140c e por source OKL4).
-        // Aplicando o guard aqui (uma vez, p/ TODOS os syscalls) em vez de só no 0x0c,
-        // o retorno de L4_Ipc (0x00) do ig_naming volta a decodificar ARM — stall 0xb010333a
-        // era decode drift por Thumb forçado, não deadlock.
-        bool caller_is_ig_naming_arm = (pc >= 0xb0100000u && pc < 0xb0120000u);
+        // QW43/QW100/QW102: stubs ARM de trap L4 existem em:
+        //  - Kernel fixo: 0xb0000000..0xb0020000
+        //  - ig_naming:   0xb0100000..0xb0120000
+        //  - quartz_servers: 0xb0300000..0xb0330000
+        //  - amss (BREW): 0x103dcd00..0x103dd000
+        // Se retomados com T=1 (Thumb), o Unicorn decodifica ARM como Thumb e corrompe o fluxo de controle.
+        bool caller_is_ig_naming_arm = (pc >= 0xb0100000u && pc < 0xb0120000u) ||
+                                       (pc >= 0xb0300000u && pc < 0xb0330000u) ||
+                                       (pc >= 0x103dc000u && pc < 0x103de000u);
         // QW41: helper que injeta o bit T (LSB, convenção BX) em target_pc antes
         // de cada retomada. Deve ser chamado logo antes de CADA
         // `uc_reg_write(uc, UC_ARM_REG_PC, &target_pc)` neste bloco (os stubs L4
@@ -3436,12 +3935,15 @@ private:
         if (syscall == 0xb4) {
             // UC_HOOK_INTR delivers pc already at svc+4; resume at pc (not pc+4),
             // otherwise we double-advance to svc+8 and skip one guest instruction (QW17).
-            target_pc = apply_tbit(pc);
+            // QW102: se o chamador era ARM (kernel stub, ig_naming, quartz_servers ou amss stub),
+            // target_pc deve retomar com T=0 (ARM, LSB=0), caso contrário com T=1 (Thumb).
+            target_pc = (caller_is_kernel_stub || caller_is_ig_naming_arm) ? (pc & ~1u) : (pc | 1u);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             // Invalida o TB de execução no Unicorn para que ele recompile o bloco seguinte
             uc_ctl_remove_cache(uc, 0xb000c720, 0x100);
             uc_ctl_remove_cache(uc, 0xb00033d0, 0x100);
+            uc_ctl_remove_cache(uc, 0x103dcd14, 0x100);
         } else if (syscall == 0x00) {
             if (did_handoff) {
                 // Handoff cooperativo já reescreveu PC/SP para a thread alvo
@@ -3480,7 +3982,9 @@ private:
             // execução real: o boot passa a avançar de fato até 0xb0358bb4,
             // 0xb03ba634 e um loop de memcpy legítimo em 0xb0400064
             // (ldrb/strb/subs/bne — código válido copiando dados, não bug).
-            bool local_arm_copy = (pc >= 0xb0100000u && pc < 0xb0120000u);
+            bool local_arm_copy = (pc >= 0xb0100000u && pc < 0xb0120000u) ||
+                                  (pc >= 0xb0300000u && pc < 0xb0330000u) ||
+                                  (pc >= 0x103dc000u && pc < 0x103de000u);
             target_pc = (caller_is_kernel_stub || local_arm_copy) ? (pc & ~1u) : (pc | 1u);
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
@@ -3553,9 +4057,10 @@ private:
         } else {
             if (ip) uc_reg_write(uc, UC_ARM_REG_SP, &ip);
             if (lr) {
-                // QW41: LSB de lr já indica o T-bit real (convenção BX); preservar
-                // no próprio PC escrito, não via CPSR (não confiável no Unicorn).
-                target_pc = lr;
+                // Se a trap foi disparada a partir do AMSS/BREW em código fora de stubs ARM,
+                // ou se o chamador era Thumb, precisamos assegurar que retome com T-bit=1.
+                // Notar que `mov lr, pc` em Thumb NÃO seta o bit 0 de LR (permanece par).
+                target_pc = apply_tbit(lr);
                 uc_reg_write(uc, UC_ARM_REG_PC, &target_pc);
             }
         }
@@ -3591,7 +4096,141 @@ private:
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         sys->core0_.insns++;
 
+        // [SHELL-ANCHOR] Instrumentação read-only, gated por ZEEBO_SHELL_TRACE, que
+        // emite UMA linha marcadora inequívoca SÓ quando o Core0 executa EXATAMENTE o
+        // ISHELL_CreateInstance (0x105c7fb4) ou o AEECShell dispatch (0x10c874f4) — os
+        // dois VAs onde um AEECShell/IShell REAL seria construído/despachado. Captura o
+        // contexto ARM vivo (PC/r0/r1/r2/sp) que derivaria pIShell, SEM fabricar nada.
+        // Ausente a env, não altera o boot; presente, não patcheia PC/ponteiro/memória.
+        // Diferente do sample por-ciclo e da janela ampla APPS: casa o ANCHOR exato.
+        static const bool shell_trace_on = std::getenv("ZEEBO_SHELL_TRACE") != nullptr;
+        if (shell_trace_on && sys->brew_) {
+            const u32 here = (u32)ad;
+            const u32 ish  = zeebo::brew::DISPROVEN_ISHELL_RODATA_VA;
+            const u32 aees = zeebo::brew::DISPROVEN_BOOTSTRAP_ENV_VA;
+            if ((ish && here == ish) || here == aees) {
+                u32 r0=0,r1=0,r2=0,sp=0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                fprintf(stderr,
+                    "[SHELL-ANCHOR] Core0 HIT %s pc=0x%08x r0=0x%08x r1=0x%08x "
+                    "r2=0x%08x sp=0x%08x insns=%llu\n",
+                    (here == aees) ? "AEECShell_dispatch" : "ISHELL_CreateInstance",
+                    here, r0, r1, r2, sp,
+                    (unsigned long long)sys->core0_.insns);
+                fflush(stderr);
+            }
+        }
+
+        // [SHELL-SEM] Instrumentação SEMÂNTICA read-only, gated por ZEEBO_SHELL_SEM.
+        // O [SHELL-ANCHOR] acima prova apenas que o Core0 EXECUTOU o VA de dispatch
+        // e imprime os registradores vivos — mas r0=0xb0d02000 num AEECShell dispatch
+        // NÃO prova que r0 é o pIShell. Uma pilha/registrador só vira "objeto IShell
+        // vivo" quando: (a) r0 aponta para memória mapeada e legível; (b) word[0]
+        // desse objeto (o ponteiro de vtable) aponta para memória mapeada e legível;
+        // (c) as primeiras entradas dessa vtable são VAs de código plausíveis (região
+        // APPS/BREW), i.e. um vtable real, não lixo; e (d) o caminho de retorno (LR)
+        // aponta para o site de chamada que consome o ppOut de ISHELL_CreateInstance.
+        // Este bloco LÊ (uc_mem_read) essas memórias e as classifica — nunca escreve
+        // PC/registrador/ponteiro/memória do guest. Ausente a env, é inerte.
+        static const bool shell_sem_on = std::getenv("ZEEBO_SHELL_SEM") != nullptr;
+        if (shell_sem_on && sys->brew_) {
+            const u32 here = (u32)ad;
+            const u32 ish  = zeebo::brew::DISPROVEN_ISHELL_RODATA_VA;
+            const u32 aees = zeebo::brew::DISPROVEN_BOOTSTRAP_ENV_VA;
+            if ((ish && here == ish) || here == aees) {
+                const bool is_create = (ish && here == ish);
+                u32 r0=0,r1=0,r2=0,r3=0,sp=0,lr=0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                // (a) r0 legível?  (b) vtable = *r0 legível?  (c) vtable[0..3] em código?
+                auto mem_ok = [&](u32 va, u32* out)->bool {
+                    if (va == 0) return false;
+                    u32 tmp = 0;
+                    return uc_mem_read(uc, va, &tmp, 4) == UC_ERR_OK && (*out = tmp, true);
+                };
+                auto looks_code = [](u32 va)->bool {
+                    // APPS/BREW user-space code region observada neste firmware.
+                    return va >= 0x10000000u && va < 0x12000000u;
+                };
+                u32 vptr = 0; bool r0_read = mem_ok(r0, &vptr);
+                u32 v0=0,v1=0,v2=0,v3=0;
+                bool vt_read = r0_read && mem_ok(vptr, &v0);
+                if (vt_read) { mem_ok(vptr+4,&v1); mem_ok(vptr+8,&v2); mem_ok(vptr+12,&v3); }
+                int code_slots = (looks_code(v0)?1:0)+(looks_code(v1)?1:0)+
+                                 (looks_code(v2)?1:0)+(looks_code(v3)?1:0);
+                // Veredito semântico: só é "IShell vivo" se r0 e vtable são legíveis
+                // E a maioria dos 4 primeiros slots aponta para código. Caso contrário
+                // é NÃO-SEMÂNTICO (a mera presença de r0 no dispatch não prova nada).
+                const bool is_live_ishell = r0_read && vt_read && code_slots >= 2;
+                fprintf(stderr,
+                    "[SHELL-SEM] site=%s pc=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x "
+                    "r3=0x%08x sp=0x%08x lr=0x%08x r0_read=%d vptr=0x%08x vt_read=%d "
+                    "vt[0..3]=0x%08x,0x%08x,0x%08x,0x%08x code_slots=%d lr_code=%d "
+                    "VERDICT=%s insns=%llu\n",
+                    is_create ? "ISHELL_CreateInstance" : "AEECShell_dispatch",
+                    here, r0, r1, r2, r3, sp, lr, r0_read?1:0, vptr, vt_read?1:0,
+                    v0, v1, v2, v3, code_slots, looks_code(lr)?1:0,
+                    is_live_ishell ? "LIVE_ISHELL" : "NON_SEMANTIC",
+                    (unsigned long long)sys->core0_.insns);
+                // Para ISHELL_CreateInstance, r2=ppOut é o ponteiro de saída do objeto
+                // criado: o caminho de retorno (LR) grava *r2. Lê (read-only) *r2 antes
+                // do retorno para expor o slot que o site de chamada vai consumir.
+                if (is_create) {
+                    u32 ppout_slot = 0; bool ppout_read = mem_ok(r2, &ppout_slot);
+                    fprintf(stderr,
+                        "[SHELL-SEM]   CreateInstance clsid=0x%08x ppOut=0x%08x "
+                        "ppOut_read=%d *ppOut(pre)=0x%08x return_to=0x%08x\n",
+                        r1, r2, ppout_read?1:0, ppout_slot, lr);
+                }
+                fflush(stderr);
+            }
+        }
+
         // [QW-PC14] Instrumentação read-only da fronteira PC=0x00000014 pós-scatterload.
+        // [SWP-SPINLOCK] Trata o spinlock de sincronização inter-core/inter-thread em 0x1112fc30:
+        //   0x1112fc30: swp r3, r2, [r1] (r2=1, r1 aponta para o lock word, ex: 0x00000008 ou 0x00000004)
+        //   0x1112fc34: cmp r3, #0
+        //   0x1112fc38: bne 0x1112fc30
+        // No emulador single-threaded cooperativo, se a trava não estiver liberada (r3 != 0),
+        // o core entra em loop de espera infinita porque nenhum outro core desfaz a trava.
+        // Simulamos a aquisição atômica bem sucedida liberando a trava na primeira tentativa (r3=0).
+        if ((uint32_t)ad == 0x1112fc30) {
+            u32 r1 = 0;
+            uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            if (r1 == 0x00000008 || r1 == 0x00000004) {
+                u32 zero = 0;
+                uc_mem_write(uc, r1, &zero, 4);
+            }
+        }
+
+        // [OKL4-PREEMPT-FASTPATH] Emuladores sem preempção por timer/thread assíncrona:
+        // As rotinas em 0x1011714c/0x10134bbc/0x11166ea8 verificam [utcb + 10] (UTCB_CUST0).
+        // Se cair nos pontos de verificação udf #0xfa55 (0x11166e8c/0x11166ea8/0x10117140/0x1011715c/0x10134bb0/0x10134bcc),
+        // trata-se de asserções/traps de preempção que devem simplesmente retornar ao chamador (bx lr).
+        // Bypassamos o udf #0xfa55 fazendo o retorno normal (pc = lr).
+        if ((uint32_t)ad == 0x11166ea8 || (uint32_t)ad == 0x11166e8c ||
+            (uint32_t)ad == 0x1011715c || (uint32_t)ad == 0x10117140 ||
+            (uint32_t)ad == 0x10134bcc || (uint32_t)ad == 0x10134bb0) {
+            u32 lr = 0;
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            u32 target = lr & ~1u;
+            uc_reg_write(uc, UC_ARM_REG_PC, &target);
+            u32 cpsr = 0;
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            if (lr & 1) cpsr |= (1 << 5); else cpsr &= ~(1 << 5);
+            uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+            sys->core0_.entry = target;
+            uc_ctl_remove_cache(uc, target, 16);
+            uc_emu_stop(uc);
+            return;
+        }
         // Mantém um ring buffer dos últimos PCs/opcodes executados no Core0 e, na
         // PRIMEIRA vez que o PC cai na página de vetores baixos (0x00..0x1f), despeja
         // a proveniência completa (últimos PCs, CPSR/modo/LR/SP, TID/SID, conteúdo
@@ -4014,6 +4653,7 @@ private:
     }
 
     static bool is_core0_peripheral(uint32_t addr) {
+        if (addr >= 0xc5400000 && addr < 0xc5401000) return true;
         if (addr >= MSM_VIC_BASE && addr < MSM_VIC_BASE + (uint32_t)zeebo::PB_VIC_SIZE) return true;   // VIC (bug 5)
         if (addr >= GPT_TIMER_BASE && addr < GPT_TIMER_BASE + (uint32_t)zeebo::PB_GPT_FW_WINDOW) return true; // GPT sub-bank (bug 5)
         if (addr >= MSM_CSR_BASE + 0x400 && addr <= MSM_CSR_BASE + 0x440) return true; // Doorbell
@@ -4042,11 +4682,14 @@ private:
                 vic_status0 |= (1 << int_num);
                 uc_mem_write(core1_state_->uc, MSM_VIC_BASE, &vic_status0, 4);
 
-                // Inject RPC packets on doorbell trigger using official IDs AUDMGR (0x30000013) / ADSPRTOSATOM (0x3000000a)
+                // QDSP5 RPC liveness probe — OFF by default (production doorbells
+                // must NOT mutate the AMSS ONCRPC queue). Previously this block
+                // unconditionally injected fabricated 0x42 packets with proc
+                // 0x1b59 (which is the RPC SUCCESS STATUS code, not a proc ID —
+                // QDSP5_TODO.md §3.1/§11.1), corrupting the live queue on every
+                // doorbell. Now gated behind ZEEBO_QDSP5_RPC_PROBE (Q1.5).
                 if (smd_) {
-                    std::vector<u8> dummy_payload(16, 0x42);
-                    smd_->inject_packet(core1_state_->uc, 0x30000013, 0x1b59, dummy_payload);
-                    smd_->inject_packet(core1_state_->uc, 0x3000000a, 0x02, dummy_payload);
+                    zeebo_qdsp5::doorbell_maybe_inject(*smd_, core1_state_->uc);
                 }
             }
         }
@@ -4194,6 +4837,40 @@ private:
                 }
             }
         }
+        // [QW103-ENVW] Watchpoint read-only sobre o ponteiro global de ambiente
+        // do AMSS (0x1145ccb4), lido por 0x10d07e9c (lookup {key,value} do
+        // struct environment do Iguana). Objetivo: provar POR MEDIÇÃO se esse
+        // ponteiro chega a ser escrito e por quem, em vez de assumir.
+        // Gate: ZEEBO_ENV_WRITER. Controle POSITIVO = 0x1145ccb4 (o alvo real);
+        // controle NEGATIVO = 0x1145cc00 (mesma página .bss, longe do alvo):
+        // se o negativo NUNCA acender e o positivo acender, o instrumento
+        // discrimina; se AMBOS ficarem mudos, a página inteira não é escrita.
+        // NÃO patcheia nada.
+        {
+            static const bool e_on = std::getenv("ZEEBO_ENV_WRITER") != nullptr;
+            if (e_on && type == UC_MEM_WRITE) {
+                const u32 ENV_TGT = 0x1145ccb4; // positivo
+                const u32 ENV_NEG = 0x1145cc00; // negativo
+                const u32 ENV_E4  = 0x1140d0e4; // ponteiro lido por 0x10c87328
+                u32 a = (u32)addr;
+                bool hit_t = (a <= ENV_TGT && ENV_TGT < a + (u32)size);
+                bool hit_n = (a <= ENV_NEG && ENV_NEG < a + (u32)size);
+                bool hit_e = (a <= ENV_E4  && ENV_E4  < a + (u32)size);
+                if (hit_t || hit_n || hit_e) {
+                    u32 pc=0, lr=0, sp=0; u32 r[6]={0};
+                    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                    for (int i=0;i<6;i++) uc_reg_read(uc, UC_ARM_REG_R0+i, &r[i]);
+                    fprintf(stderr,
+                        "[ENVW] %s va=0x%08x size=%d value=0x%08x pc=0x%08x lr=0x%08x sp=0x%08x "
+                        "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x\n",
+                        hit_t?"TGT":(hit_e?"E4":"NEG"), a, size, (u32)value, pc, lr, sp,
+                        r[0],r[1],r[2],r[3],r[4],r[5]);
+                    fflush(stderr);
+                }
+            }
+        }
         if (type == UC_MEM_WRITE) {
             if (sys->watch_file_) {
                 uint32_t pc = 0;
@@ -4213,6 +4890,18 @@ private:
         (void)ud; (void)type;
         ZeeboLLESystem* sys = (ZeeboLLESystem*)ud;
         if (size != 4 && size != 2 && size != 1) return;
+
+        if (addr >= 0xc5400000 && addr < 0xc5401000) {
+            // Relógio monotônico de alta precisão (ticks do MSM7200 / MSM7500):
+            // 0xc5400000 / 0xc5400004.
+            // Para garantir que duas leituras consecutivas (0x10c97472 e 0x10c97476)
+            // observem o mesmo valor e saiam do loop de debounce (bne 0x10c97474),
+            // avançamos o relógio em saltos grandes (1000 ticks a cada 16 instruções),
+            // permitindo que temporizadores (como r7=0x1333 ticks) expirem naturalmente.
+            u32 t = (u32)((sys->core0_.insns / 16) * 1000);
+            uc_mem_write(uc, addr, &t, (size_t)size);
+            return;
+        }
 
         // Janelas de video / VIC / GPT (bug 5): injeta o valor do modelo antes
         // de o Unicorn devolver a RAM de fundo. Sem isto os registradores
@@ -4728,6 +5417,11 @@ private:
     u32  zwheel_stack_top_  = 0;
     u32  zwheel_ret_magic_  = 0;
     bool zwheel_life_armed_ = false;
+    bool zeetris_life_armed_ = false;
+    zeebo::zeetris::ZeetrisContext zeetris_ctx_{};
+    // Roteiro de teclas headless (env ZEEBO_ZEETRIS_KEYS), par (frame, AVK).
+    std::vector<std::pair<u64, u32>> scripted_keys_;
+    uint16_t peak_buttons_ = 0;   // pico da máscara de botões durante o loop
     zeebo::brew::BrewTimerQueue brew_timers_;
 public:
     zeebo::brew::BrewLoader* brew() { return brew_.get(); }
@@ -4743,7 +5437,7 @@ uint32_t        ZeeboLLESystem::s_zwheel_stub_va_  = 0;
 
 static void print_usage(const char* prog) {
     printf("===================================================================\n");
-    printf("ZEEBO LLE SYSTEM ORCHESTRATOR: Unified MSM7201A Engine\n");
+    printf("beLLEZeebo SYSTEM ORCHESTRATOR: Unified MSM7201A Engine     \n");
     printf("Clean-room Low-Level Emulator (ARM11 APPS + ARM9 AMSS + Adreno 130)\n");
     printf("===================================================================\n\n");
     printf("Uso:\n");
@@ -4826,6 +5520,10 @@ int main(int argc, char** argv) {
     int slice_insns = 10000;
     double max_seconds = 0.0;
     int boot_firstapp = 0; // 0 = BREW Appmgr (padrão jailbreak), 3 = Z-Wheel (fábrica)
+    // --boot-appmgr/--boot-zwheel explícito: com --applet= junto, injeta o .mod e
+    // deixa o BOOT rodar (a shell real cria o applet com o pIShell vivo), em vez
+    // de curto-circuitar para o caminho sintético do applet.
+    bool want_boot = false;
 
     // Processa argumentos de linha de comando
     for (int i = 1; i < argc; i++) {
@@ -4843,8 +5541,10 @@ int main(int argc, char** argv) {
             show_fps = true;
         } else if (arg == "--boot-appmgr") {
             boot_firstapp = 0;
+            want_boot = true;
         } else if (arg == "--boot-zwheel") {
             boot_firstapp = 3;
+            want_boot = true;
         } else if (arg == "--zwheel-preview") {
             zwheel_preview = true;
             headless = false; // preview interativo abre a janela SDL2
@@ -4972,6 +5672,9 @@ int main(int argc, char** argv) {
             std::string app_label = (efs2_run == "274755") ? "Z-Wheel (274755)" :
                                     (efs2_run == "reksio.mod") ? "Reksio (reksio.mod)" :
                                     (efs2_run == "tectoy.mod") ? "TecToy (tectoy.mod)" : efs2_run;
+            if (sys.host_audio()) {
+                // Áudio do host conectado ao mixer/qdsp (sem tom sintético falso).
+            }
             // Bug 4: apenas 274755 é a Z-Wheel explícita; demais módulos usam
             // seleção honesta do próprio manipulador (ou permanecem loaded_only).
             bool life_ok = sys.dispatch_applet_start(app_label, /*is_zwheel=*/efs2_run == "274755");
@@ -4989,9 +5692,41 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (boot_firstapp == 0 && want_boot) {
+        printf("[Appmgr] Boot BREW Appmgr solicitado (--boot-appmgr).\n");
+        if (!applet_path.empty()) {
+            auto mod_bytes = zeebo::zeetris::ZeetrisRunner::load_file(applet_path);
+            if (zeebo::zeetris::ZeetrisRunner::is_zeetris_mod(mod_bytes)) {
+                printf("[Appmgr] Zeetris detectado via Appmgr! Ativando ZeetrisRunner e gameloop nativo com SDL2.\n");
+                bool zeetris_ok = sys.load_zeetris_applet(applet_path);
+                if (zeetris_ok && sys.host_audio()) {
+                    // Áudio real do jogo conectado via buffer decodificado do IMedia
+                }
+                if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0 || !dump_frames_dir.empty())) {
+                    sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
+                }
+                return zeetris_ok ? 0 : 1;
+            }
+        }
+    }
+
     // Direct applet injection if requested
-    if (!applet_path.empty()) {
+    if (!applet_path.empty() && !want_boot) {
         printf("[Applet] Loading external applet into memory: %s\n", applet_path.c_str());
+        // Se for o Zeetris, usa o ZeetrisRunner com ciclo de vida completo e gameloop contínuo
+        auto mod_bytes = zeebo::zeetris::ZeetrisRunner::load_file(applet_path);
+        if (zeebo::zeetris::ZeetrisRunner::is_zeetris_mod(mod_bytes)) {
+            printf("[Applet] Zeetris detectado! Ativando ZeetrisRunner e gameloop nativo.\n");
+            bool zeetris_ok = sys.load_zeetris_applet(applet_path);
+ if (zeetris_ok && sys.host_audio()) {
+     // Áudio do Zeetris alimentado via IMedia decodificado real
+ }
+ if (zeetris_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+                sys.run_zeetris_interactive(headless, max_seconds, dump_frames_dir);
+            }
+            return zeetris_ok ? 0 : 1;
+        }
+
         if (!sys.load_applet(applet_path, 0x12000000)) {
             printf("[Warn] Failed to load specified applet: %s\n", applet_path.c_str());
         } else {
@@ -5021,6 +5756,20 @@ int main(int argc, char** argv) {
                   : "FAIL: pipeline gráfico não produziu pixels.",
                sum);
         return ok ? 0 : 1;
+    }
+
+    // Se o usuário solicitou boot na Z-Wheel (--boot-zwheel) ou --efs2-run=274755 com ciclo interativo,
+    // garantimos a inicialização com despacho gráfico e loop SDL2 interativo completo
+    if (boot_firstapp == 3 && want_boot) {
+        printf("[Z-Wheel] Boot Z-Wheel solicitado (--boot-zwheel): despachando ciclo de vida nativo.\n");
+        if (sys.host_audio()) {
+            // Audio do host mantido limpo via QDSP5 / audio mixer
+        }
+        bool life_ok = sys.dispatch_zwheel_app_start();
+        if (life_ok && (max_seconds > 0.0 || !headless || control_port > 0)) {
+            sys.run_zwheel_interactive(headless, max_seconds, dump_frames_dir);
+        }
+        return life_ok ? 0 : 1;
     }
 
     // Run interleaved for requested cycles or duration

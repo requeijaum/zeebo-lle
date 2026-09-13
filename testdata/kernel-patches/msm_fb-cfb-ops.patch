@@ -1,0 +1,44 @@
+--- a/drivers/video/msm/msm_fb.c
++++ b/drivers/video/msm/msm_fb.c
+@@ -337,6 +337,9 @@
+ 
+ int msmfb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+ {
++	/* LLE: sem engine de MDP/DMA, aceita o pan e volta (evita timeouts). */
++	return 0;
++
+ 	struct msmfb_info *msmfb = info->par;
+ 	struct msm_panel_data *panel = msmfb->panel;
+ 
+@@ -423,16 +426,28 @@
+ 	return 0;
+ }
+ 
++static int msmfb_setcolreg(unsigned regno, unsigned red, unsigned green,
++                           unsigned blue, unsigned transp, struct fb_info *info)
++{
++	u32 *pal = (u32 *)info->pseudo_palette;
++
++	if (regno >= 16)
++		return -EINVAL;
++	pal[regno] = ((red >> 11) << 11) | ((green >> 10) << 5) | (blue >> 11);
++	return 0;
++}
++
+ static struct fb_ops msmfb_ops = {
+ 	.owner = THIS_MODULE,
+ 	.fb_open = msmfb_open,
+ 	.fb_release = msmfb_release,
+ 	.fb_check_var = msmfb_check_var,
+ 	.fb_pan_display = msmfb_pan_display,
+-	.fb_fillrect = msmfb_fillrect,
+-	.fb_copyarea = msmfb_copyarea,
+-	.fb_imageblit = msmfb_imageblit,
++	.fb_fillrect = cfb_fillrect,
++	.fb_copyarea = cfb_copyarea,
++	.fb_imageblit = cfb_imageblit,
+ 	.fb_ioctl = msmfb_ioctl,
++	.fb_setcolreg = msmfb_setcolreg,
+ };
+ 
+ static unsigned PP[16];

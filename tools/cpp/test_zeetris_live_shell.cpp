@@ -1,41 +1,17 @@
-// test_zeetris_live_shell.cpp — Can a REAL, live IShell context for the Zeetris
-// lifecycle be derived from a running AppMgr boot? This test answers that with
-// MEASUREMENT, not fabrication.
+// test_zeetris_live_shell.cpp — Reachability witness for two historical symbol
+// labels, now explicitly refuted as BREW shell entry points.
 //
-// The prior lifecycle work (test_zeetris_ishell.cpp) hands AEEMod_Load a
-// SYNTHETIC IShell object at 0x40000000 whose word[0] points to a sentinel
-// vtable. That advances the module past the VA-0 deref at 0x123c1bdc, but the
-// `this` pointer and its vtable are FABRICATED by the harness — not a shell the
-// firmware actually stood up. The honest question for a real lifecycle bridge
-// is: does the emulator's own booted APPS/BREW ever construct a genuine
-// AEECShell/IShell that we could pass as pIShell?
+// The trace is still useful: it proves the real AppMgr boot reaches exactly
+// 0x10c874f4 and records its live registers. The provenance and semantic gates
+// establish that this site is an APPS/AMSS bootstrap env-installer, r0 points to
+// env_base (0xb0d02000), and 0x105c7fb4 is rodata. Therefore an anchor hit is
+// boot-progress evidence only; it must never create a pIShell, mark a module
+// loaded, or bind applet services.
 //
-// This test drives the REAL orchestrator (pure Unicorn interpreter, no Dynarmic)
-// booting the REAL proprietary NAND to AppMgr, and records the Core0 (ARM11
-// APPS) PC trajectory. It asserts, as a RED blocker-witness, that Core0 NEVER
-// reaches the BREW/APPS user-space where a shell would be created:
-//   - ISHELL_CreateInstance @ 0x105c7fb4  (BrewSymbols::ishell_create_va)
-//   - AEECShell dispatch     @ 0x10c874f4  (BrewSymbols::aeecshell_dispatch_va)
-//   - APPS segment-11 code base 0x1013a000 (BREW app/asset region)
-// Instead Core0 derails to PC=0x14 (UC_ERR_INSN_INVALID) and never leaves the
-// early bring-up / 0xb000_xxxx trampoline region. Therefore a live pIShell
-// context CANNOT yet be accessed: the upstream boot blockers (Core1 REX
-// scheduling, Core0 PC=0x14 derail) gate it. This test makes that a measured,
-// falsifiable fact instead of an assumption — and provides the negative control
-// the project requires: it is NOT a "boot succeeded" gate; it is a "boot has
-// NOT yet reached the shell" gate that would go GREEN→RED the moment the real
-// boot advances, at which point the synthetic stub must be replaced by the live
-// shell.
-//
-// Detector POWER control (the assertion CAN fail): the same parser proves it can
-// positively recognize a VA in the target set by feeding it a synthetic line
-// carrying 0x105c7fb4 — if the parser could never match, the RED witness would
-// be vacuous. Mutant (argv "buggy") claims the live boot DOES reach the shell
-// and must fail here.
-//
-// Gate tier: requires the real NAND -> Tier B. Without it, exit 77 (SKIP),
-// never SKIP-as-PASS. Absolute proprietary paths; the orchestrator resolves the
-// NAND via its own default/relative paths from tools/cpp.
+// The detector has positive and negative controls and requires the real NAND.
+// Missing firmware exits 77. The "buggy" mode preserves the mutation property:
+// it asserts the old reachability blocker (that neither exact address executes)
+// and must fail once the bootstrap anchor is observed.
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -47,30 +23,66 @@
 
 using u32 = uint32_t;
 
-// The three APPS/BREW user-space anchors where a real AEECShell/IShell would be
-// constructed or dispatched (from zeebo_brew_loader.h::BrewSymbols + FINDINGS).
-static constexpr u32 SHELL_ANCHORS[] = {
-    0x105c7fb4u,  // ISHELL_CreateInstance
-    0x10c874f4u,  // AEECShell dispatch vector
-    0x1013a000u,  // APPS segment-11 BREW code base (VA base)
-};
+// The two EXACT APPS/BREW user-space anchors where a real AEECShell/IShell is
+// constructed or dispatched (from zeebo_brew_loader.h::BrewSymbols).
+static constexpr u32 ISHELL_CREATE_VA     = 0x105c7fb4u;  // ISHELL_CreateInstance
+static constexpr u32 AEECSHELL_DISPATCH_VA = 0x10c874f4u; // AEECShell dispatch
 // The measured derail signature of the current live boot.
 static constexpr u32 PC14 = 0x00000014u;
 
-// Does a Core0 PC fall inside the BREW/APPS user-space shell region? We treat
-// the segment-11 base 0x1013a000 as the start of a broad APPS code window; any
-// PC at/above it (and below the b0xxxxxx AEE trampoline band) counts as
-// "reached user-space where a shell lives". The two exact dispatch VAs are
-// matched precisely.
-static bool is_shell_region(u32 pc) {
-    for (u32 a : SHELL_ANCHORS)
-        if (pc == a) return true;
-    // Broad APPS user code window: [0x1013a000, 0x14000000).
-    if (pc >= 0x1013a000u && pc < 0x14000000u) return true;
-    return false;
+// One captured anchor hit: the live ARM context at an exact shell anchor.
+struct AnchorHit {
+    u32 pc, r0, r1, r2, sp;
+};
+
+// Parse every orchestrator anchor-trace line of the form:
+//   "[SHELL-ANCHOR] Core0 HIT <name> pc=0x........ r0=0x........ r1=0x........
+//    r2=0x........ sp=0x........ insns=..."
+// A hit is only counted when pc is EXACTLY one of the two shell anchors — a PC
+// merely inside the broad APPS window does NOT produce this line and is never
+// counted. This is the evidence upgrade over the broad-region heuristic.
+static bool parse_hex_after(const std::string& s, size_t& pos, const char* key, u32& out) {
+    size_t k = s.find(key, pos);
+    if (k == std::string::npos) return false;
+    k += std::strlen(key);
+    u32 v = 0; int n = 0;
+    while (k < s.size() && n < 8) {
+        char c = s[k]; int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else break;
+        v = (v << 4) | (u32)d; ++k; ++n;
+    }
+    if (n == 0) return false;
+    out = v; pos = k; return true;
 }
 
-// Extract every "Core0(ARM11): pc=0x........" value from a log buffer.
+static std::vector<AnchorHit> parse_anchor_hits(const std::string& log) {
+    std::vector<AnchorHit> out;
+    const char* key = "[SHELL-ANCHOR]";
+    size_t line0 = 0;
+    while ((line0 = log.find(key, line0)) != std::string::npos) {
+        size_t eol = log.find('\n', line0);
+        std::string line = log.substr(line0, (eol == std::string::npos ? log.size() : eol) - line0);
+        AnchorHit h{};
+        size_t p = 0;
+        bool ok =
+            parse_hex_after(line, p, "pc=0x", h.pc) &&
+            parse_hex_after(line, p, "r0=0x", h.r0) &&
+            parse_hex_after(line, p, "r1=0x", h.r1) &&
+            parse_hex_after(line, p, "r2=0x", h.r2) &&
+            parse_hex_after(line, p, "sp=0x", h.sp);
+        // Only accept the line if the PC is an EXACT anchor — never a broad-region PC.
+        if (ok && (h.pc == ISHELL_CREATE_VA || h.pc == AEECSHELL_DISPATCH_VA))
+            out.push_back(h);
+        line0 = (eol == std::string::npos) ? log.size() : eol + 1;
+    }
+    return out;
+}
+
+// Extract every per-cycle "Core0(ARM11): pc=0x........" value (context: confirms
+// the boot still derails to PC=0x14, i.e. behavior unchanged).
 static std::vector<u32> parse_core0_pcs(const std::string& log) {
     std::vector<u32> out;
     const char* key = "Core0(ARM11): pc=0x";
@@ -79,8 +91,7 @@ static std::vector<u32> parse_core0_pcs(const std::string& log) {
         pos += std::strlen(key);
         u32 v = 0; int n = 0;
         while (pos < log.size() && n < 8) {
-            char c = log[pos];
-            int d;
+            char c = log[pos]; int d;
             if (c >= '0' && c <= '9') d = c - '0';
             else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
@@ -99,26 +110,38 @@ static bool file_exists(const char* p) {
 
 int main(int argc, char** argv) {
     const bool BUGGY = (argc > 1 && std::string(argv[1]) == "buggy");
-    std::printf("=== Test Zeetris LIVE shell reachability%s ===\n",
+    std::printf("=== Test Zeetris LIVE shell anchor reachability%s ===\n",
                 BUGGY ? " [MUTANT]" : "");
 
-    // ── Detector POWER control: the parser + region test MUST be able to match a
-    //    shell anchor. If it cannot, the RED witness below proves nothing. ──────
+    // ── Detector POWER control: the parser MUST recognize an exact anchor line
+    //    AND reject a broad-window (non-anchor) PC. If it cannot match, the RED
+    //    witness is vacuous; if it over-matches a broad PC, it repeats the old
+    //    heuristic hole. ─────────────────────────────────────────────────────
     {
-        std::string probe = "  [Cycle 42] Core0(ARM11): pc=0x105c7fb4 insns=1 (ok)\n";
-        auto pcs = parse_core0_pcs(probe);
-        if (pcs.size() != 1 || pcs[0] != 0x105c7fb4u || !is_shell_region(pcs[0])) {
-            std::printf("[power] FAIL: parser/region cannot recognize a shell VA "
-                        "-> witness would be vacuous.\n");
+        std::string good =
+            "[SHELL-ANCHOR] Core0 HIT ISHELL_CreateInstance pc=0x105c7fb4 "
+            "r0=0x40000000 r1=0x0106e415 r2=0x7ffdd000 sp=0x0a000f00 insns=12345\n";
+        auto hits = parse_anchor_hits(good);
+        if (hits.size() != 1 || hits[0].pc != ISHELL_CREATE_VA ||
+            hits[0].r0 != 0x40000000u || hits[0].r1 != 0x0106e415u ||
+            hits[0].r2 != 0x7ffdd000u || hits[0].sp != 0x0a000f00u) {
+            std::printf("[power] FAIL: parser cannot recognize an exact anchor line "
+                        "with its live context -> witness would be vacuous.\n");
             return 1;
         }
-        // And a non-shell early-bringup PC must NOT be counted as shell.
-        if (is_shell_region(PC14) || is_shell_region(0xb000afe8u)) {
-            std::printf("[power] FAIL: region test false-positives on non-shell PC.\n");
+        // A broad-window PC (inside old [0x1013a000,0x14000000)) that is NOT one
+        // of the two exact anchors MUST NOT be counted — closes the over-count.
+        std::string broad =
+            "[SHELL-ANCHOR] Core0 HIT ISHELL_CreateInstance pc=0x1013a100 "
+            "r0=0x1 r1=0x2 r2=0x3 sp=0x4 insns=1\n";
+        if (!parse_anchor_hits(broad).empty()) {
+            std::printf("[power] FAIL: parser counted a broad-region PC as an exact "
+                        "anchor (over-count hole reopened).\n");
             return 1;
         }
-        std::printf("[power] parser recognizes shell VA 0x105c7fb4 and rejects "
-                    "PC=0x14/0xb000afe8 (detector has power).\n");
+        std::printf("[power] parser accepts exact anchor 0x105c7fb4 (with live "
+                    "r0/r1/r2/sp) and rejects broad-region PC 0x1013a100 "
+                    "(detector has power, no over-count).\n");
     }
 
     // ── Require the real NAND to drive a real boot; else SKIP. ────────────────
@@ -132,21 +155,23 @@ int main(int argc, char** argv) {
                     "(nand=%d apps=%d amss=%d orch=%d).\n",
                     file_exists(NAND), file_exists(APPS), file_exists(AMSS),
                     file_exists(ORCH));
-        std::printf("=== Test Zeetris LIVE shell: SKIP (exit 77) ===\n");
+        std::printf("=== Test Zeetris LIVE shell anchor: SKIP (exit 77) ===\n");
         return 77;
     }
 
-    // ── Drive the REAL boot (pure Unicorn interpreter; no --jit) to AppMgr and
-    //    capture Core0's PC trajectory. Absolute proprietary paths resolved by
-    //    the orchestrator's own defaults from tools/cpp. ───────────────────────
+    // ── Drive the REAL boot (pure Unicorn interpreter; no --jit) to AppMgr with
+    //    the per-instruction anchor trace enabled (ZEEBO_SHELL_TRACE=1). The
+    //    trace is read-only: it fabricates no PC, pointer, or guest state; it
+    //    only emits the live ARM context AT the exact shell anchor if reached.
+    //    Absolute proprietary paths resolved by the orchestrator from tools/cpp.
     const char* LOG = "/tmp/zeetris_live_shell_boot.log";
-    std::string cmd = std::string(ORCH) +
+    std::string cmd = std::string("ZEEBO_SHELL_TRACE=1 ") + ORCH +
         " --boot-appmgr --headless --seconds=8 > " + LOG + " 2>&1";
     std::printf("[boot] %s\n", cmd.c_str());
     int rc = std::system(cmd.c_str());
-    (void)rc; // orchestrator returns 0 even when the boot derails; we judge by PCs.
+    (void)rc; // orchestrator returns 0 even when the boot derails; we judge by trace.
 
-    // Read the log.
+    // Read the combined stdout+stderr log.
     std::string log;
     {
         FILE* f = std::fopen(LOG, "rb");
@@ -156,72 +181,56 @@ int main(int argc, char** argv) {
         std::fclose(f);
     }
 
-    auto pcs = parse_core0_pcs(log);
+    // Measure: did Core0 EXECUTE either exact shell anchor? And is the PC=0x14
+    // derail still present (boot behavior unchanged)?
+    auto hits = parse_anchor_hits(log);
+    auto pcs  = parse_core0_pcs(log);
     if (pcs.empty()) {
         std::printf("[FAIL] no Core0 PC samples parsed — boot did not run as expected.\n");
         return 1;
     }
+    size_t pc14_hits = 0;
+    for (u32 p : pcs) if (p == PC14) ++pc14_hits;
 
-    // Measure: did Core0 EVER reach the shell region? Count PC=0x14 derail.
-    size_t shell_hits = 0, pc14_hits = 0, first_shell_idx = pcs.size();
-    u32 max_pc_below_b0 = 0; // highest APPS-region PC seen (context)
-    for (size_t i = 0; i < pcs.size(); ++i) {
-        u32 p = pcs[i];
-        if (p == PC14) ++pc14_hits;
-        if (is_shell_region(p)) {
-            if (first_shell_idx == pcs.size()) first_shell_idx = i;
-            ++shell_hits;
-        }
-        if (p >= 0x10000000u && p < 0x1013a000u && p > max_pc_below_b0)
-            max_pc_below_b0 = p;
-    }
-
-    std::printf("[measure] Core0 PC samples=%zu  shell_region_hits=%zu  "
-                "pc14_derail_hits=%zu  max_apps_pc_below_shell=0x%08x\n",
-                pcs.size(), shell_hits, pc14_hits, max_pc_below_b0);
+    std::printf("[measure] exact_anchor_hits=%zu  Core0 per-cycle samples=%zu  "
+                "pc14_derail_hits=%zu\n",
+                hits.size(), pcs.size(), pc14_hits);
     std::printf("[measure] first Core0 sample=0x%08x  last=0x%08x\n",
                 pcs.front(), pcs.back());
 
-    const bool live_reached_shell = (shell_hits > 0);
+    const bool live_reached_anchor = !hits.empty();
 
     if (BUGGY) {
-        // Mutant claims the live boot reaches the shell (so a live pIShell exists).
-        if (!live_reached_shell) {
-            std::printf("[MUTANT] expected live boot to reach shell region but it "
-                        "did NOT — mutant correctly fails.\n");
+        // O mutante agora representa a AFIRMAÇÃO ANTIGA deste gate: "o boot vivo
+        // nunca executa o âncora do shell, logo não há pIShell vivo". Como a
+        // medição mostra que ele É alcançado, essa afirmação tem de falhar.
+        if (live_reached_anchor) {
+            std::printf("[MUTANT] a afirmação antiga (bootstrap inalcançável) falha "
+                        "como esperado: o boot vivo ALCANÇOU o instalador de env.\n");
             return 1;
         }
-        std::printf("[MUTANT] (unexpectedly) saw shell region.\n");
+        std::printf("[MUTANT] (inesperadamente) o âncora não foi alcançado.\n");
         return 0;
     }
 
-    // RED blocker-witness: the live boot must NOT reach the shell region, and it
-    // must show the measured PC=0x14 derail — proving the live pIShell context
-    // is inaccessible until the upstream boot blockers are cleared.
-    if (live_reached_shell) {
-        std::printf("[GREEN-UNEXPECTED] Core0 REACHED the shell region "
-                    "(first at sample %zu). A LIVE pIShell context is now "
-                    "derivable — replace the synthetic 0x40000000 stub with the "
-                    "real shell and update this gate.\n", first_shell_idx);
-        // This is NOT a failure of the emulator — it is progress. But the test's
-        // stated invariant (blocker present) no longer holds, so it must be
-        // revisited. Fail loudly so nobody ships a stale claim.
-        return 2;
-    }
-
-    if (pc14_hits == 0) {
-        std::printf("[FAIL] did not observe the measured PC=0x14 derail; boot "
-                    "behavior changed — re-triage before trusting this witness.\n");
+    // Measured truth: the real boot reaches the disproven bootstrap anchor.
+    // This is a boot-progress regression witness, not shell-object evidence.
+    if (!live_reached_anchor) {
+        std::printf("[FAIL] o boot vivo NÃO alcançou o âncora do shell (0x%08x nem "
+                    "0x%08x); o boot REGREDIU em relação à medição anterior.\n",
+                    ISHELL_CREATE_VA, AEECSHELL_DISPATCH_VA);
         return 1;
     }
 
-    std::printf("=== Test Zeetris LIVE shell: PASS ===\n");
-    std::printf("  MEASURED: over a real Unicorn AppMgr boot, Core0 never reached "
-                "ISHELL_CreateInstance/AEECShell/APPS-user-space; it derailed to "
-                "PC=0x14 (%zu samples). A live pIShell context is NOT yet "
-                "accessible, so the Zeetris lifecycle bridge cannot use a real "
-                "booted shell — the synthetic IShell in test_zeetris_ishell.cpp "
-                "is an OBSERVATION instrument, not a live-context bridge.\n",
-                pc14_hits);
+    const AnchorHit& h = hits.front();
+    std::printf("=== Test Zeetris bootstrap anchor reachability: PASS ===\n");
+    std::printf("  MEDIDO: o boot AppMgr real executa o instalador de env APPS/AMSS "
+                "pc=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x sp=0x%08x. "
+                "r0 é env_base, NÃO pIShell.\n",
+                h.pc, h.r0, h.r1, h.r2, h.sp);
+    std::printf("  CONTRATO: estes VAs permanecem somente como âncoras diagnósticas; "
+                "não podem marcar módulo loaded nem disparar binding BREW/IGL. "
+                "A construção de um IShell vivo continua não provada. "
+                "(pc14_derail_hits=%zu — informativo.)\n", pc14_hits);
     return 0;
 }

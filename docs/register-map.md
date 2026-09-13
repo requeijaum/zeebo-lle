@@ -32,6 +32,12 @@ Channel 0 passes; channel 1 (e14) currently returns 0 -> fails the bit0=ready
 check -> boot still ends at halt 0xc30. Next: return 0x1 for the whole
 0xa9700e10+ch*4 status range and re-probe.
 
+## Ver também
+
+- `docs/linux-boot.md` — mapa de periféricos do harness do **kernel Linux 3.4.113**
+  (VIC, UART1/2/3, GPT/DGT, MDP, TVENC, EHCI/USB HS, SMEM) e as variáveis de
+  instrumentação. Este documento aqui cobre a fase anterior (APPSBL/bootloader).
+
 ## Halt
 0xc30 = `b 0xc30` self-loop = the bootloader's error/abort sink. Reaching it
 means some check failed. Each modeled register pushes the halt later; the goal is

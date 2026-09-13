@@ -1,0 +1,70 @@
+--- a/arch/arm/mach-msm/board-halibut.c
++++ b/arch/arm/mach-msm/board-halibut.c
+@@ -103,3 +103,67 @@
+ 	.init_machine	= halibut_init,
+ 	.timer		= &msm_timer,
+ MACHINE_END
++
++/* ---------------------------------------------------------------------------
++ * Framebuffer do Zeebo (framebuffer-fb0 para o LLE).
++ * O video do Zeebo e a saida TVENC (composto analogico), que nao tem driver no
++ * 3.4.113. Mas o kernel so precisa de um "msm_panel" (driver em msm_fb.c) com
++ * fb_data + um IORESOURCE_MEM para criar o /dev/fb0 e deixar o fbcon desenhar.
++ * A memoria de FB fica no fim da RAM do harness (PA 0x15000000), fora dos 64MB
++ * que o kernel gerencia (mem=64M em 0x10000000), entao nao colide com o alocador.
++ * ------------------------------------------------------------------------- */
++#include <mach/msm_fb.h>
++#include <mach/board.h>
++
++#define ZEEBO_FB_BASE   0x15000000
++#define ZEEBO_FB_SIZE   0x00200000
++
++static struct resource halibut_fb_resources[] = {
++	{
++		.start = ZEEBO_FB_BASE,
++		.end   = ZEEBO_FB_BASE + ZEEBO_FB_SIZE - 1,
++		.flags = IORESOURCE_MEM,
++	},
++};
++
++static struct msm_fb_data halibut_fb_data = {
++	.xres = 720,
++	.yres = 480,
++	.width = 0,
++	.height = 0,
++	.output_format = 0,
++};
++
++static int halibut_panel_blank(struct msm_panel_data *p) { (void)p; return 0; }
++static int halibut_panel_unblank(struct msm_panel_data *p) { (void)p; return 0; }
++static int halibut_panel_suspend(struct msm_panel_data *p) { (void)p; return 0; }
++static int halibut_panel_resume(struct msm_panel_data *p) { (void)p; return 0; }
++
++static struct msm_panel_data halibut_panel_data = {
++	.suspend = halibut_panel_suspend,
++	.resume  = halibut_panel_resume,
++	.blank   = halibut_panel_blank,
++	.unblank = halibut_panel_unblank,
++	.fb_data = &halibut_fb_data,
++	.caps    = MSMFB_CAP_PARTIAL_UPDATES,
++};
++
++static struct platform_device halibut_panel_device = {
++	.name          = "msm_panel",
++	.id            = 0,
++	.num_resources = ARRAY_SIZE(halibut_fb_resources),
++	.resource      = halibut_fb_resources,
++	.dev = {
++		.platform_data = &halibut_panel_data,
++	},
++};
++
++static int __init halibut_init_panel(void)
++{
++	if (!machine_is_halibut())
++		return 0;
++	platform_device_register(&msm_device_mdp);
++	platform_device_register(&halibut_panel_device);
++	return 0;
++}
++device_initcall(halibut_init_panel);

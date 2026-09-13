@@ -9,18 +9,13 @@ BREW AppMgr e Z-Wheel permanecem gates de boot; não substituir o emulador por I
 
 ### Atualização de direção e evidência — 2026-09-11
 
-- AppMgr: handoff real para AMSS/BREW e `AEECShell dispatch @0x10c874f4` foram observados;
-  isso é progresso de boot, não shell visível nem jogo executado.
-- Zeetris: o `.mod` foi injetado em `0x12000000` e seu `AEEMod_Load @0x12000048` executou.
-  O dispatcher ainda o chama incorretamente como `IApplet::HandleEvent`; a próxima fronteira é
-  `AEEMod_Load → IModule::CreateInstance(CLSID estrutural do .mif) → IApplet::HandleEvent`.
+- AppMgr: o bootstrap inicial AMSS/Iguana alcança `0x10c874f4` (instalador de `env_base`), mas o rótulo antigo \"AEECShell dispatch\" foi refutado (testes de proveniência e semântica confirmam que `0x10c874f4` é instalador de bootstrap e `0x105c7fb4` é string rodata). O ponto real de despacho da Shell permanece não provado no boot livre.
+- Zeetris: o runner sintético agora opera em `0x12000000`, corrigiu eventos de teclado (`EVT_KEY_PRESS=0x0100`/`0x0101`) e rejeita falso sucesso por estouro de cota de instruções. O applet aloca seu contexto próprio (`0x30005080`, malloc `0x9094`), emite 660 chamadas IGL por slot, mas permanece travado no setup inicial (`[sb+0x30]=0`, sem chamar a carga de textura `0x120056fc`).
+- EFS2 / NAND: o catálogo EFS2 opera em modo fail-closed (`zeebo_efs2_module_guard.h`); blobs sem ponto de entrada ARM/ELF legítimo (incluindo o dump histórico de `reksio.mod`, que contém dados de modem) são sumariamente rejeitados até a reversão do gnode.
 - Vídeo: `b568d97` adicionou, com TDD, o consumidor de lista MDDI RGB565 (`PRI_PTR`) usando
   memória guest via callback. O teste cobre duas regiões e controles negativos, mas o runtime
   principal ainda precisa conectar esse sink à apresentação e medir um `PRI_PTR` real do AppMgr.
-- QDSP5 e GPU: Rafael liberou desenvolvimento em ambos. A regra anterior de freeze foi removida.
-  O primeiro alvo QDSP5 é roteamento AUDPLAY medido; Zeetris usa MP3, portanto ACK, WAV sintético
-  ou PCM inventado não são áudio do jogo. O primeiro alvo GPU é scanout MDDI real e, depois,
-  fronteiras IDisplay/IGL vivas.
+- QDSP5 e GPU: desenvolvimento liberado em ambos (2026-09-11). Injeção fabricada de RPC de liveness foi desacoplada em `zeebo_smd_bridge_unified.h` e isolada sob opt-in estrito `ZEEBO_QDSP5_RPC_PROBE=1`. O primeiro alvo QDSP5 é decodificação e roteamento de áudio MP3/AUDPLAY real para o `UnifiedAudioSink`; o primeiro alvo GPU é textura/renderização do IGL e scanout MDDI real.
 - Gate de jogo jogável: PC no módulo e instância BREW real; frame não uniforme originado pelo
   guest; input real consumido e alterando estado observável; PCM não silencioso derivado de buffer
   guest e uma sessão controlável de cinco minutos. Cada um exige controle negativo.
@@ -705,11 +700,24 @@ não copiar). É o parente técnico mais próximo do zeebo-lle encontrado até a
   - Resultado: **idêntico em tudo** — mesma primeira divergência (#23726), mesmos valores
     (`r3 = 0x10090001` vs `0`), mesmas contagens (596.725 vs 1.168.764 instruções).
   - Conclusão: a escolha entre 1136 e 1176 **não influencia** o defeito do boot. O experimento foi
-    revertido (o código segue em `arm1176`, agora coerente nos dois backends). A pergunta de qual
-    é a CPU historicamente correta continua aberta, mas deixou de ser prioridade — não é o
-    caminho para destravar o boot.
+    revertido. A pergunta de qual é a CPU historicamente correta continua aberta, mas deixou de
+    ser prioridade — não é o caminho para destravar o boot.
+  - **ATUALIZAÇÃO (2026-09-12, `53d1a09`)**: a pergunta foi respondida — é **ARM1136** (MIDR
+    `0x4117b362` lido do silício). O código **não** segue mais em `arm1176`; foi alinhado ao
+    1136. A conclusão deste experimento permanece válida: a família de CPU não move a
+    divergência #23726. Ver `notes/ARM_CPU_WAS_WRONG.md`.
 
-- [ ] **Incoerência de identidade de CPU entre os dois backends (parcialmente resolvida)**:
+- [x] **Incoerência de identidade de CPU entre os dois backends — RESOLVIDA (`53d1a09`, 2026-09-12)**:
+  - **Resposta definitiva**: a CPU é **ARM1136**, não ARM1176. O log de boot do Linux 2.6.29-zeebo
+    do TripleOxygen imprime o MIDR lido do silício: `CPU: ARMv6-compatible processor [4117b362]
+    revision 2 (ARMv6TEJ)` → part `0xB36` (ARM1136), variant 1, revision 2. Isto **fecha** a
+    pergunta que este item deixava em aberto e confirma o que o TRM local já sugeria.
+  - Correção aplicada em 18 ocorrências / 15 arquivos; ambos os backends agora reportam
+    `0x4117b363` (`UC_CPU_ARM_1136` — erra só a revisão, 1 bit; o Unicorn não expõe variant 1 +
+    revision 2 simultaneamente). Relatório completo: **`notes/ARM_CPU_WAS_WRONG.md`**.
+  - Consistente com o experimento negativo abaixo: medido que a ISA observável de 1136 e 1176 é
+    idêntica (única diferença é o FPSID), então a correção **não** move a divergência do boot.
+  - Registro histórico do item, como estava antes:
   - Levantado ao investigar o que o QEMU teria a ensinar (o Unicorn é um **fork do QEMU**, então
     o modelo de CPU dele *é* o modelo do QEMU; ver seção de licença abaixo).
   - Medido: `MIDR` que cada modelo do QEMU/Unicorn reporta (`mrc p15,0,Rd,c0,c0,0`):
@@ -1019,6 +1027,143 @@ o disco e o build falha com `error writing to /tmp/ccXXXX.s: Não há espaço di
 - [ ] **PCM do guest até o host**:
   - Backend SDL já existe (`d530d4c`); faltam prova de produção/consumo de amostras do jogo, callbacks, sincronização e validação audível. Não basta abrir device.
 - [ ] **Módulo/arquivos/timers reais de DD**: executar a cadeia e gates abaixo antes de declarar renderização comercial.
+
+---
+
+### Fase 16: Boot de Linux real (kernel 3.4.113) — [CRITÉRIO DA FASE ATINGIDO 2026-09-13]
+
+Linha `linux-boot`: bootar um kernel Linux real no LLE, com rootfs limpo e shell
+funcional, saída no framebuffer e janela de depuração. É o caminho mais rápido para
+exercitar os modelos de SoC ponta a ponta — e foi ele que validou (e corrigiu)
+GPT/DGT, VIC, MDP, UART e EHCI de uma vez.
+
+**Verificado por execução** (harness `tools/cpp/test_linux_boot.cpp`):
+
+- o kernel 3.4.113 (zImage versionado em `testdata/kernels/`) boota até a shell
+  BusyBox com `/proc` montado, e o teclado do host chega na shell;
+- `fb0` instalado (`msmfb_probe() installing 720 x 480 panel`, fbcon em 90x30) e o
+  texto do console de VT aparece na memória de framebuffer — conferido decodificando o
+  FB como texto com a fonte 8x16 do próprio kernel (`ZEEBO_FB_TEXT=1`);
+- janela SDL2/Wayland **1x2** (UART | framebuffer), limitador de 60 fps por tempo de
+  parede e releitura do FB só quando o guest escreve nele (~55 fps efetivos medidos);
+- **host controller EHCI funcionando**: `new USB bus registered, assigned bus number 1`
+  e o hub enumera um dispositivo high-speed
+  (`usb 1-1: new high-speed USB device number 2`).
+
+**Atualização de 2026-09-13.** Três causas foram medidas e corrigidas, e uma
+quarta se revelou falsa:
+
+- **VIC de 64 linhas** — o seletor varria só a palavra 0, então *nenhuma* IRQ >= 32
+  era entregável (a 47 inclusive). Corrigido, com auto-teste `ZEEBO_VIC_TEST=1` e
+  controle negativo que reprova o seletor antigo. A IRQ 47 hoje **chega ao guest**.
+- **`dma_mask` do `msm_device_hsusb`** — o platform_device só define
+  `coherent_dma_mask`; com `dma_mask` NULL o `usb_create_hcd` marca `uses_dma=0` e o
+  HCD monta os qTD **sem mapear buffer** (`hw_buf[0]=0`). Não havia pacote SETUP
+  para o controlador ler. Corrigido no probe.
+- **Motor de qTD** — implementado (`usb_engine_run`): executa a lista assíncrona,
+  serve os control transfers de um teclado HID boot-protocol, completa o token e
+  levanta `USBSTS.USBINT`. Com isso completam **device descriptor**, **SET_ADDRESS**,
+  os **strings** (o guest imprime `idVendor=1827`, `Manufacturer: Zeebo-L`) e o
+  **cabeçalho (9 B) do config descriptor**.
+- **A "flakiness do fbcon" NÃO EXISTE** — era instrumento mentindo: o probe da
+  `pseudo_palette` lia um VA de kernel antigo (`0xc03f45d4` em vez de `0xc05b36b4`)
+  e imprimia um ponteiro repetido 16x. A paleta sempre esteve correta. O mesmo
+  valia para a tabela `kDraw[]` (daí `cfb_imageblit=0` com `fbcon_putcs=60`).
+
+**RESOLVIDO em 2026-09-13 — o critério da fase está atingido**: digitar no teclado
+chega na shell do guest. Prova no framebuffer, **sem nenhum byte pela UART**:
+`~ # uname` → `Linux`. Eram **três bugs, todos no modelo, nenhum no kernel**:
+1. O motor só percorria a lista **assíncrona**. O guest escrevia `PERIODICLISTBASE`
+   (0x154) e `USBCMD.PSE` e nada era lido: o endpoint de interrupção do teclado vive
+   na lista **periódica**, que não existia.
+2. O qH recém-armado pendura o qTD em `overlay.next` com `hw_current = 0`; seguir só
+   o `hw_current` concluía "não há trabalho" **com a fila de teclas cheia** (medido:
+   `cur=00000000 ovnext=138a4180 ovtok=00000000`).
+3. **FRINDEX (0x14c) nunca foi implementado.** O `scan_periodic()` do guest monta a
+   janela de varredura a partir dele (`ehci-sched.c:2305`); com o registrador
+   congelado em zero o driver reexaminava apenas o frame 0, e o qH do EP1 — que fica
+   pendurado em alguns frames do frame list — **nunca mais era revisitado**. O 1º
+   relatório era entregue (a varredura inicial do enqueue percorre o anel inteiro) e
+   os outros 11 ficavam na fila para sempre. Agora o FRINDEX anda um frame por tick
+   do motor.
+
+Também corrigido: o motor espelha a conclusão no **overlay do qH** (o HCD lê ali, não
+no qTD solto) e o **periódico roda antes do assíncrono** (o mesmo bloco de qTD era
+alcançável pelas duas varreduras e o assíncrono o completava como control transfer).
+
+**O que ainda NÃO tem prova**: o caminho `SDL → relatório HID`
+(`hid_key_from_sdl`) está escrito mas não foi exercitado com uma tecla real — o que
+está provado ponta-a-ponta é a **fila de relatórios → guest**. A tabela do caminho de
+UART segue coberta por 18 casos (`test-linux-keys`).
+
+**O EHCI continua fora por padrão** (`ZEEBO_USB=1` religa): ligado custa orçamento de
+boot e o teclado não é preciso para os outros alvos.
+
+**Relógio de parede validado**: `date +%s` vai de 44 a 48 atravessando um `sleep 2`,
+`/proc/uptime` 49.53 — GPT/DGT estão sadios.
+
+**Lição que vale para todo o projeto**: VA de símbolo de kernel em código de
+instrumento **apodrece a cada rebuild**. Os três pontos (`PP`, `kDraw[]`,
+`fontdata_8x16`) agora carregam o `grep` do `System.map` que os reconfere, e o
+decodificador de FB tem guard que avisa quando o VA da fonte deixa de fazer sentido.
+
+Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
+`testdata/kernel-patches/`.
+
+**Política de branch (decisão de 2026-09-13, revisada no mesmo dia)**: o trabalho
+viveu na branch `linux-boot`, separado da `master`, enquanto a fase tinha problema
+em aberto. Os problemas **fecharam** (o HID está resolvido; a flakiness do fbcon era
+um instrumento com VA podre, não um defeito do driver), então a branch foi
+**integrada na `master` por merge** — a linha de firmware/BREW e a linha Linux
+passam a viver juntas. Correções pontuais continuam podendo nascer em branch própria.
+
+---
+
+### Fase 17: Outros sistemas operacionais no LLE — [PLANEJADA; depende da Fase 16]
+
+Decisão de 2026-09-13: **assim que o Linux estiver OK, bootar outros sistemas
+operacionais no emulador**. O objetivo não é colecionar bootscreens — é usar cada SO
+como um *teste de conformidade independente* do modelo de hardware.
+
+**Por que isso melhora a emulação LLE.** Um único SO só prova que o modelo é bom o
+bastante para *aquele* SO — inclusive para os bugs dele. A Fase 16 já demonstrou o
+efeito: foi o Linux que expôs a identidade errada da CPU (ARM1176 → ARM1136), o FSR
+de escrita (`0x807`), o `ehci-msm` stub e o CAPLENGTH do EHCI. Um segundo SO exercita
+os mesmos periféricos por **caminhos de código diferentes** (outra ordem de init,
+outros registradores lidos, outro uso de MMU/cache/IRQ), e cada divergência aponta um
+lugar onde o modelo está frouxo. É o mesmo princípio do lockstep do dynarec, aplicado
+ao SoC inteiro.
+
+**Critério de "boot" para cada alvo** (mesmo rigor da Fase 16, sem trapaça): saída de
+console legível + inicialização até um prompt/loop interativo + framebuffer quando o SO
+tiver um. Falha honesta com causa raiz identificada vale mais que sucesso forçado.
+
+**Alvos, do mais barato ao mais caro:**
+
+1. **Linux 2.6.29 (período correto)** — o log de boot real do Zeebo (Fausto) é um
+   `2.6.29-zeebo`. É o alvo de maior valor imediato: dá para comparar o boot do
+   emulador **linha a linha** contra um boot de hardware real. Hoje o L1/L2 passa e o
+   L3 está mudo; entender por quê é dívida já aberta.
+2. **Android 1.6 / 2.x sobre esse kernel** — o MSM7201A é o SoC do HTC Dream/G1, então
+   existe um userspace historicamente compatível. Exercita init/ashmem/binder/logger e
+   o framebuffer de verdade.
+3. **NetBSD/evbarm** — outra família de SO inteira, tradicionalmente portável e com
+   bring-up bem documentado; melhor custo-benefício entre os não-Linux.
+4. **Windows CE 6.0 / Windows Mobile 6.5** — período e plataforma corretos (o
+   MSM7201A é chip de WinMo). Caro e sem fonte, mas é o teste mais adversarial que
+   existe para o modelo de MMU/IRQ/timer.
+5. **Núcleos pequenos como controle positivo** — RTOS/microkernel enxuto (p.ex. um
+   kernel didático ARMv6 ou um L4 livre). Bootam rápido e servem de **controle**: se um
+   núcleo de 50 KB não sobe, o problema é do modelo, não da complexidade do SO.
+
+**Restrições que continuam valendo**: nada de copiar fonte de terceiros para dentro do
+repo (ver `PUBLIC_DISCLOSURE_TODO.md`); imagens de SO não entram no versionamento —
+só o harness, os patches e a receita de build, como já é feito em
+`testdata/kernel-patches/`. Alvos sem licença livre são executados a partir de imagem
+do próprio usuário, nunca redistribuídos.
+
+**Pré-requisito**: Fase 16 fechada (teclado HID enumerando), porque o teclado é o que
+torna qualquer um desses SOs *interativo* — sem ele o teste vira observação passiva.
 
 ---
 
