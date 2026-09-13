@@ -31,7 +31,9 @@ using u64 = std::uint64_t;
 using i64 = std::int64_t;
 
 // --- o que o SO precisa: quantas instrucoes ja' rodaram + o teto ------------
-static u64 g_insn   = 0;
+// O contador e' o COMPARTILHADO (zeebo_msm::g_icount), o mesmo que o modelo do GPT/DGT le'
+// para converter instrucoes em tempo do guest. Ter dois contadores seria divergencia certa.
+using zeebo_msm::g_icount;
 static u64 g_budget = 200000000ull;
 
 // --- teto de aborts, como no harness de Linux: fault em laco e' bug, nao boot
@@ -51,12 +53,15 @@ static u64  g_progress_every = 2000000ull;
 
 static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)uc; (void)size; (void)ud;
-    ++g_insn;
-    if (g_progress && g_progress_every && (g_insn % g_progress_every) == 0ull) {
+    ++g_icount;
+    // Tick do timer: e' o que faz o GPT virar interrupcao no VIC (linha 7). Periodicidade de
+    // 64 instrucoes e' a mesma do harness de boot de Linux.
+    if ((g_icount & 0x3Fu) == 0u) zeebo_msm::timer_refresh_irq();
+    if (g_progress && g_progress_every && (g_icount % g_progress_every) == 0ull) {
         u32 cpsr = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
         std::printf("[prog] insn=%llu pc=0x%08x cpsr=0x%08x\n",
-                    (unsigned long long)g_insn, (u32)addr, cpsr);
+                    (unsigned long long)g_icount, (u32)addr, cpsr);
         std::fflush(stdout);
     }
     if (g_trace) {
@@ -155,6 +160,12 @@ int main(int argc, char** argv) {
     uc_mem_map(uc, zeebo_msm::PERIPH_BASE, zeebo_msm::PERIPH_SIZE, UC_PROT_ALL);  // VIC + GPT/DGT
     uc_mem_map(uc, 0xa9200000u, 0x00800000u, UC_PROT_ALL);          // GPIO e vizinhos
     for (u32 ub : zeebo_msm::UART_BASES) uc_mem_map(uc, ub, zeebo_msm::UART_SIZE, UC_PROT_ALL);
+    // GPT/DGT (CSR): o kernel le/ escreve o timer por aqui. Os dois enderecos sao mapeados
+    // porque o driver pode usar o VA do iotable ou o PA, dependendo de como foi escrito.
+    uc_mem_map(uc, zeebo_msm::CSR_PA, zeebo_msm::CSR_SIZE, UC_PROT_ALL);
+    uc_mem_map(uc, zeebo_msm::CSR_BASE, zeebo_msm::CSR_SIZE, UC_PROT_ALL);
+    // Clockevent ligado: e' o que permite ao SO ser PREEMPTADO. Sem tick o scheduler gira.
+    zeebo_msm::g_timer_on = (std::getenv("ZEEBO_NOTIMER") == nullptr);
 
     // ------- hooks de periferico (o modelo vem do header compartilhado) -------
     uc_hook h = 0;
@@ -162,6 +173,14 @@ int main(int argc, char** argv) {
                 zeebo_msm::VIC_BASE, zeebo_msm::VIC_BASE + zeebo_msm::VIC_SIZE);
     uc_hook_add(uc, &h, UC_HOOK_MEM_READ,  (void*)zeebo_msm::on_vic_read,  nullptr,
                 zeebo_msm::VIC_BASE, zeebo_msm::VIC_BASE + zeebo_msm::VIC_SIZE);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, (void*)zeebo_msm::on_csr_write, nullptr,
+                zeebo_msm::CSR_PA, zeebo_msm::CSR_PA + zeebo_msm::CSR_SIZE);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_READ,  (void*)zeebo_msm::on_csr_read,  nullptr,
+                zeebo_msm::CSR_PA, zeebo_msm::CSR_PA + zeebo_msm::CSR_SIZE);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, (void*)zeebo_msm::on_csr_write, nullptr,
+                zeebo_msm::CSR_BASE, zeebo_msm::CSR_BASE + zeebo_msm::CSR_SIZE);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_READ,  (void*)zeebo_msm::on_csr_read,  nullptr,
+                zeebo_msm::CSR_BASE, zeebo_msm::CSR_BASE + zeebo_msm::CSR_SIZE);
     for (u32 ub : zeebo_msm::UART_BASES) {
         uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, (void*)zeebo_msm::on_uart_write, nullptr,
                     ub, ub + zeebo_msm::UART_SIZE);
@@ -193,7 +212,7 @@ int main(int argc, char** argv) {
         char c = 0;
         while (read(0, &c, 1) == 1) zeebo_msm::g_rx_buf.push_back(c);
     }
-    g_insn = 0;
+    g_icount = 0;
     const u32 entry = zeebo_msm::APPS_RAM_PHYS;     // o port linka o _start aqui
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
@@ -209,7 +228,7 @@ int main(int argc, char** argv) {
     std::printf("[xv6] r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x r4=0x%08x cpsr=0x%08x\n",
                 r0s, r1s, r2s, r3s, r4s, cpsr_s);
     std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes; pc=0x%08x\n",
-                uc_strerror(e), (int)e, (unsigned long long)g_insn, pc_stop);
+                uc_strerror(e), (int)e, (unsigned long long)g_icount, pc_stop);
     std::printf("[xv6] aborts=%u; vetores=%u\n",
                 zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base);
     if (g_trace) {

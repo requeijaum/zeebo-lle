@@ -81,6 +81,28 @@ using zeebo_msm::TVENC_SIZE;
 using zeebo_msm::guest_read_u32;
 using zeebo_msm::guest_read_bytes;
 using zeebo_msm::arm_ls_fault_addr;
+using zeebo_msm::CSR_BASE;
+using zeebo_msm::CSR_SIZE;
+using zeebo_msm::CSR_PA;
+using zeebo_msm::TIMER_MATCH_VAL;
+using zeebo_msm::TIMER_COUNT_VAL;
+using zeebo_msm::TIMER_ENABLE;
+using zeebo_msm::TIMER_CLEAR;
+using zeebo_msm::GPT_HZ;
+using zeebo_msm::DGT_HZ;
+using zeebo_msm::INSN_PER_SEC;
+using zeebo_msm::g_icount;
+using zeebo_msm::g_gpt_match;
+using zeebo_msm::g_gpt_enable;
+using zeebo_msm::g_gpt_base;
+using zeebo_msm::g_timer_log;
+using zeebo_msm::g_timer_on;
+using zeebo_msm::g_timer_prints;
+using zeebo_msm::gpt_count_now;
+using zeebo_msm::dgt_count_now;
+using zeebo_msm::timer_refresh_irq;
+using zeebo_msm::on_csr_write;
+using zeebo_msm::on_csr_read;
 using zeebo_msm::g_exc_vector_base;
 using zeebo_msm::PendingAbort;
 using zeebo_msm::g_pending_aborts;
@@ -427,7 +449,6 @@ static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
 // Instrumento (ZEEBO_UART_PROBE): amostra o PC ao longo da execucao para
 // distinguir "progredindo" de "preso em laco".
 static std::map<u32,long> g_pc_hist;
-static u64 g_icount = 0;
 static u32 g_last_pc = 0;
 // --- Diagnostico do primeiro retorno a user space -------------------------
 // Descobre ONDE o ELF do /init foi carregado na RAM fisica e QUAL tabela de
@@ -1118,86 +1139,6 @@ static void sdl_shot_save() {
     SDL_FreeSurface(surf);
 }
 #endif  // ZEEBO_SDL
-
-// --- GPT/DGT do MSM7x00 (timer) --------------------------------------------
-// mach/msm_iomap-7x00.h: MSM_CSR_BASE = VA 0xE0001000 (PA 0xC0100000).
-// timer.c (cpu_is_msm7x01): event_base = MSM_CSR_BASE, source_base = +0x10;
-// registradores TIMER_MATCH_VAL=0x00, TIMER_COUNT_VAL=0x04, TIMER_ENABLE=0x08,
-// TIMER_CLEAR=0x0c; GPT_HZ=32768 no clockevent e o clock source e' o DGT a
-// 19200000>>5 = 600kHz (bate com "sched_clock: 27 bits at 600kHz" do log real).
-// INT_GP_TIMER_EXP = 7 (irqs-7x00.h).
-constexpr u32 CSR_BASE        = 0xE0001000u;
-constexpr u32 CSR_SIZE        = 0x00001000u;
-constexpr u32 CSR_PA          = 0xC0100000u;
-constexpr u32 TIMER_MATCH_VAL = 0x00u;
-constexpr u32 TIMER_COUNT_VAL = 0x04u;
-constexpr u32 TIMER_ENABLE    = 0x08u;
-constexpr u32 TIMER_CLEAR     = 0x0cu;
-constexpr u32 GPT_HZ          = 32768u;
-constexpr u32 DGT_HZ          = 19200000u;
-
-// 1 segundo de tempo do guest = INSN_PER_SEC instrucoes emuladas.
-constexpr u64 INSN_PER_SEC = 1000000ull;
-
-static u32  g_gpt_match  = 0xffffffffu;
-static u32  g_gpt_enable = 0;
-static u64  g_gpt_base   = 0;       // g_icount no ultimo TIMER_CLEAR
-static bool g_timer_log  = false;
-static bool g_timer_on   = false;   // ZEEBO_TIMER=1 liga o clockevent virtual
-static u32  g_timer_prints = 0;     // cap do log (o kernel acessa o CSR milhares de vezes)
-
-// O GPT conta a partir do ultimo CLEAR (o driver faz CLEAR; MATCH=delta; ENABLE).
-// Sem isso o contador livre fica sempre >= MATCH e vira tempestade de ticks.
-static inline u32 gpt_count_now() {
-    return static_cast<u32>(((g_icount - g_gpt_base) * GPT_HZ) / INSN_PER_SEC);
-}
-static inline u32 dgt_count_now() {   // clock source: livre, nunca zerado
-    return static_cast<u32>((g_icount * DGT_HZ) / INSN_PER_SEC);
-}
-
-// Reflete o estado do GPT na linha 7 do VIC (clockevent one-shot do kernel).
-static void timer_refresh_irq() {
-    if (!g_timer_on) return;
-    const u32 bit = 1u << INT_GP_TIMER;
-    if ((g_gpt_enable & 1u) && gpt_count_now() >= g_gpt_match) g_vic_pending[0] |= bit;
-    else                                                     g_vic_pending[0] &= ~bit;
-}
-
-void on_csr_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                  int size, int64_t value, void* ud) {
-    (void)uc; (void)type; (void)size; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
-                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
-    if (off == 0xffffffffu) return;
-    const u32 v = static_cast<u32>(value);
-    if (off == TIMER_MATCH_VAL)      g_gpt_match = v;
-    else if (off == TIMER_ENABLE)    g_gpt_enable = v;
-    else if (off == TIMER_CLEAR)   { g_gpt_enable = 0; g_gpt_base = g_icount; }
-    if (g_timer_log && g_timer_prints++ < 60)
-        std::printf("[gpt] W off=0x%02x val=0x%08x (match=0x%x en=%u cnt=%u)\n",
-                    off, v, g_gpt_match, g_gpt_enable, gpt_count_now());
-    if (off == TIMER_MATCH_VAL || off == TIMER_ENABLE || off == TIMER_CLEAR)
-        timer_refresh_irq();
-}
-
-void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                 int size, int64_t value, void* ud) {
-    (void)type; (void)size; (void)value; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
-                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
-    if (off == 0xffffffffu) return;
-    u32 val = 0;
-    if (off == TIMER_MATCH_VAL)          val = g_gpt_match;
-    else if (off == TIMER_COUNT_VAL)     val = gpt_count_now();
-    else if (off == TIMER_ENABLE)        val = g_gpt_enable;
-    else if (off == TIMER_COUNT_VAL + 0x10u) val = dgt_count_now();   // DGT
-    if (g_timer_log && g_timer_prints++ < 60)
-        std::printf("[gpt] R off=0x%02x -> 0x%08x\n", off, val);
-    // O guest le atraves da MMU: o valor tem de estar no PA, nao no VA do hook.
-    uc_mem_write(uc, CSR_PA + off, &val, 4);
-}
 
 // --- MDP do MSM7x00 (so o suficiente para o fb0 andar) ----------------------
 // mdp_hw.h: MDP_INTR_ENABLE=0x20, MDP_INTR_STATUS=0x24, MDP_INTR_CLEAR=0x28.

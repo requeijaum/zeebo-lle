@@ -455,4 +455,88 @@ inline bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
     return true;   // o acesso foi "tratado": retomamos no vetor
 }
 
+// --- GPT/DGT do MSM7x00 (timer) --------------------------------------------
+// mach/msm_iomap-7x00.h: MSM_CSR_BASE = VA 0xE0001000 (PA 0xC0100000).
+// timer.c (cpu_is_msm7x01): event_base = MSM_CSR_BASE, source_base = +0x10;
+// registradores TIMER_MATCH_VAL=0x00, TIMER_COUNT_VAL=0x04, TIMER_ENABLE=0x08,
+// TIMER_CLEAR=0x0c; GPT_HZ=32768 no clockevent e o clock source e' o DGT a
+// 19200000>>5 = 600kHz (bate com "sched_clock: 27 bits at 600kHz" do log real).
+// INT_GP_TIMER_EXP = 7 (irqs-7x00.h) -- ja' esta' definido acima como INT_GP_TIMER.
+constexpr u32 CSR_BASE        = 0xE0001000u;
+constexpr u32 CSR_SIZE        = 0x00001000u;
+constexpr u32 CSR_PA          = 0xC0100000u;
+constexpr u32 TIMER_MATCH_VAL = 0x00u;
+constexpr u32 TIMER_COUNT_VAL = 0x04u;
+constexpr u32 TIMER_ENABLE    = 0x08u;
+constexpr u32 TIMER_CLEAR     = 0x0cu;
+constexpr u32 GPT_HZ          = 32768u;
+constexpr u32 DGT_HZ          = 19200000u;
+
+// Relogio de instrucoes do guest. E' o mesmo contador que os harnesses incrementam no hook
+// de codigo: o modelo do timer precisa dele para converter instrucoes em tempo do guest.
+inline u64 g_icount = 0;
+
+// 1 segundo de tempo do guest = INSN_PER_SEC instrucoes emuladas.
+constexpr u64 INSN_PER_SEC = 1000000ull;
+
+inline u32  g_gpt_match  = 0xffffffffu;
+inline u32  g_gpt_enable = 0;
+inline u64  g_gpt_base   = 0;       // g_icount no ultimo TIMER_CLEAR
+inline bool g_timer_log  = false;
+inline bool g_timer_on   = false;   // liga o clockevent virtual
+inline u32  g_timer_prints = 0;     // cap do log (o kernel acessa o CSR milhares de vezes)
+
+// O GPT conta a partir do ultimo CLEAR (o driver faz CLEAR; MATCH=delta; ENABLE).
+// Sem isso o contador livre fica sempre >= MATCH e vira tempestade de ticks.
+inline u32 gpt_count_now() {
+    return static_cast<u32>(((g_icount - g_gpt_base) * GPT_HZ) / INSN_PER_SEC);
+}
+inline u32 dgt_count_now() {          // clock source: livre, nunca zerado
+    return static_cast<u32>((g_icount * DGT_HZ) / INSN_PER_SEC);
+}
+
+// Reflete o estado do GPT na linha 7 do VIC (clockevent one-shot do kernel).
+inline void timer_refresh_irq() {
+    if (!g_timer_on) return;
+    const u32 bit = 1u << INT_GP_TIMER;
+    if ((g_gpt_enable & 1u) && gpt_count_now() >= g_gpt_match) g_vic_pending[0] |= bit;
+    else                                                       g_vic_pending[0] &= ~bit;
+}
+
+inline void on_csr_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                         int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
+                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
+    if (off == 0xffffffffu) return;
+    const u32 v = static_cast<u32>(value);
+    if (off == TIMER_MATCH_VAL)      g_gpt_match = v;
+    else if (off == TIMER_ENABLE)    g_gpt_enable = v;
+    else if (off == TIMER_CLEAR)   { g_gpt_enable = 0; g_gpt_base = g_icount; }
+    if (g_timer_log && g_timer_prints++ < 60)
+        std::printf("[gpt] W off=0x%02x val=0x%08x (match=0x%x en=%u cnt=%u)\n",
+                    off, v, g_gpt_match, g_gpt_enable, gpt_count_now());
+    if (off == TIMER_MATCH_VAL || off == TIMER_ENABLE || off == TIMER_CLEAR)
+        timer_refresh_irq();
+}
+
+inline void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                        int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
+                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
+    if (off == 0xffffffffu) return;
+    u32 val = 0;
+    if (off == TIMER_MATCH_VAL)          val = g_gpt_match;
+    else if (off == TIMER_COUNT_VAL)     val = gpt_count_now();
+    else if (off == TIMER_ENABLE)        val = g_gpt_enable;
+    else if (off == TIMER_COUNT_VAL + 0x10u) val = dgt_count_now();   // DGT
+    if (g_timer_log && g_timer_prints++ < 60)
+        std::printf("[gpt] R off=0x%02x -> 0x%08x\n", off, val);
+    // O guest le atraves da MMU: o valor tem de estar no PA, nao no VA do hook.
+    uc_mem_write(uc, CSR_PA + off, &val, 4);
+}
+
 }  // namespace zeebo_msm
