@@ -525,7 +525,11 @@ test-zeetris-playable: test_zeetris_playable test-zeetris-playable-selftest
 # Carga de trabalho ABERTA e verificavel para exercitar os backends de CPU e GPU,
 # em contraste com o BREW/Zeetris onde silencio e ambiguo entre bug e estado
 # legitimo do jogo. L1 imagem valida / L2 CPU executa / L3 console fala.
-test_linux_boot: test_linux_boot.cpp
+# O nucleo do SoC (mapa, UART, VIC, timer, entrada de excecao e o walker VA->PA) vive
+# em zeebo_msm_soc.h, compartilhado com os harnesses dos outros SOs. A dependencia e'
+# obrigatoria: sem ela, editar o header nao recompila nada e o binario antigo faz a
+# suite parecer verde.
+test_linux_boot: test_linux_boot.cpp zeebo_msm_soc.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_SDL -o $@ test_linux_boot.cpp -lunicorn -lSDL2 -lSDL2_ttf
 
 # Carga bare-metal real do TripleOxygen (blinkenlichten.bin, 244B).
