@@ -46,52 +46,109 @@ using u8 = uint8_t; using u16 = uint16_t; using u32 = uint32_t; using u64 = uint
 
 namespace {
 
-// --- mapa MSM7201A (mesmas constantes do emulador principal) ---
-constexpr u32 APPS_RAM_PHYS = 0x10000000u;
-constexpr u32 APPS_RAM_SIZE = 0x06000000u;   // 96MB
-constexpr u32 UART1_BASE    = 0xa9a00000u;
-// ATENCAO ao nome: 0xA9C00000 e' a **UART3** (MSM_UART3_PHYS, msm_iomap-7x00.h:72),
-// nao a UART2 (essa e' 0xA9B00000). Ela aparece como **ttyMSM2** porque o
-// platform_device msm_device_uart3 tem `.id = 2` (devices-msm7x00.c:90) e o
-// msm_serial nomeia a tty pelo id, nao pelo numero da UART. board-halibut.c so'
-// registra msm_device_uart3. Os identificadores abaixo mantem o sufixo 2 por
-// compatibilidade com o resto do arquivo, mas leia-os como "a UART do ttyMSM2".
-constexpr u32 UART3_PHYS    = 0xa9c00000u;   // MSM_UART3_PHYS
-constexpr u32 UART2_BASE    = UART3_PHYS;    // = ttyMSM2 (id=2), IRQ INT_UART3=11
-constexpr u32 UART3_BASE    = 0xa9e00000u;   // UART3 do MSM7201A (mesmo bloco, irq 12)
-constexpr u32 UART_BASES[3] = {UART1_BASE, UART2_BASE, UART3_BASE};
-constexpr u32 UART_SIZE     = 0x00010000u;
-
-// Base da UART dona deste endereco (0 se nao for UART conhecida).
-inline u32 uart_base_for(u32 a) {
-    for (u32 b : UART_BASES)
-        if (a >= b && a < b + UART_SIZE) return b;
-    return 0;
-}
-constexpr u32 UART_OFF_TF   = 0x000cu;       // TX FIFO (leitura = RX FIFO)
-constexpr u32 UART_OFF_SR   = 0x0008u;       // status; UART_SR_TX_EMPTY=(1<<3), TX_READY=(1<<2)
-constexpr u32 UART_OFF_IMR  = 0x0014u;       // escrita = IMR, leitura = ISR (TX_READY = 1<<7)
-constexpr u32 UART_OFF_CR   = 0x0010u;       // command register
-constexpr u32 UART_SR_TX_EMPTY = (1u << 3);
-constexpr u32 UART_SR_TX_READY = (1u << 2);
-constexpr u32 UART_ISR_TX_READY = (1u << 7);
-constexpr u32 UART_IMR_TXLEV = (1u << 0);
-constexpr u32 VIC_BASE      = 0xc0000000u;   // PA do VIC (VA 0xE0000000 no iotable)
-constexpr u32 VIC_SIZE      = 0x00002000u;   // registradores do VIC (o CSR em
-                                             // 0xC0100000 vem logo depois e tem
-                                             // hook proprio)
-constexpr u32 PERIPH_BASE   = 0xc0000000u;   // VIC + GPT/DGT (0xC0100000)
-constexpr u32 PERIPH_SIZE   = 0x00020000u;
-// MDP/TVENC do MSM7x00: o driver de framebuffer (mdp.c) escreve nestes registradores.
-constexpr u32 MDP_BASE      = 0xaa200000u;   // MSM_MDP_PHYS
-constexpr u32 MDP_SIZE      = 0x000f0000u;
-constexpr u32 TVENC_BASE    = 0xaa400000u;
-constexpr u32 TVENC_SIZE    = 0x00001000u;
+// --- nucleo do MSM7201A vem do header COMPARTILHADO -------------------------
+// O que e' do SoC (mapa, UART, VIC, timer, entrada de excecao no host e o walker
+// VA->PA pelas tabelas de pagina do guest) vive em zeebo_msm_soc.h, para o harness
+// de boot de Linux e os harnesses dos outros SOs compartilharem o MESMO modelo em vez
+// de dois que divergem. Aqui fica so' o que e' Linux-especifico (ATAGs, protocolo do
+// zImage, cmdline, decodificacao do framebuffer do console).
+#include "zeebo_msm_soc.h"
+using zeebo_msm::APPS_RAM_PHYS;
+using zeebo_msm::APPS_RAM_SIZE;
+using zeebo_msm::UART1_BASE;
+using zeebo_msm::UART2_BASE;
+using zeebo_msm::UART3_BASE;
+using zeebo_msm::UART3_PHYS;
+using zeebo_msm::UART_BASES;
+using zeebo_msm::UART_SIZE;
+using zeebo_msm::UART_OFF_TF;
+using zeebo_msm::UART_OFF_SR;
+using zeebo_msm::UART_OFF_IMR;
+using zeebo_msm::UART_OFF_CR;
+using zeebo_msm::UART_SR_TX_EMPTY;
+using zeebo_msm::UART_SR_TX_READY;
+using zeebo_msm::UART_ISR_TX_READY;
+using zeebo_msm::UART_IMR_TXLEV;
+using zeebo_msm::uart_base_for;
+using zeebo_msm::VIC_BASE;
+using zeebo_msm::VIC_SIZE;
+using zeebo_msm::PERIPH_BASE;
+using zeebo_msm::PERIPH_SIZE;
+using zeebo_msm::MDP_BASE;
+using zeebo_msm::MDP_SIZE;
+using zeebo_msm::TVENC_BASE;
+using zeebo_msm::TVENC_SIZE;
+using zeebo_msm::guest_read_u32;
+using zeebo_msm::guest_read_bytes;
+using zeebo_msm::arm_ls_fault_addr;
+using zeebo_msm::CSR_BASE;
+using zeebo_msm::CSR_SIZE;
+using zeebo_msm::CSR_PA;
+using zeebo_msm::TIMER_MATCH_VAL;
+using zeebo_msm::TIMER_COUNT_VAL;
+using zeebo_msm::TIMER_ENABLE;
+using zeebo_msm::TIMER_CLEAR;
+using zeebo_msm::GPT_HZ;
+using zeebo_msm::DGT_HZ;
+using zeebo_msm::INSN_PER_SEC;
+using zeebo_msm::g_icount;
+using zeebo_msm::g_gpt_match;
+using zeebo_msm::g_gpt_enable;
+using zeebo_msm::g_gpt_base;
+using zeebo_msm::g_timer_log;
+using zeebo_msm::g_timer_on;
+using zeebo_msm::g_timer_prints;
+using zeebo_msm::gpt_count_now;
+using zeebo_msm::dgt_count_now;
+using zeebo_msm::timer_refresh_irq;
+using zeebo_msm::on_csr_write;
+using zeebo_msm::on_csr_read;
+using zeebo_msm::g_exc_vector_base;
+using zeebo_msm::deliver_irq;
+using zeebo_msm::PendingAbort;
+using zeebo_msm::g_pending_aborts;
+using zeebo_msm::g_abort_count;
+using zeebo_msm::on_fault_entry;
+using zeebo_msm::g_console;
+using zeebo_msm::g_uart_imr;
+using zeebo_msm::g_uart_log;
+using zeebo_msm::uart_idx;
+using zeebo_msm::uart_irq_of;
+using zeebo_msm::g_rx_buf;
+using zeebo_msm::g_stdin_tty;
+using zeebo_msm::g_rx_staged;
+using zeebo_msm::g_rx_char;
+using zeebo_msm::g_uart_tx_irq;
+using zeebo_msm::g_uart_rx_irq;
+using zeebo_msm::uart_update_irq;
+using zeebo_msm::rx_fill_from_host;
+using zeebo_msm::rx_try_stage;
+using zeebo_msm::on_uart_write;
+using zeebo_msm::on_uart_read;
+using zeebo_msm::VIC_OFF_ENCLEAR0;
+using zeebo_msm::VIC_OFF_ENSET0;
+using zeebo_msm::VIC_OFF_STATUS0;
+using zeebo_msm::VIC_OFF_CLEAR0;
+using zeebo_msm::VIC_OFF_VEC_RD;
+using zeebo_msm::VIC_OFF_VEC_PEND;
+using zeebo_msm::VIC_NO_PEND;
+using zeebo_msm::INT_GP_TIMER;
+using zeebo_msm::INT_MDP;
+using zeebo_msm::INT_USB_HS;
+using zeebo_msm::UART2_IRQ;
+using zeebo_msm::g_vic_en;
+using zeebo_msm::g_vic_pending;
+using zeebo_msm::g_irq_in_service;
+using zeebo_msm::g_irq_delivered;
+using zeebo_msm::g_irq_log;
+using zeebo_msm::g_vic_cursor;
+using zeebo_msm::on_vic_write;
+using zeebo_msm::on_vic_read;
+using zeebo_msm::vic_pick_irq;
 
 // Onde o zImage ARM e tipicamente carregado: base da RAM + 0x8000.
 constexpr u32 KERNEL_LOAD   = APPS_RAM_PHYS + 0x8000u;
 
-std::string g_console;      // tudo que o guest escreveu na UART1
 u64 g_insn = 0;
 
 static void on_smem_write(uc_engine* uc, uc_mem_type /*type*/, uint64_t addr,
@@ -115,198 +172,10 @@ static void on_smem_write(uc_engine* uc, uc_mem_type /*type*/, uint64_t addr,
 // UART_IMR_TXLEV=(1<<0)  UART_IMR_RXSTALE=(1<<3)  UART_IMR_RXLEV=(1<<4)
 // wait_for_xmitr(): se SR nao tem TX_EMPTY, ele gira lendo ISR. handle_tx()
 // so escreve enquanto SR tiver TX_READY. Os dois bits precisam estar certos.
-static u32 g_uart_imr[3] = {0, 0, 0};
-static bool g_uart_log = false;
-
-static inline int uart_idx(u32 base) {
-    return (base == UART1_BASE) ? 0 : ((base == UART2_BASE) ? 1 : 2);
-}
-
-// --- VIC do MSM7x00 (modelo minimo para poder entregar IRQ ao guest) --------
-// Fonte: arch/arm/mach-msm/irq.c + include/mach/entry-macro.S. O entry-macro le
-// 0xD0 e depois 0xD4 (numero da IRQ pendente; 0xffffffff = nenhuma).
-constexpr u32 VIC_OFF_ENCLEAR0 = 0x0020u;
-constexpr u32 VIC_OFF_ENSET0   = 0x0030u;
-constexpr u32 VIC_OFF_STATUS0  = 0x0080u;
-constexpr u32 VIC_OFF_CLEAR0   = 0x00b0u;
-constexpr u32 VIC_OFF_VEC_RD   = 0x00d0u;
-constexpr u32 VIC_OFF_VEC_PEND = 0x00d4u;
-constexpr u32 VIC_NO_PEND      = 0xffffffffu;
-
-// Numeros de IRQ (arch/arm/mach-msm/include/mach/irqs-7x00.h). Ficam aqui, junto do
-// VIC, porque o seletor de 64 linhas e o seu auto-teste precisam deles.
-constexpr u32 INT_GP_TIMER    = 7u;
-constexpr u32 INT_MDP         = 19u;
-constexpr u32 INT_USB_HS      = 47u;   // palavra 1, bit 15
-constexpr u32 UART2_IRQ        = 11u;      // INT_UART3 = 11 (a tty e' ttyMSM2, a UART e' a 3)
-
-static u32  g_vic_en[2]      = {0, 0};
-static u32  g_vic_pending[2] = {0, 0};
-static bool g_irq_in_service = false;
-static u32  g_irq_delivered  = 0;
-static bool g_irq_log        = false;
-
-static inline u32 uart_irq_of(int idx) { return (idx == 0) ? 10u : ((idx == 1) ? UART2_IRQ : 12u); }
-
-// --- Entrada de teclado -> RX da UART --------------------------------------
-// O guest le o caractere em 0x0c (RF) e ve RX_READY (SR bit 0). O driver so
-// consome no ISR, entao a chegada de dado tambem levanta a IRQ da UART.
-static std::string g_rx_buf;          // bytes a entregar (stdin ou script)
-static bool g_stdin_tty   = false;    // stdin e' tty: ler sob demanda com select
-static bool g_rx_staged   = false;    // caractere atual visivel em RF
-static char g_rx_char     = 0;
-static bool g_uart_tx_irq = false;
-static bool g_uart_rx_irq = false;
-
-static void uart_update_irq() {
-    const u32 bit = 1u << UART2_IRQ;
-    if (g_uart_tx_irq || g_uart_rx_irq) g_vic_pending[0] |= bit;
-    else                                g_vic_pending[0] &= ~bit;
-}
-
-static void rx_fill_from_host() {
-    if (!g_stdin_tty || !g_rx_buf.empty() || g_rx_staged) return;
-    fd_set rf;
-    FD_ZERO(&rf);
-    FD_SET(0, &rf);
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
-    if (select(1, &rf, nullptr, nullptr, &tv) <= 0) return;
-    char c = 0;
-    if (read(0, &c, 1) == 1) g_rx_buf.push_back(c);
-}
-
-static void rx_try_stage() {
-    if (g_rx_staged || g_rx_buf.empty()) return;
-    // so levanta IRQ de RX se o driver habilitou RXLEV/RXSTALE
-    if ((g_uart_imr[1] & ((1u << 4) | (1u << 3))) == 0u) return;
-    g_rx_char = g_rx_buf.front();
-    g_rx_buf.erase(0, 1);
-    g_rx_staged = true;
-    g_uart_rx_irq = true;
-    uart_update_irq();
-    if (g_uart_log)
-        std::printf("[rx] entregando 0x%02x\n", (unsigned char)g_rx_char);
-}
-
-static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                         int size, int64_t value, void* ud) {
-    (void)uc; (void)type; (void)size; (void)ud;
-    const u32 off = static_cast<u32>(addr) - VIC_BASE;
-    const u32 v = static_cast<u32>(value);
-    switch (off) {
-        case VIC_OFF_ENSET0:        g_vic_en[0] |= v; break;
-        case VIC_OFF_ENSET0 + 4:    g_vic_en[1] |= v; break;
-        case VIC_OFF_ENCLEAR0:      g_vic_en[0] &= ~v; break;
-        case VIC_OFF_ENCLEAR0 + 4:  g_vic_en[1] &= ~v; break;
-        case VIC_OFF_CLEAR0:                       // ack: o kernel ja tratou
-            g_vic_pending[0] &= ~v;
-            g_irq_in_service = false;
-            break;
-        case VIC_OFF_CLEAR0 + 4:
-            g_vic_pending[1] &= ~v;
-            g_irq_in_service = false;          // idem palavra 0: sem isto a IRQ 47
-            break;                             // (USB HS) trava apos a 1a entrega
-        default: break;
-    }
-    if (g_irq_log)
-        std::printf("[vic] W off=0x%03x val=0x%08x -> en0=0x%08x pend0=0x%08x\n",
-                    off, v, g_vic_en[0], g_vic_pending[0]);
-}
-
-static u32  g_vic_cursor = 0;      // round-robin: sem isso a IRQ de menor
-                                   // numero (timer=7) starva as outras (MDP=19)
-
-// Seleciona a proxima IRQ ativa cobrindo as DUAS palavras (0-63). O VIC do MSM tem 64
-// linhas; USB HS = 47 (palavra 1, bit 15). Antes daqui so' a palavra 0 era varrida e
-// qualquer IRQ >= 32 ficava pendente para sempre.
-static u32 vic_pick_irq() {
-    const u32 act0 = g_vic_pending[0] & g_vic_en[0];
-    const u32 act1 = g_vic_pending[1] & g_vic_en[1];
-    if (!act0 && !act1) return VIC_NO_PEND;
-    for (u32 i = 0; i < 64u; ++i) {
-        const u32 b = (g_vic_cursor + i) & 63u;
-        const u32 act = (b < 32u) ? act0 : act1;
-        if (act & (1u << (b & 31u))) { g_vic_cursor = (b + 1u) & 63u; return b; }
-    }
-    return VIC_NO_PEND;
-}
-
-static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                        int size, int64_t value, void* ud) {
-    (void)type; (void)size; (void)value; (void)ud;
-    const u32 off = static_cast<u32>(addr) - VIC_BASE;
-    const u32 act = g_vic_pending[0] & g_vic_en[0];
-    u32 val = 0;
-    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND) {
-        val = vic_pick_irq();
-    }
-    else if (off == VIC_OFF_STATUS0)     val = act;
-    else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
-    else if (off == VIC_OFF_ENSET0)      val = g_vic_en[0];
-    else if (off == VIC_OFF_ENSET0 + 4)  val = g_vic_en[1];
-    if (g_irq_log)
-        std::printf("[vic] R off=0x%03x -> 0x%08x\n", off, val);
-    uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
-}
-
-void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                   int size, int64_t value, void* ud) {
-    (void)uc; (void)type; (void)size; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 base = uart_base_for(a);
-    if (!base) return;
-    const u32 off = a - base;
-    if (g_uart_log)
-        std::printf("[uart%d] W off=0x%02x val=0x%08x\n", uart_idx(base), off, (u32)value);
-    if (off == UART_OFF_TF) {                  // TX FIFO: e' o caractere de saida
-        const char c = static_cast<char>(value & 0xff);
-        if (c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f)) g_console.push_back(c);
-        std::putchar(c);
-        std::fflush(stdout);
-    } else if (off == UART_OFF_IMR) {          // mascara de interrupcao
-        const int i = uart_idx(base);
-        g_uart_imr[i] = (u32)value;
-        // TXLEV habilitado = o driver tem dado para enviar e espera a IRQ de TX
-        // (handle_tx escreve a FIFO so quando o ISR roda).
-        if (i == 1) {
-            g_uart_tx_irq = ((u32)value & UART_IMR_TXLEV) != 0u;
-            uart_update_irq();
-        }
-    }
-}
-
-bool on_uart_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                  int size, int64_t value, void* ud) {
-    (void)type; (void)size; (void)value; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 base = uart_base_for(a);
-    if (!base) return true;
-    const u32 off = a - base;
-    const int idx = uart_idx(base);
-    u32 val = 0;
-    if (off == UART_OFF_SR) {
-        val = UART_SR_TX_EMPTY | UART_SR_TX_READY;
-        if (g_rx_staged) val |= 0x1u;          // UART_SR_RX_READY (1<<0)
-    } else if (off == UART_OFF_TF) {           // leitura de 0x0c = RF (FIFO de RX)
-        if (g_rx_staged) {
-            val = (u32)(unsigned char)g_rx_char;
-            g_rx_staged = false;
-            g_uart_rx_irq = false;
-            uart_update_irq();
-        }
-    } else if (off == UART_OFF_IMR) {          // leitura de 0x14 = ISR
-        val = UART_ISR_TX_READY;
-    } else if (off == UART_OFF_CR) {           // leitura de 0x10 = MISR (mascarado)
-        val = g_uart_imr[idx] & (UART_IMR_TXLEV | (1u << 3) | (1u << 4));
-    }
-    if (g_uart_log)
-        std::printf("[uart%d] R off=0x%02x -> 0x%08x\n", idx, off, val);
-    uc_mem_write(uc, a, &val, 4);              // o guest le este valor
-    return true;
-}
-
+//
+// O MODELO (estado + on_uart_write/on_uart_read + rx_fill_from_host/rx_try_stage) vive
+// em zeebo_msm_soc.h, compartilhado com os harnesses dos outros SOs. O que fica aqui e'
+// so' o dispatcher de MMIO, que decide quando chamar.
 void on_code(uc_engine* uc, uint64_t addr, uint32_t size, void* ud) {
     (void)uc; (void)addr; (void)size; (void)ud;
     ++g_insn;
@@ -581,7 +450,6 @@ static void on_any_write(uc_engine* uc, uc_mem_type t, u64 addr, int size,
 // Instrumento (ZEEBO_UART_PROBE): amostra o PC ao longo da execucao para
 // distinguir "progredindo" de "preso em laco".
 static std::map<u32,long> g_pc_hist;
-static u64 g_icount = 0;
 static u32 g_last_pc = 0;
 // --- Diagnostico do primeiro retorno a user space -------------------------
 // Descobre ONDE o ELF do /init foi carregado na RAM fisica e QUAL tabela de
@@ -638,47 +506,10 @@ static void dump_boot_mmu_diag(uc_engine* uc) {
     std::fflush(stdout);
 }
 
-// --- Entrada de excecao ABORT (o Unicorn NAO vetoriza aborts no guest) ------
-// O hardware ARM1136, ao levar um abort, salva o CPSR em SPSR_abt, poe
-// LR_abt = PC+4 (prefetch) / PC+8 (data), muda para modo ABT e salta para o
-// vetor (0xffff000c / 0xffff0010). O Unicorn nao faz isso: o fault morre no
-// host e o handler do Linux nunca roda. Completamos o modelo da CPU aqui --
-// quem decide o destino do acesso continua sendo o do_page_fault do kernel.
-struct PendingAbort { u32 addr; u32 fsr; u32 kind; };  // kind: 0=pabt, 1=dabt
-static std::vector<PendingAbort> g_pending_aborts;
-static u32 g_abort_count = 0;
-
-static bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
-                           i64 value, void* user) {
-    (void)size; (void)value; (void)user;
-    const bool is_fetch = (type == UC_MEM_FETCH_UNMAPPED);
-    u32 cpsr = 0, pc = 0;
-    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    // FSR de translation fault em pagina; bit 10 (0x400) = escrita
-    u32 fsr = 0x7u | (is_fetch ? 0u : (type == UC_MEM_WRITE_UNMAPPED ? 0x400u : 0u));
-    g_pending_aborts.push_back({(u32)addr, fsr, is_fetch ? 0u : 1u});
-    if (g_pending_aborts.size() > 8) g_pending_aborts.erase(g_pending_aborts.begin());
-    if (++g_abort_count <= 25) {
-        std::printf("[abort] #%u %s addr=0x%08x pc=0x%08x cpsr=0x%08x fsr=0x%x\n",
-                    g_abort_count, is_fetch ? "PABT" : "DABT", (u32)addr, pc, cpsr, fsr);
-        std::fflush(stdout);
-    }
-    if (g_abort_count > 20000u) {
-        std::printf("[abort] limite de faults (20000) atingido; parando\n");
-        uc_emu_stop(uc);
-        return true;
-    }
-    // Entrada de excecao do hardware: CPSR -> SPSR_abt, modo ABT, I=F=1, PC=vetor
-    u32 lr_ret = pc + (is_fetch ? 4u : 8u);
-    u32 abt_cpsr = (cpsr & ~0x3fu) | 0x17u | 0x80u | 0x40u;
-    uc_reg_write(uc, UC_ARM_REG_CPSR, &abt_cpsr);
-    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
-    uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
-    u32 vec = 0xffff0000u + (is_fetch ? 0x0cu : 0x10u);
-    uc_reg_write(uc, UC_ARM_REG_PC, &vec);
-    return true;   // o acesso foi "tratado": retomamos no vetor
-}
+// A ENTRADA DE EXCECAO (SPSR_abt, modo ABT, PC=vetor) agora vive em
+// zeebo_msm_soc.h, junto com o vetor configuravel (`g_exc_vector_base`): o Linux usa
+// vetores altos, um SO com V=0 usa 0x00000000. Este arquivo mantem o dispatcher de
+// fault/interrupcao e as sondas dele (que sao Linux-especificas).
 
 // Unicorn NAO entrega excecoes do guest ao vetor do guest (provado no vec-test):
 // UDF -> UC_ERR_INSN_INVALID, SVC -> UC_ERR_EXCEPTION, abort -> INTR sem saltar
@@ -687,131 +518,6 @@ static bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
 // consegue tratar page fault (mapeamento preguicoso) nem executar syscall (SWI).
 static u32 g_pabt = 0, g_dabt = 0, g_swi = 0, g_pf_c = 0;
 
-// --- Leitura de memoria do GUEST (uc_mem_read NAO traduz a MMU) ------------
-static bool guest_read_u32(uc_engine* uc, u32 va, u32* out) {
-    uc_arm_cp_reg r0 = {15, 0, 0, 2, 0, 0, 0, 0};
-    uc_arm_cp_reg r1 = {15, 0, 0, 2, 0, 0, 1, 0};
-    uc_arm_cp_reg rc = {15, 0, 0, 2, 0, 0, 2, 0};
-    if (uc_reg_read(uc, UC_ARM_REG_CP_REG, &r0) != UC_ERR_OK) return false;
-    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r1);
-    uc_reg_read(uc, UC_ARM_REG_CP_REG, &rc);
-    const u32 ttbr0 = (u32)r0.val, ttbr1 = (u32)r1.val, ttbcr = (u32)rc.val;
-    const u32 n = ttbcr & 7u;
-    // ARM: split = 2^(32-N). N=0 => TTBR0 vale para TODO o espaco (TTBR1 nao e'
-    // usado). Com N>0, TTBR0 cobre [0, split) e TTBR1 o resto. O kernel aqui usa
-    // TTBCR=0 (mesmo pgd para user e kernel), entao o stack de user em
-    // 0xbe9c1xxx tambem esta no TTBR0.
-    const u32 split = (n == 0u) ? 0u : (0x80000000u >> (n - 1u));
-    const u32 pgdb = ((n == 0u || va < split) ? ttbr0 : ttbr1) & 0xffffc000u;
-    u32 l1 = 0;
-    if (uc_mem_read(uc, pgdb + ((va >> 20) & 0xfffu) * 4u, &l1, 4) != UC_ERR_OK) return false;
-    if ((l1 & 3u) == 0u) return false;
-    if ((l1 & 3u) == 2u)
-        return uc_mem_read(uc, (l1 & 0xfff00000u) | (va & 0xfffffu), out, 4) == UC_ERR_OK;
-    const u32 l2 = l1 & 0xfffffc00u;
-    u32 pte = 0;
-    if (uc_mem_read(uc, l2 + ((va >> 12) & 0xffu) * 4u, &pte, 4) != UC_ERR_OK) return false;
-    if ((pte & 3u) == 2u)
-        return uc_mem_read(uc, (pte & 0xfffff000u) | (va & 0xfffu), out, 4) == UC_ERR_OK;
-    if ((pte & 3u) == 3u)   // ARMv6: pagina pequena ESTENDIDA (subpaginas) — base em [31:12]
-        return uc_mem_read(uc, (pte & 0xfffff000u) | (va & 0xfffu), out, 4) == UC_ERR_OK;
-    if ((pte & 3u) == 1u)   // pagina grande de 64KB
-        return uc_mem_read(uc, (pte & 0xffff0000u) | (va & 0xffffu), out, 4) == UC_ERR_OK;
-    return false;
-}
-
-// Endereco efetivo do acesso de dado que abortou: o Unicorn nao modela o FAR
-// (leitura devolve 0), entao decodificamos a instrucao que falhou.
-static u32 arm_ls_fault_addr(uc_engine* uc, u32 pc, bool* decoded, bool* is_write) {
-    *decoded = false;
-    if (is_write) *is_write = false;
-    u32 insn = 0;
-    if (!guest_read_u32(uc, pc, &insn)) return 0;
-    // bit 20 (L) = 0 -> store: o page fault e' de ESCRITA (FSR bit 10)
-    if (is_write) *is_write = (((insn >> 20) & 1u) == 0u);
-    // O enum de registradores do Unicorn NAO e' contiguo: R13/SP e R14/LR sao
-    // valores proprios. "UC_ARM_REG_R0 + 13" devolvia lixo, entao qualquer
-    // fault com base em sp/lr (ex.: "push {...}") calculava endereco errado.
-    static const uc_arm_reg kRegs[15] = {
-        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,  UC_ARM_REG_R3,  UC_ARM_REG_R4,
-        UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,  UC_ARM_REG_R8,  UC_ARM_REG_R9,
-        UC_ARM_REG_R10, UC_ARM_REG_R11, UC_ARM_REG_R12, UC_ARM_REG_SP, UC_ARM_REG_LR
-    };
-    u32 regs[15] = {0};
-    for (int i = 0; i < 15; ++i) uc_reg_read(uc, kRegs[i], &regs[i]);
-    const int rn = (int)((insn >> 16) & 0xfu);
-    const bool U = ((insn >> 23) & 1u) != 0;
-    const bool P = ((insn >> 24) & 1u) != 0;
-    // rn == 15 e' LDR/STR PC-relativo (pool de literais): o valor do PC na
-    // instrucao ARM e' endereco+8. Sem isto o endereco calculado sai errado
-    // (ex.: 0x368 em vez de 0x137288) e o kernel mata o init com SIGSEGV.
-    const u32 base = (rn == 15) ? (pc + 8u) : regs[rn];
-    const u32 stype = (insn >> 5) & 3u;
-    auto apply_shift = [](u32 v, u32 type, u32 sh) -> u32 {
-        sh &= 31u;
-        if (sh == 0) return v;
-        switch (type) {
-            case 0: return v << sh;
-            case 1: return v >> sh;
-            case 2: return (u32)((int)v >> (int)sh);
-            default: return (v >> sh) | (v << (32 - sh));
-        }
-    };
-    const u32 cls = insn & 0x0e000000u;
-    if (cls == 0x04000000u) {                        // single data transfer, offset imediato
-        const u32 off = insn & 0xfffu;
-        *decoded = true;
-        return P ? (U ? base + off : base - off) : base;
-    }
-    if (cls == 0x06000000u) {                        // single data transfer, offset registrador
-        // bit25=1 => offset por registrador. Bit 4 seleciona o deslocamento:
-        // 0 = imediato em bits[11:7]; 1 = por registrador (Rs = bits[11:8]).
-        u32 off;
-        if (insn & 0x10u) {
-            const u32 rs = (insn >> 8) & 0xfu;
-            off = apply_shift(regs[insn & 0xfu], stype, regs[rs] & 0xffu);
-        } else {
-            off = apply_shift(regs[insn & 0xfu], stype, (insn >> 7) & 0x1fu);
-        }
-        *decoded = true;
-        return P ? (U ? base + off : base - off) : base;
-    }
-    if (cls == 0x00000000u && (insn & 0x90u) == 0x90u) {   // halfword / signed transfer
-        const bool I = ((insn >> 22) & 1u) != 0;
-        const u32 off = I ? (((insn >> 4) & 0xf0u) | (insn & 0xfu)) : regs[insn & 0xfu];
-        *decoded = true;
-        return P ? (U ? base + off : base - off) : base;
-    }
-    if (cls == 0x08000000u) {                        // LDM/STM (IA/IB/DA/DB)
-        const u32 nregs = (u32)__builtin_popcount(insn & 0xffffu);
-        *decoded = true;
-        if (U) return P ? (base + 4u) : base;                    // IB / IA
-        return base - 4u * (P ? nregs : (nregs ? nregs - 1u : 0u));  // DB / DA
-    }
-    if ((insn & 0x0fb00ff0u) == 0x01000090u) {       // SWP
-        *decoded = true;
-        return base;
-    }
-    if ((insn & 0x0e0000f0u) == 0x000000d0u) {       // LDRD/STRD
-        const bool I = ((insn >> 22) & 1u) != 0;
-        const u32 off = I ? (((insn >> 4) & 0xf0u) | (insn & 0xfu)) : regs[insn & 0xfu];
-        *decoded = true;
-        return P ? (U ? base + off : base - off) : base;
-    }
-    return base;                                     // melhor esforco
-}
-
-// --- Leitura de bytes do GUEST (via walk manual; atravessa paginas) --------
-static bool guest_read_bytes(uc_engine* uc, u32 va, u32 len, std::string& out) {
-    out.clear();
-    for (u32 i = 0; i < len; i += 4) {
-        u32 w = 0;
-        if (!guest_read_u32(uc, va + i, &w)) return false;
-        for (int b = 0; b < 4 && i + (u32)b < len; ++b)
-            out.push_back((char)((w >> (8 * b)) & 0xffu));
-    }
-    return true;
-}
 
 // O console do kernel nao esta saindo na UART do harness, mas o texto que o
 // kernel escreveu continua em __log_buf. Este dump e' a fonte primaria do
@@ -1435,86 +1141,6 @@ static void sdl_shot_save() {
 }
 #endif  // ZEEBO_SDL
 
-// --- GPT/DGT do MSM7x00 (timer) --------------------------------------------
-// mach/msm_iomap-7x00.h: MSM_CSR_BASE = VA 0xE0001000 (PA 0xC0100000).
-// timer.c (cpu_is_msm7x01): event_base = MSM_CSR_BASE, source_base = +0x10;
-// registradores TIMER_MATCH_VAL=0x00, TIMER_COUNT_VAL=0x04, TIMER_ENABLE=0x08,
-// TIMER_CLEAR=0x0c; GPT_HZ=32768 no clockevent e o clock source e' o DGT a
-// 19200000>>5 = 600kHz (bate com "sched_clock: 27 bits at 600kHz" do log real).
-// INT_GP_TIMER_EXP = 7 (irqs-7x00.h).
-constexpr u32 CSR_BASE        = 0xE0001000u;
-constexpr u32 CSR_SIZE        = 0x00001000u;
-constexpr u32 CSR_PA          = 0xC0100000u;
-constexpr u32 TIMER_MATCH_VAL = 0x00u;
-constexpr u32 TIMER_COUNT_VAL = 0x04u;
-constexpr u32 TIMER_ENABLE    = 0x08u;
-constexpr u32 TIMER_CLEAR     = 0x0cu;
-constexpr u32 GPT_HZ          = 32768u;
-constexpr u32 DGT_HZ          = 19200000u;
-
-// 1 segundo de tempo do guest = INSN_PER_SEC instrucoes emuladas.
-constexpr u64 INSN_PER_SEC = 1000000ull;
-
-static u32  g_gpt_match  = 0xffffffffu;
-static u32  g_gpt_enable = 0;
-static u64  g_gpt_base   = 0;       // g_icount no ultimo TIMER_CLEAR
-static bool g_timer_log  = false;
-static bool g_timer_on   = false;   // ZEEBO_TIMER=1 liga o clockevent virtual
-static u32  g_timer_prints = 0;     // cap do log (o kernel acessa o CSR milhares de vezes)
-
-// O GPT conta a partir do ultimo CLEAR (o driver faz CLEAR; MATCH=delta; ENABLE).
-// Sem isso o contador livre fica sempre >= MATCH e vira tempestade de ticks.
-static inline u32 gpt_count_now() {
-    return static_cast<u32>(((g_icount - g_gpt_base) * GPT_HZ) / INSN_PER_SEC);
-}
-static inline u32 dgt_count_now() {   // clock source: livre, nunca zerado
-    return static_cast<u32>((g_icount * DGT_HZ) / INSN_PER_SEC);
-}
-
-// Reflete o estado do GPT na linha 7 do VIC (clockevent one-shot do kernel).
-static void timer_refresh_irq() {
-    if (!g_timer_on) return;
-    const u32 bit = 1u << INT_GP_TIMER;
-    if ((g_gpt_enable & 1u) && gpt_count_now() >= g_gpt_match) g_vic_pending[0] |= bit;
-    else                                                     g_vic_pending[0] &= ~bit;
-}
-
-void on_csr_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                  int size, int64_t value, void* ud) {
-    (void)uc; (void)type; (void)size; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
-                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
-    if (off == 0xffffffffu) return;
-    const u32 v = static_cast<u32>(value);
-    if (off == TIMER_MATCH_VAL)      g_gpt_match = v;
-    else if (off == TIMER_ENABLE)    g_gpt_enable = v;
-    else if (off == TIMER_CLEAR)   { g_gpt_enable = 0; g_gpt_base = g_icount; }
-    if (g_timer_log && g_timer_prints++ < 60)
-        std::printf("[gpt] W off=0x%02x val=0x%08x (match=0x%x en=%u cnt=%u)\n",
-                    off, v, g_gpt_match, g_gpt_enable, gpt_count_now());
-    if (off == TIMER_MATCH_VAL || off == TIMER_ENABLE || off == TIMER_CLEAR)
-        timer_refresh_irq();
-}
-
-void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                 int size, int64_t value, void* ud) {
-    (void)type; (void)size; (void)value; (void)ud;
-    const u32 a = static_cast<u32>(addr);
-    const u32 off = (a >= CSR_BASE && a < CSR_BASE + CSR_SIZE) ? (a - CSR_BASE)
-                  : ((a >= CSR_PA && a < CSR_PA + CSR_SIZE) ? (a - CSR_PA) : 0xffffffffu);
-    if (off == 0xffffffffu) return;
-    u32 val = 0;
-    if (off == TIMER_MATCH_VAL)          val = g_gpt_match;
-    else if (off == TIMER_COUNT_VAL)     val = gpt_count_now();
-    else if (off == TIMER_ENABLE)        val = g_gpt_enable;
-    else if (off == TIMER_COUNT_VAL + 0x10u) val = dgt_count_now();   // DGT
-    if (g_timer_log && g_timer_prints++ < 60)
-        std::printf("[gpt] R off=0x%02x -> 0x%08x\n", off, val);
-    // O guest le atraves da MMU: o valor tem de estar no PA, nao no VA do hook.
-    uc_mem_write(uc, CSR_PA + off, &val, 4);
-}
-
 // --- MDP do MSM7x00 (so o suficiente para o fb0 andar) ----------------------
 // mdp_hw.h: MDP_INTR_ENABLE=0x20, MDP_INTR_STATUS=0x24, MDP_INTR_CLEAR=0x28.
 // mdp.c: enable_mdp_irq() pede os bits; mdp_isr() le STATUS, escreve de volta em
@@ -1698,32 +1324,10 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     if ((g_icount & 0x3Fu) == 0u) timer_refresh_irq();
     // Entrega de IRQ ao guest: o Unicorn nao faz a entrada de excecao de IRQ,
     // entao o handler do kernel (handle_IRQ -> ISR da UART) nunca roda.
-    if (((g_vic_pending[0] & g_vic_en[0]) != 0u ||
-         (g_vic_pending[1] & g_vic_en[1]) != 0u) && !g_irq_in_service) {
-        u32 cpsr = 0, pc_va = 0;
-        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-        // O parametro 'addr' do hook e' o endereco FISICO; o LR do IRQ tem de ser
-        // o PC arquitetural (VA), senao o kernel volta para um VA inexistente.
-        uc_reg_read(uc, UC_ARM_REG_PC, &pc_va);
-        if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
-            g_irq_in_service = true;
-            ++g_irq_delivered;
-            const u32 nr = vic_pick_irq();       // cobre as duas palavras (0-63)
-            if (g_irq_log || g_irq_delivered <= 8u) {
-                std::printf("[irq] entregando IRQ %u em pc=0x%08x (hook=0x%08x) cpsr=0x%08x\n",
-                            nr, pc_va, static_cast<u32>(addr), cpsr);
-                std::fflush(stdout);
-            }
-            const u32 lr_ret = pc_va + 4u;
-            u32 irq_cpsr = (cpsr & ~0x3fu) | 0x12u | 0x80u;   // modo IRQ, I=1
-            uc_reg_write(uc, UC_ARM_REG_CPSR, &irq_cpsr);
-            uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
-            uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
-            u32 vec = 0xffff0000u + 0x18u;
-            uc_reg_write(uc, UC_ARM_REG_PC, &vec);
-            return;
-        }
-    }
+    // A entrada de excecao de IRQ vive no header compartilhado (peao usada pelos dois
+    // harnesses). Aqui e' so' o ponto de chamada.
+    if (deliver_irq(uc))
+        return;
     // Entrada do host (teclado/pipe) -> RX da UART do guest.
     if ((g_icount & 0x3FFFu) == 0u) rx_fill_from_host();
     rx_try_stage();
