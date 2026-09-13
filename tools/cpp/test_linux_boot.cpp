@@ -49,7 +49,14 @@ namespace {
 constexpr u32 APPS_RAM_PHYS = 0x10000000u;
 constexpr u32 APPS_RAM_SIZE = 0x06000000u;   // 96MB
 constexpr u32 UART1_BASE    = 0xa9a00000u;
-constexpr u32 UART2_BASE    = 0xa9c00000u;   // ttyMSM2: e' a porta que o driver registra
+// ATENCAO ao nome: 0xA9C00000 e' a **UART3** (MSM_UART3_PHYS, msm_iomap-7x00.h:72),
+// nao a UART2 (essa e' 0xA9B00000). Ela aparece como **ttyMSM2** porque o
+// platform_device msm_device_uart3 tem `.id = 2` (devices-msm7x00.c:90) e o
+// msm_serial nomeia a tty pelo id, nao pelo numero da UART. board-halibut.c so'
+// registra msm_device_uart3. Os identificadores abaixo mantem o sufixo 2 por
+// compatibilidade com o resto do arquivo, mas leia-os como "a UART do ttyMSM2".
+constexpr u32 UART3_PHYS    = 0xa9c00000u;   // MSM_UART3_PHYS
+constexpr u32 UART2_BASE    = UART3_PHYS;    // = ttyMSM2 (id=2), IRQ INT_UART3=11
 constexpr u32 UART3_BASE    = 0xa9e00000u;   // UART3 do MSM7201A (mesmo bloco, irq 12)
 constexpr u32 UART_BASES[3] = {UART1_BASE, UART2_BASE, UART3_BASE};
 constexpr u32 UART_SIZE     = 0x00010000u;
@@ -130,7 +137,7 @@ constexpr u32 VIC_NO_PEND      = 0xffffffffu;
 constexpr u32 INT_GP_TIMER    = 7u;
 constexpr u32 INT_MDP         = 19u;
 constexpr u32 INT_USB_HS      = 47u;   // palavra 1, bit 15
-constexpr u32 UART2_IRQ        = 11u;      // irq que o driver registra p/ ttyMSM2
+constexpr u32 UART2_IRQ        = 11u;      // INT_UART3 = 11 (a tty e' ttyMSM2, a UART e' a 3)
 
 static u32  g_vic_en[2]      = {0, 0};
 static u32  g_vic_pending[2] = {0, 0};
@@ -904,9 +911,13 @@ static void check_repeat_fault(uc_engine* uc, u32 pc, u32 addr, bool is_pabt) {
 }
 
 // --- Janela SDL2 (Wayland) com o console do guest ---------------------------
-// O guest ainda nao tem driver de framebuffer (TVENC nao portado), mas o console
-// dele (ttyMSM2 -> UART) ja e' integro: aqui ele vira uma janela de terminal no
-// host, e o teclado da janela e' injetado de volta no RX da UART.
+// Comentario desatualizado ate' 2026-09-13: o guest JA' TEM framebuffer. O msm_fb
+// sobe e o fbcon desenha (janela 1x2, painel direito). O que nao existe no 3.4.113
+// e' o **TVENC** (encoder de video composto), que so' aparece no android-msm-2.6.35
+// (drivers/staging/msm/tvenc.c); hoje dirigimos um fb generico em 0x15000000 e a
+// regiao 0xAA400000 fica mapeada mas inerte. Isso e' fidelidade, nao bloqueio.
+// O console (ttyMSM2 -> UART) continua integro e vira o painel esquerdo; o teclado
+// da janela e' injetado de volta no RX da UART.
 #if defined(ZEEBO_SDL)
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -1561,10 +1572,24 @@ static void on_intr(uc_engine* uc, uint32_t intno, void* ud) {
         if (g_pending_aborts.size() > 8) g_pending_aborts.erase(g_pending_aborts.begin());
     }
 }
+static bool g_pc_check_on = false;     // ZEEBO_PC_CHECK
+static bool g_pc_check_done = false;
+static void pc_check_run(uc_engine* uc);
+static void pc_check_poll(uc_engine* uc);
+
 static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     (void)uc;(void)size;(void)user;
     ++g_icount;
     g_last_pc = static_cast<u32>(addr);
+    // PC<->simbolo: so' faz sentido DEPOIS que o decompressor entregou o controle
+    // ao kernel descomprimido. NAO da' para latchar na entry (0x10008000): esse e'
+    // tambem o endereco onde o *zImage comprimido* comeca a rodar, entao o hook
+    // dispararia na primeira instrucao, com o texto ainda compactado. Latchamos em
+    // start_kernel (VA 0xc02994a0), que so' existe depois de descomprimir.
+    // Em vez de adivinhar um PC de latch (a entry 0x10008000 e' usada DUAS vezes:
+    // pelo zImage comprimido e depois pelo kernel), sondamos periodicamente ate' o
+    // texto descomprimido aparecer na memoria. Barato: 1x a cada 64k instrucoes.
+    if (g_pc_check_on && !g_pc_check_done && (g_icount & 0xFFFFu) == 0u) pc_check_poll(uc);
     // Timer: o clockevent one-shot do kernel (GPT, irq 7). Reflete o estado na
     // linha do VIC; a entrega de IRQ logo abaixo encontra o bit pendente.
     if ((g_icount & 0x3Fu) == 0u) timer_refresh_irq();
@@ -2511,6 +2536,75 @@ static const u32 FONT_PA = 0x102352b8u;
 // Guard barato contra VA podre: a font 8x16 do kernel comeca com o glifo 0 (todo
 // zero) seguido de bytes nao-triviais; se a janela inteira vier zerada ou 0xff, o
 // endereco esta' errado. Roda uma vez, so' quando o decodificador e' usado.
+
+// ---------------------------------------------------------------------------
+// Validacao do mapeamento PC<->simbolo.
+//
+// ARMADILHA: rodar isto antes de uc_emu_start nao vale NADA. Nesse instante a
+// memoria ainda contem o zImage *comprimido*; o texto do kernel so' existe depois
+// que o decompressor roda e salta para a entry em 0xc0008000. O check antigo
+// comparava contra lixo comprimido e "passava" sem significar nada.
+//
+// Os VAs vem do System.map do kernel em uso e APODRECEM a cada rebuild:
+//   grep -E ' (handshake|ehci_qtd_alloc|qh_urb_transaction|cfb_imageblit)$' System.map
+// Os bytes esperados vem do proprio vmlinux:
+//   arm-linux-gnueabi-objdump -s -j .text --start-address=0xVA --stop-address=0xVA+16 vmlinux
+
+static void pc_check_run(uc_engine* uc) {
+    if (g_pc_check_done) return;
+    g_pc_check_done = true;
+
+    struct Sym { const char* nome; u32 va; u32 w0; };
+    // primeira palavra (little-endian) de cada funcao, conferida no vmlinux do #21
+    static const Sym syms[] = {
+        {"handshake",          0xc01893dcu, 0xe92d45f8u},
+        {"ehci_qtd_alloc",     0xc018e91cu, 0xe92d4030u},
+        {"qh_urb_transaction", 0xc018ed88u, 0xe92d4ff0u},
+        {"cfb_imageblit",      0xc012b8fcu, 0xe92d4ff0u},
+    };
+
+    int ok = 0, bad = 0;
+    for (const Sym& s : syms) {
+        const u32 pa = s.va - 0xc0000000u + 0x10000000u;
+        u32 got = 0;
+        const uc_err e = uc_mem_read(uc, pa, &got, sizeof(got));
+        const bool hit = (e == UC_ERR_OK) && (got == s.w0);
+        hit ? ++ok : ++bad;
+        std::printf("[pc-check] %-20s VA=0x%08x PA=0x%08x esperado=%08x lido=%08x %s\n",
+                    s.nome, s.va, pa, s.w0, got,
+                    hit ? "OK" : (e == UC_ERR_OK ? "DIVERGE" : "ERRO DE LEITURA"));
+    }
+    std::printf("[pc-check] %d OK, %d divergencia(s)%s\n", ok, bad,
+                bad ? "  -- VA podre (rebuild?) ou kernel ainda comprimido" : "");
+    if (bad == 0)
+        std::printf("[pc-check] mapeamento PC<->simbolo confiavel: "
+                    "instrumento por PC vale para este kernel.\n");
+    std::fflush(stdout);
+}
+
+
+// Sonda: so' roda o check quando o texto descomprimido ja' esta' no lugar. Assim o
+// resultado nao depende de acertar um PC de latch, e nunca compara contra o zImage
+// ainda compactado (foi exatamente esse o defeito do instrumento antigo).
+static void pc_check_poll(uc_engine* uc) {
+    // O decompressor escreve o texto em ordem crescente de endereco, entao um unico
+    // simbolo-sentinela pega o kernel a meio caminho (medido: handshake ja' correto
+    // enquanto qh_urb_transaction ainda era lixo). Exigimos que TODOS os simbolos
+    // estejam no lugar antes de reportar -- so' ai' a descompressao terminou.
+    static const struct { u32 va; u32 w0; } sentinelas[] = {
+        {0xc012b8fcu, 0xe92d4ff0u},   // cfb_imageblit
+        {0xc01893dcu, 0xe92d45f8u},   // handshake
+        {0xc018e91cu, 0xe92d4030u},   // ehci_qtd_alloc
+        {0xc018ed88u, 0xe92d4ff0u},   // qh_urb_transaction  (o mais alto)
+    };
+    for (const auto& s : sentinelas) {
+        u32 probe = 0;
+        if (uc_mem_read(uc, s.va - 0xc0000000u + 0x10000000u, &probe, 4) != UC_ERR_OK)
+            return;
+        if (probe != s.w0) return;    // ainda comprimido / descompressao em curso
+    }
+    pc_check_run(uc);
+}
 static bool fb_font_looks_sane(uc_engine* uc) {
     u8 probe[256] = {0};
     if (uc_mem_read(uc, FONT_PA, probe, sizeof(probe)) != UC_ERR_OK) return false;
@@ -2816,6 +2910,16 @@ int main(int argc, char** argv) {
         // fechar aquilo o EHCI fica FORA por padrao; ZEEBO_USB=1 religa para trabalhar
         // no problema. (Antes era o contrario: ligado por padrao com ZEEBO_NOUSB=1.)
         if (std::getenv("ZEEBO_USB")) cmdline += " zeebo_usb=1";
+        // Epoch de RTC: o 3.4.113 do console sobe sem CONFIG_RTC_CLASS e a placa nao
+        // tem RTC modelado, entao o kernel comeca em 1970 e `date` mente. Nao ha
+        // hardware para emular aqui -- passamos a hora do host pela cmdline e o
+        // /init aplica com `date -s`. O timer (GPT/DGT) ja' e' correto; o que
+        // faltava era so' o ponto de partida. ZEEBO_EPOCH=0 desliga.
+        {
+            const char* ep = std::getenv("ZEEBO_EPOCH");
+            const long epoch = ep ? std::atol(ep) : (long)std::time(nullptr);
+            if (epoch > 0) cmdline += " zeebo_epoch=" + std::to_string(epoch);
+        }
         size_t clen = cmdline.size() + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
@@ -2838,23 +2942,8 @@ int main(int argc, char** argv) {
     // Validacao do mapeamento PC<->simbolo: le' o texto do kernel direto da memoria do
     // guest (VA 0xc0xxxxxx -> PA = VA - 0xc0000000 + 0x10000000) para comparar com o
     // objdump do vmlinux do container. Se nao bater, instrumento por PC nao vale.
-    if (std::getenv("ZEEBO_PC_CHECK")) {
-        struct { const char* nome; u32 va; } syms[] = {
-            {"qh_urb_transaction 0xc018ed78", 0xc018ed78u},
-            {"ehci_qtd_alloc     0xc018e90c", 0xc018e90cu},
-            {"ehci_urb_enqueue   0xc019013c", 0xc019013cu},
-            {"handshake          0xc01893cc", 0xc01893ccu},
-        };
-        for (auto& s : syms) {
-            const u32 pa = s.va - 0xc0000000u + 0x10000000u;
-            unsigned char b[16] = {0};
-            const uc_err e = uc_mem_read(uc, pa, b, sizeof(b));
-            std::printf("[pc-check] %s  PA=0x%08x err=%d bytes: ", s.nome, pa, (int)e);
-            for (int i = 0; i < 16; ++i) std::printf("%02x ", b[i]);
-            std::printf("\n");
-        }
-        std::fflush(stdout);
-    }
+    g_pc_check_on = (std::getenv("ZEEBO_PC_CHECK") != nullptr);
+    // (o pc-check real dispara no hook, na entry descomprimida -- ver pc_check_run())
 
     uc_err e = uc_emu_start(uc, KERNEL_LOAD, 0, 0, kInsnBudget);
     std::printf("[boot] parou: %s (%d) apos %llu instrucoes, last_pc=0x%08x\n",
