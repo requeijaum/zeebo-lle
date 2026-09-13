@@ -152,8 +152,12 @@ int main(int argc, char** argv) {
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
     uc_err e = uc_emu_start(uc, entry, 0, 0, g_budget);
-    std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes\n",
-                uc_strerror(e), (int)e, (unsigned long long)g_insn);
+    // O PC da parada e' o que diz ONDE o SO desistiu; sem ele o veredito so' aponta o
+    // sintoma. Resolve-se contra o kernel.nm do mesmo build.
+    u32 pc_stop = 0;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc_stop);
+    std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes; pc=0x%08x\n",
+                uc_strerror(e), (int)e, (unsigned long long)g_insn, pc_stop);
     std::printf("[xv6] aborts=%u; vetores=%u\n",
                 zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base);
 
