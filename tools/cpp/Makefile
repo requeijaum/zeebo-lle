@@ -554,6 +554,12 @@ test_o3_baremetal: test_o3_baremetal.cpp
 # CONTROLE NEGATIVO embutido: com ZEEBO_LK_NOPROC=1 (sem o stub do proc_comm) o lk nao pode
 # chegar ao banner; se esse caso passar, o gate esta' mentindo e o gate FALHA.
 # Fora dos agregados ate' decisao explicita de tier (mesma regra do xv6).
+# A imagem e' pequena (25 KB) e fica LOCAL; o BUILD dela e' no ryzen, porque a toolchain da era
+# (NDK r8e, gcc 4.6 EABI) foi movida para la' -- o disco deste host nao comporta 1,3 GB de toolchain:
+#   ssh ryzen "cd /mnt/200GB/lk-src && export PATH=<ndk>/arm-linux-androideabi-4.6/prebuilt/linux-x86_64/bin:$PATH && \
+#     rm -rf build-surf-test && make surf-test TOOLCHAIN_PREFIX=arm-linux-androideabi- \
+#     GLOBAL_CFLAGS=--sysroot=<ndk>/platforms/android-14/arch-arm"
+#   scp ryzen:/mnt/200GB/lk-src/build-surf-test/lk.bin ~/projects/lk-src/lk/build-surf-test/
 LK_KERNEL ?= $(HOME)/projects/lk-src/lk/build-surf-test/lk.bin
 
 test_weird_lk: test_weird_lk.cpp zeebo_msm_soc.h
