@@ -1901,3 +1901,49 @@ sadios ponta-a-ponta. O que faltava ao `date` era epoch de RTC, nao timer.
 Antes de suspeitar do modelo de hardware, **confira se o instrumento ainda esta'
 olhando para onde acha que olha**. Dois dos quatro itens abertos da fase evaporaram
 com um `grep` no `System.map`, e um deles ja' tinha virado entrada de ROADMAP.
+
+---
+
+## 2026-09-13 (2) — lista periodica, FRINDEX e `overlay.next`: o teclado HID chega na shell
+
+**Resultado**: digitar (`u n a m e` + Enter) chega na shell do guest. Prova no
+framebuffer, sem nenhum byte pela UART: `~ # uname` -> `Linux`.
+
+### 1. O motor so' percorria a lista assincrona
+O guest escrevia `PERIODICLISTBASE` (0x154) e ligava `USBCMD.PSE` (bit 4) e o modelo
+nao lia nenhum dos dois. Endpoint de **interrupcao** (o teclado) vive na lista
+**periodica**, nao na assincrona: sem ela o qTD do EP1 nunca era executado.
+
+### 2. Seguir so' o `hw_current` perde o primeiro qTD
+qH recem-armado: `hw_current = 0` e o qTD pendurado em `overlay.next` (+0x10), com o
+token Active. Medido antes do conserto: `cur=00000000 ovnext=138a4180 ovtok=00000000`
+com 12 relatorios na fila -- a varredura concluia "sem trabalho" e nao entregava nada.
+
+### 3. FRINDEX (0x14c) -- o que explicava o "so' o 1o relatorio passa"
+O `scan_periodic()` do guest monta a janela de varredura a partir de
+`ehci_read_frame_index()` (`ehci-sched.c:2305`) e anda de `next_uframe` ate'
+`clock_frame`. Com o registrador congelado em zero (nunca foi escrito nem
+sintetizado) o driver reexaminava **apenas o frame 0**; o qH do EP1 fica pendurado em
+alguns frames do frame list, entao nunca mais era revisitado. O primeiro relatorio
+passava porque a varredura inicial do enqueue percorre o anel inteiro. Depois da
+entrega #1 o guest escrevia `USBSTS <- 0x1` (ack do USBINT) e **nao armava mais
+nenhum qTD** -- dava para ver isso sem adivinhar: nenhuma varredura encontrava qTD
+Active. Agora o FRINDEX anda um frame por tick do motor.
+
+### 4. Duas correcoes de protocolo no motor
+- A conclusao e' espelhada no **overlay do qH** (o HCD le' ali, nao no qTD solto);
+  sem isso o `ehci_urb_dequeue` nunca via' a transferencia terminar.
+- O **periodico roda antes do assincrono**: o mesmo bloco de qTD era alcancavel pelas
+  duas varreduras e o assincrono o completava como control transfer.
+
+### Metodo (de novo, e vale repetir)
+O relatorio `-110` do config descriptor apontava para "janela do ASE no relink" ou
+"avanco do overlay". Nenhum dos dois: era a **lista inteira** que nao existia, mais um
+registrador de tempo (FRINDEX) que o driver usa para decidir o que varrer. Antes de
+modelar mais hardware, conferir **quais registradores o driver le' e o modelo ignora**.
+
+### O que NAO tem prova
+`hid_key_from_sdl` (SDL -> relatorio HID) esta' escrito mas nao foi exercitado com
+tecla real; o que esta' provado ponta-a-ponta e' a **fila de relatorios -> guest**
+(`ZEEBO_HID_TYPE`, mesmo caminho que o SDL alimenta). Gate novo: `make test-linux-hid`
+(com controle negativo: congelando o FRINDEX ele vai RED).

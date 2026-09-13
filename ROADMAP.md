@@ -1030,7 +1030,7 @@ o disco e o build falha com `error writing to /tmp/ccXXXX.s: Não há espaço di
 
 ---
 
-### Fase 16: Boot de Linux real (kernel 3.4.113) — [EM CURSO; HID pendente]
+### Fase 16: Boot de Linux real (kernel 3.4.113) — [CRITÉRIO DA FASE ATINGIDO 2026-09-13]
 
 Linha `linux-boot`: bootar um kernel Linux real no LLE, com rootfs limpo e shell
 funcional, saída no framebuffer e janela de depuração. É o caminho mais rápido para
@@ -1070,12 +1070,34 @@ quarta se revelou falsa:
   e imprimia um ponteiro repetido 16x. A paleta sempre esteve correta. O mesmo
   valia para a tabela `kDraw[]` (daí `cfb_imageblit=0` com `fbcon_putcs=60`).
 
-**Pendente (critério da fase)**: o **config descriptor completo** (34 B) ainda
-estoura em `-110` — o SETUP dele nunca chega ao motor, o que aponta para a janela em
-que o HCD desliga `USBCMD.ASE` ao relinkar, ou para o avanço do overlay a partir de
-`hw_current`, que o hardware real faz e o modelo não. Depois disso faltam o endpoint
-de interrupção e o bind do `usbhid`. **O EHCI está fora por padrão** até lá
-(`ZEEBO_USB=1` religa), porque ligado ele re-tenta em laço e polui o console.
+**RESOLVIDO em 2026-09-13 — o critério da fase está atingido**: digitar no teclado
+chega na shell do guest. Prova no framebuffer, **sem nenhum byte pela UART**:
+`~ # uname` → `Linux`. Eram **três bugs, todos no modelo, nenhum no kernel**:
+1. O motor só percorria a lista **assíncrona**. O guest escrevia `PERIODICLISTBASE`
+   (0x154) e `USBCMD.PSE` e nada era lido: o endpoint de interrupção do teclado vive
+   na lista **periódica**, que não existia.
+2. O qH recém-armado pendura o qTD em `overlay.next` com `hw_current = 0`; seguir só
+   o `hw_current` concluía "não há trabalho" **com a fila de teclas cheia** (medido:
+   `cur=00000000 ovnext=138a4180 ovtok=00000000`).
+3. **FRINDEX (0x14c) nunca foi implementado.** O `scan_periodic()` do guest monta a
+   janela de varredura a partir dele (`ehci-sched.c:2305`); com o registrador
+   congelado em zero o driver reexaminava apenas o frame 0, e o qH do EP1 — que fica
+   pendurado em alguns frames do frame list — **nunca mais era revisitado**. O 1º
+   relatório era entregue (a varredura inicial do enqueue percorre o anel inteiro) e
+   os outros 11 ficavam na fila para sempre. Agora o FRINDEX anda um frame por tick
+   do motor.
+
+Também corrigido: o motor espelha a conclusão no **overlay do qH** (o HCD lê ali, não
+no qTD solto) e o **periódico roda antes do assíncrono** (o mesmo bloco de qTD era
+alcançável pelas duas varreduras e o assíncrono o completava como control transfer).
+
+**O que ainda NÃO tem prova**: o caminho `SDL → relatório HID`
+(`hid_key_from_sdl`) está escrito mas não foi exercitado com uma tecla real — o que
+está provado ponta-a-ponta é a **fila de relatórios → guest**. A tabela do caminho de
+UART segue coberta por 18 casos (`test-linux-keys`).
+
+**O EHCI continua fora por padrão** (`ZEEBO_USB=1` religa): ligado custa orçamento de
+boot e o teclado não é preciso para os outros alvos.
 
 **Relógio de parede validado**: `date +%s` vai de 44 a 48 atravessando um `sleep 2`,
 `/proc/uptime` 49.53 — GPT/DGT estão sadios.
@@ -1089,9 +1111,9 @@ Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
 `testdata/kernel-patches/`.
 
 **Política de branch (decisão de 2026-09-13)**: este trabalho fica na branch
-`linux-boot`, separado da `master`, **até os problemas em aberto da fase estarem
-resolvidos** (hoje: só o HID — a flakiness do fbcon era um instrumento com VA
-podre, não um defeito do driver). Só depois se discute
+`linux-boot`, separado da `master`. Os problemas em aberto da fase **fecharam**: o
+HID está resolvido (a flakiness do fbcon era um instrumento com VA podre, não um
+defeito do driver). Falta decidir a integração. Só depois se discute
 integrar na `master`. A `master` segue como a linha do boot de firmware/BREW.
 
 ---

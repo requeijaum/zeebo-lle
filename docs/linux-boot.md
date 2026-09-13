@@ -84,7 +84,8 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 
 ## Estado verificado
 
-- Kernel boota até a shell BusyBox com `/proc` montado; keypad do host chega na shell.
+- Kernel boota até a shell BusyBox com `/proc` montado; a UART do host chega na
+  shell, e agora também o **teclado USB emulado** (ver abaixo).
 - `Console: switching to colour frame buffer device 90x30`; o texto do console de VT
   aparece na memória de framebuffer (conferido com `ZEEBO_FB_TEXT=1`).
 - Janela SDL2/Wayland **1x2**: painel esquerdo = UART (`ttyMSM2`), direito =
@@ -92,12 +93,15 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
   releitura do FB só quando o guest escreve nele (~55 fps efetivos medidos).
 - Host controller USB: `new USB bus registered, assigned bus number 1` e o hub
   **enumera** o dispositivo (`usb 1-1: new high-speed USB device number 2`).
-- Pendente (objetivo): **teclado HID enumerado**. O hub para em
-  `device descriptor read/64, error -110` porque falta o motor de transferência —
-  executar os qTD da lista assíncrona do EHCI, escrever status/bytes de volta,
-  levantar `USBSTS.USBINT` e entregar a IRQ 47 (`INT_USB_HS`; hoje o VIC só entrega
-  IRQs 0-31 — os dois pontos a mudar estão mapeados em `testdata/kernel-patches/usb-ehci-msm.md`),
-  mais os descritores do HID (device/config/report) e o endpoint de interrupção.
+- **Teclado USB emulado: tecla do host chega na shell do guest** (2026-09-13). Prova
+  no framebuffer e **sem nada pela UART**: `~ # uname` → `Linux`. O `usbhid` faz bind,
+  nasce `input0`/`event0` e os relatórios HID chegam pelo endpoint de interrupção.
+  - `cat /proc/bus/input/devices` → `N: Name="Zeebo-L LLE Keyboa"`,
+    `H: Handlers=sysrq kbd event0`, `B: EV=120013`.
+  - Três peças faltavam no modelo: a **lista periódica** (`PERIODICLISTBASE` + `PSE`),
+    o qTD armado em **`overlay.next`** com `hw_current = 0`, e o **FRINDEX (0x14c)** —
+    sem ele o `scan_periodic()` do guest reexaminava só o frame 0 e só o 1º relatório
+    era entregue. Detalhe em `ROADMAP.md`, Fase 16.
 
 ## Lições que custaram tempo
 
@@ -115,8 +119,8 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 ## Branch e próximos passos
 
 **Este trabalho vive na branch `linux-boot`** (decisão de 2026-09-13), separado da
-`master`, **até os problemas em aberto estarem resolvidos** — hoje só o teclado HID.
-Só depois se discute integrar. A `master` segue como a linha do boot de firmware/BREW.
+`master`. Os problemas em aberto **fecharam** (2026-09-13). Falta decidir a
+integração. A `master` segue como a linha do boot de firmware/BREW.
 
 ### Armadilha: VA de símbolo de kernel em instrumento
 
