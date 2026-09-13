@@ -1060,6 +1060,59 @@ HID (device/config/report) e o endpoint de interrupção para as teclas.
 Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
 `testdata/kernel-patches/`.
 
+**Política de branch (decisão de 2026-09-13)**: este trabalho fica na branch
+`linux-boot`, separado da `master`, **até os problemas em aberto da fase estarem
+resolvidos** (hoje: o HID; ver também a flakiness do fbcon). Só depois se discute
+integrar na `master`. A `master` segue como a linha do boot de firmware/BREW.
+
+---
+
+### Fase 17: Outros sistemas operacionais no LLE — [PLANEJADA; depende da Fase 16]
+
+Decisão de 2026-09-13: **assim que o Linux estiver OK, bootar outros sistemas
+operacionais no emulador**. O objetivo não é colecionar bootscreens — é usar cada SO
+como um *teste de conformidade independente* do modelo de hardware.
+
+**Por que isso melhora a emulação LLE.** Um único SO só prova que o modelo é bom o
+bastante para *aquele* SO — inclusive para os bugs dele. A Fase 16 já demonstrou o
+efeito: foi o Linux que expôs a identidade errada da CPU (ARM1176 → ARM1136), o FSR
+de escrita (`0x807`), o `ehci-msm` stub e o CAPLENGTH do EHCI. Um segundo SO exercita
+os mesmos periféricos por **caminhos de código diferentes** (outra ordem de init,
+outros registradores lidos, outro uso de MMU/cache/IRQ), e cada divergência aponta um
+lugar onde o modelo está frouxo. É o mesmo princípio do lockstep do dynarec, aplicado
+ao SoC inteiro.
+
+**Critério de "boot" para cada alvo** (mesmo rigor da Fase 16, sem trapaça): saída de
+console legível + inicialização até um prompt/loop interativo + framebuffer quando o SO
+tiver um. Falha honesta com causa raiz identificada vale mais que sucesso forçado.
+
+**Alvos, do mais barato ao mais caro:**
+
+1. **Linux 2.6.29 (período correto)** — o log de boot real do Zeebo (Fausto) é um
+   `2.6.29-zeebo`. É o alvo de maior valor imediato: dá para comparar o boot do
+   emulador **linha a linha** contra um boot de hardware real. Hoje o L1/L2 passa e o
+   L3 está mudo; entender por quê é dívida já aberta.
+2. **Android 1.6 / 2.x sobre esse kernel** — o MSM7201A é o SoC do HTC Dream/G1, então
+   existe um userspace historicamente compatível. Exercita init/ashmem/binder/logger e
+   o framebuffer de verdade.
+3. **NetBSD/evbarm** — outra família de SO inteira, tradicionalmente portável e com
+   bring-up bem documentado; melhor custo-benefício entre os não-Linux.
+4. **Windows CE 6.0 / Windows Mobile 6.5** — período e plataforma corretos (o
+   MSM7201A é chip de WinMo). Caro e sem fonte, mas é o teste mais adversarial que
+   existe para o modelo de MMU/IRQ/timer.
+5. **Núcleos pequenos como controle positivo** — RTOS/microkernel enxuto (p.ex. um
+   kernel didático ARMv6 ou um L4 livre). Bootam rápido e servem de **controle**: se um
+   núcleo de 50 KB não sobe, o problema é do modelo, não da complexidade do SO.
+
+**Restrições que continuam valendo**: nada de copiar fonte de terceiros para dentro do
+repo (ver `PUBLIC_DISCLOSURE_TODO.md`); imagens de SO não entram no versionamento —
+só o harness, os patches e a receita de build, como já é feito em
+`testdata/kernel-patches/`. Alvos sem licença livre são executados a partir de imagem
+do próprio usuário, nunca redistribuídos.
+
+**Pré-requisito**: Fase 16 fechada (teclado HID enumerando), porque o teclado é o que
+torna qualquer um desses SOs *interativo* — sem ele o teste vira observação passiva.
+
 ---
 
 ## Próximos Passos Priorizados — vertical slice Double Dragon **[HISTÓRICO]**

@@ -111,3 +111,19 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 3. `ASYNCLISTADDR` aponta para o `struct ehci_qh_hw` (bloco DMA só de hardware); a
    `qtd_list` de software fica no `struct ehci_qh`, inalcançável por ali.
 4. O `ehci-msm` do 3.4 é um stub: cria o HCD e retorna sem chamar `usb_add_hcd`.
+
+## Branch e próximos passos
+
+**Este trabalho vive na branch `linux-boot`** (decisão de 2026-09-13), separado da
+`master`, **até os problemas em aberto estarem resolvidos** — hoje o teclado HID e a
+flakiness do fbcon. Só depois se discute integrar. A `master` segue como a linha do
+boot de firmware/BREW.
+
+Depois que o Linux estiver OK, a continuação planejada é a **Fase 17 do ROADMAP:
+bootar outros sistemas operacionais** neste mesmo harness (Linux 2.6.29 do período,
+Android 1.6/2.x, NetBSD/evbarm, Windows CE/Mobile, e núcleos pequenos como controle
+positivo). A ideia é usar cada SO como teste de conformidade independente do modelo de
+hardware: caminhos de init diferentes encostam em registradores diferentes, e foi
+exatamente assim que esta fase achou a CPU errada, o FSR de escrita e o CAPLENGTH do
+EHCI. Quem for estender o harness deve manter os modelos genéricos (do lado do
+*hardware*), sem condicionais específicas de um SO.
