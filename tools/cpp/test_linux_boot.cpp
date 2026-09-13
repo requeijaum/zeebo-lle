@@ -81,6 +81,26 @@ using zeebo_msm::TVENC_SIZE;
 using zeebo_msm::guest_read_u32;
 using zeebo_msm::guest_read_bytes;
 using zeebo_msm::arm_ls_fault_addr;
+using zeebo_msm::VIC_OFF_ENCLEAR0;
+using zeebo_msm::VIC_OFF_ENSET0;
+using zeebo_msm::VIC_OFF_STATUS0;
+using zeebo_msm::VIC_OFF_CLEAR0;
+using zeebo_msm::VIC_OFF_VEC_RD;
+using zeebo_msm::VIC_OFF_VEC_PEND;
+using zeebo_msm::VIC_NO_PEND;
+using zeebo_msm::INT_GP_TIMER;
+using zeebo_msm::INT_MDP;
+using zeebo_msm::INT_USB_HS;
+using zeebo_msm::UART2_IRQ;
+using zeebo_msm::g_vic_en;
+using zeebo_msm::g_vic_pending;
+using zeebo_msm::g_irq_in_service;
+using zeebo_msm::g_irq_delivered;
+using zeebo_msm::g_irq_log;
+using zeebo_msm::g_vic_cursor;
+using zeebo_msm::on_vic_write;
+using zeebo_msm::on_vic_read;
+using zeebo_msm::vic_pick_irq;
 
 // Onde o zImage ARM e tipicamente carregado: base da RAM + 0x8000.
 constexpr u32 KERNEL_LOAD   = APPS_RAM_PHYS + 0x8000u;
@@ -115,30 +135,6 @@ static bool g_uart_log = false;
 static inline int uart_idx(u32 base) {
     return (base == UART1_BASE) ? 0 : ((base == UART2_BASE) ? 1 : 2);
 }
-
-// --- VIC do MSM7x00 (modelo minimo para poder entregar IRQ ao guest) --------
-// Fonte: arch/arm/mach-msm/irq.c + include/mach/entry-macro.S. O entry-macro le
-// 0xD0 e depois 0xD4 (numero da IRQ pendente; 0xffffffff = nenhuma).
-constexpr u32 VIC_OFF_ENCLEAR0 = 0x0020u;
-constexpr u32 VIC_OFF_ENSET0   = 0x0030u;
-constexpr u32 VIC_OFF_STATUS0  = 0x0080u;
-constexpr u32 VIC_OFF_CLEAR0   = 0x00b0u;
-constexpr u32 VIC_OFF_VEC_RD   = 0x00d0u;
-constexpr u32 VIC_OFF_VEC_PEND = 0x00d4u;
-constexpr u32 VIC_NO_PEND      = 0xffffffffu;
-
-// Numeros de IRQ (arch/arm/mach-msm/include/mach/irqs-7x00.h). Ficam aqui, junto do
-// VIC, porque o seletor de 64 linhas e o seu auto-teste precisam deles.
-constexpr u32 INT_GP_TIMER    = 7u;
-constexpr u32 INT_MDP         = 19u;
-constexpr u32 INT_USB_HS      = 47u;   // palavra 1, bit 15
-constexpr u32 UART2_IRQ        = 11u;      // INT_UART3 = 11 (a tty e' ttyMSM2, a UART e' a 3)
-
-static u32  g_vic_en[2]      = {0, 0};
-static u32  g_vic_pending[2] = {0, 0};
-static bool g_irq_in_service = false;
-static u32  g_irq_delivered  = 0;
-static bool g_irq_log        = false;
 
 static inline u32 uart_irq_of(int idx) { return (idx == 0) ? 10u : ((idx == 1) ? UART2_IRQ : 12u); }
 
@@ -182,67 +178,6 @@ static void rx_try_stage() {
     uart_update_irq();
     if (g_uart_log)
         std::printf("[rx] entregando 0x%02x\n", (unsigned char)g_rx_char);
-}
-
-static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                         int size, int64_t value, void* ud) {
-    (void)uc; (void)type; (void)size; (void)ud;
-    const u32 off = static_cast<u32>(addr) - VIC_BASE;
-    const u32 v = static_cast<u32>(value);
-    switch (off) {
-        case VIC_OFF_ENSET0:        g_vic_en[0] |= v; break;
-        case VIC_OFF_ENSET0 + 4:    g_vic_en[1] |= v; break;
-        case VIC_OFF_ENCLEAR0:      g_vic_en[0] &= ~v; break;
-        case VIC_OFF_ENCLEAR0 + 4:  g_vic_en[1] &= ~v; break;
-        case VIC_OFF_CLEAR0:                       // ack: o kernel ja tratou
-            g_vic_pending[0] &= ~v;
-            g_irq_in_service = false;
-            break;
-        case VIC_OFF_CLEAR0 + 4:
-            g_vic_pending[1] &= ~v;
-            g_irq_in_service = false;          // idem palavra 0: sem isto a IRQ 47
-            break;                             // (USB HS) trava apos a 1a entrega
-        default: break;
-    }
-    if (g_irq_log)
-        std::printf("[vic] W off=0x%03x val=0x%08x -> en0=0x%08x pend0=0x%08x\n",
-                    off, v, g_vic_en[0], g_vic_pending[0]);
-}
-
-static u32  g_vic_cursor = 0;      // round-robin: sem isso a IRQ de menor
-                                   // numero (timer=7) starva as outras (MDP=19)
-
-// Seleciona a proxima IRQ ativa cobrindo as DUAS palavras (0-63). O VIC do MSM tem 64
-// linhas; USB HS = 47 (palavra 1, bit 15). Antes daqui so' a palavra 0 era varrida e
-// qualquer IRQ >= 32 ficava pendente para sempre.
-static u32 vic_pick_irq() {
-    const u32 act0 = g_vic_pending[0] & g_vic_en[0];
-    const u32 act1 = g_vic_pending[1] & g_vic_en[1];
-    if (!act0 && !act1) return VIC_NO_PEND;
-    for (u32 i = 0; i < 64u; ++i) {
-        const u32 b = (g_vic_cursor + i) & 63u;
-        const u32 act = (b < 32u) ? act0 : act1;
-        if (act & (1u << (b & 31u))) { g_vic_cursor = (b + 1u) & 63u; return b; }
-    }
-    return VIC_NO_PEND;
-}
-
-static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
-                        int size, int64_t value, void* ud) {
-    (void)type; (void)size; (void)value; (void)ud;
-    const u32 off = static_cast<u32>(addr) - VIC_BASE;
-    const u32 act = g_vic_pending[0] & g_vic_en[0];
-    u32 val = 0;
-    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND) {
-        val = vic_pick_irq();
-    }
-    else if (off == VIC_OFF_STATUS0)     val = act;
-    else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
-    else if (off == VIC_OFF_ENSET0)      val = g_vic_en[0];
-    else if (off == VIC_OFF_ENSET0 + 4)  val = g_vic_en[1];
-    if (g_irq_log)
-        std::printf("[vic] R off=0x%03x -> 0x%08x\n", off, val);
-    uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
 }
 
 void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,

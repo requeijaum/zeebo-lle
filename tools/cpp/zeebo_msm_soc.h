@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include <unicorn/unicorn.h>
@@ -194,6 +195,92 @@ inline u32 arm_ls_fault_addr(uc_engine* uc, u32 pc, bool* decoded, bool* is_writ
         return P ? (U ? base + off : base - off) : base;
     }
     return base;                                     // melhor esforco
+}
+
+// --- VIC do MSM7x00 (2 bancos, 64 linhas) ----------------------------------
+// Offsets da fonte primaria (Cinder, kern/dev/msm_irqreg.h) — nao os do header do
+// zloader. Sao os que um driver de kernel REAL programa, e foi com eles que o boot do
+// Linux passou a receber interrupcao. O modelo principal do emulador usa outra tabela
+// (+0x0000/+0x18/+0x28); essa divergencia esta' registrada e NAO foi resolvida ainda.
+constexpr u32 VIC_OFF_ENCLEAR0 = 0x0020u;
+constexpr u32 VIC_OFF_ENSET0   = 0x0030u;
+constexpr u32 VIC_OFF_STATUS0  = 0x0080u;
+constexpr u32 VIC_OFF_CLEAR0   = 0x00b0u;
+constexpr u32 VIC_OFF_VEC_RD   = 0x00d0u;
+constexpr u32 VIC_OFF_VEC_PEND = 0x00d4u;
+constexpr u32 VIC_NO_PEND      = 0xffffffffu;
+
+// Numeros de IRQ (arch/arm/mach-msm/include/mach/irqs-7x00.h). O GPT e' a IRQ 7 — o
+// modelo principal do emulador usa 8 e o proprio header dele admite nao ter fonte.
+constexpr u32 INT_GP_TIMER = 7u;
+constexpr u32 INT_MDP      = 19u;
+constexpr u32 INT_USB_HS   = 47u;   // palavra 1, bit 15
+constexpr u32 UART2_IRQ    = 11u;   // INT_UART3 = 11 (a tty e' ttyMSM2, a UART e' a 3)
+
+inline u32  g_vic_en[2]      = {0, 0};
+inline u32  g_vic_pending[2] = {0, 0};
+inline bool g_irq_in_service = false;
+inline u32  g_irq_delivered  = 0;
+inline bool g_irq_log        = false;
+inline u32  g_vic_cursor     = 0;   // round-robin: sem isso a IRQ de menor
+                                    // numero (timer=7) starva as outras (MDP=19)
+
+inline void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                         int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 off = static_cast<u32>(addr) - VIC_BASE;
+    const u32 v = static_cast<u32>(value);
+    switch (off) {
+        case VIC_OFF_ENSET0:        g_vic_en[0] |= v; break;
+        case VIC_OFF_ENSET0 + 4:    g_vic_en[1] |= v; break;
+        case VIC_OFF_ENCLEAR0:      g_vic_en[0] &= ~v; break;
+        case VIC_OFF_ENCLEAR0 + 4:  g_vic_en[1] &= ~v; break;
+        case VIC_OFF_CLEAR0:                       // ack: o kernel ja tratou
+            g_vic_pending[0] &= ~v;
+            g_irq_in_service = false;
+            break;
+        case VIC_OFF_CLEAR0 + 4:
+            g_vic_pending[1] &= ~v;
+            g_irq_in_service = false;          // idem palavra 0: sem isto a IRQ 47
+            break;                             // (USB HS) trava apos a 1a entrega
+        default: break;
+    }
+    if (g_irq_log)
+        std::printf("[vic] W off=0x%03x val=0x%08x -> en0=0x%08x pend0=0x%08x\n",
+                    off, v, g_vic_en[0], g_vic_pending[0]);
+}
+
+// Seleciona a proxima IRQ ativa cobrindo as DUAS palavras (0-63). O VIC do MSM tem 64
+// linhas; USB HS = 47 (palavra 1, bit 15). Antes so' a palavra 0 era varrida e qualquer
+// IRQ >= 32 ficava pendente para sempre.
+inline u32 vic_pick_irq() {
+    const u32 act0 = g_vic_pending[0] & g_vic_en[0];
+    const u32 act1 = g_vic_pending[1] & g_vic_en[1];
+    if (!act0 && !act1) return VIC_NO_PEND;
+    for (u32 i = 0; i < 64u; ++i) {
+        const u32 b = (g_vic_cursor + i) & 63u;
+        const u32 act = (b < 32u) ? act0 : act1;
+        if (act & (1u << (b & 31u))) { g_vic_cursor = (b + 1u) & 63u; return b; }
+    }
+    return VIC_NO_PEND;
+}
+
+inline void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                        int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 off = static_cast<u32>(addr) - VIC_BASE;
+    const u32 act = g_vic_pending[0] & g_vic_en[0];
+    u32 val = 0;
+    if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND) {
+        val = vic_pick_irq();
+    }
+    else if (off == VIC_OFF_STATUS0)     val = act;
+    else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
+    else if (off == VIC_OFF_ENSET0)      val = g_vic_en[0];
+    else if (off == VIC_OFF_ENSET0 + 4)  val = g_vic_en[1];
+    if (g_irq_log)
+        std::printf("[vic] R off=0x%03x -> 0x%08x\n", off, val);
+    uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
 }
 
 }  // namespace zeebo_msm
