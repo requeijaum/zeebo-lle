@@ -560,10 +560,16 @@ XV6_KERNEL ?= $(HOME)/projects/zeebo_weird_os/build/xv6-zeebo/kernel.bin
 test_weird_xv6: test_weird_xv6.cpp zeebo_msm_soc.h
 	$(CXX) $(CXXFLAGS) -o $@ test_weird_xv6.cpp -lunicorn
 
-# Teto 8M, nao 60M. Duas razoes medidas: os 4 marcos do oraculo ja' aparecem por volta de 5M,
-# e a partir de ~10M o run entra numa fase ~60x mais lenta (laço do alocador do guest; ver
-# ROADMAP do zeebo_weird_os). O gate verifica o ORACULO, nao o regime permanente: 8M fecha em
-# ~1 s e continua pegando regressao nos marcos. Run profundo e' a mao, com teto maior.
+# Teto 8M, nao 60M. Os 4 marcos do oraculo ja' aparecem por volta de 5M, e o gate verifica o
+# ORACULO, nao o regime permanente: 8M fecha em ~1 s e continua pegando regressao nos marcos.
+# Run profundo e' a mao, com teto maior.
+#
+# CORRECAO (rodada 6, medida): nao existe "fase 60x mais lenta". A taxa e' ESTAVEL em ~25 M
+# instrucoes/s; o que existe e' um TRAVAMENTO em ~10,6 M: o contador para de todo, com 100% de
+# um core, no *fill* de traducao de CODIGO. Causa raiz: o pgdir do processo nasce sem o mapa do
+# kernel (o port nao tem setupkvm), entao o kernel perde a propria traducao no primeiro
+# `switchuvm` e morre na primeira pagina nao cacheada -- dentro do `exec`. Ver ROADMAP do
+# zeebo_weird_os.
 test-weird-xv6: test_weird_xv6
 	@echo '--- xv6-zeebo: SO bare-metal no modelo real do MSM7201A ---'
 	@out=`ZEEBO_XV6_KERNEL=$(XV6_KERNEL) ZEEBO_BUDGET=8000000 ./test_weird_xv6 2>&1`; \

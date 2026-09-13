@@ -16,6 +16,8 @@
 // caminho por env. Sem imagem, sai 77 = SKIP e o alvo do Makefile trata.
 #include <chrono>
 #include <csignal>
+#include <execinfo.h>
+#include <ucontext.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -57,8 +59,82 @@ static u64  g_progress_every = 2000000ull;
 // nem progresso para consultar (e o gdb nao anexa sem ptrace_scope). Com isto, um SIGTERM
 // imprime PC/contagem/anel no instante exato -- que e' o que diz ONDE ele esta'.
 static uc_engine* g_uc_global = nullptr;
-static void on_signal_dump(int sig) {
-    (void)sig;
+// Caminha a tabela do guest e PROCURA CICLO. O host backtrace mostrou o emulador girando
+// em get_phys_addr_arm/tb_htable_lookup (pagina de CODIGO): walk que nao termina e' o
+// sintoma de descritor ciclico/espurio. Aqui eu leio os descritores e denuncio o ciclo.
+static void dump_walk(uc_engine* uc, u32 va) {
+    uc_arm_cp_reg r0 = {15, 0, 0, 2, 0, 0, 0, 0};
+    uc_arm_cp_reg r1 = {15, 0, 0, 2, 0, 0, 1, 0};
+    uc_arm_cp_reg rc = {15, 0, 0, 2, 0, 0, 2, 0};
+    if (uc_reg_read(uc, UC_ARM_REG_CP_REG, &r0) != UC_ERR_OK) return;
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &r1);
+    uc_reg_read(uc, UC_ARM_REG_CP_REG, &rc);
+    u32 ttbr0 = (u32)r0.val, ttbr1 = (u32)r1.val, ttbcr = (u32)rc.val;
+    u32 n = ttbcr & 7u;
+    u32 split = (n == 0u) ? 0u : (0x80000000u >> (n - 1u));
+    u32 pgdb = (((n == 0u) || (va < split)) ? ttbr0 : ttbr1) & 0xffffc000u;
+    std::printf("[WALK] va=0x%08x ttbr0=0x%08x ttbr1=0x%08x ttbcr=0x%08x pgdb=0x%08x\n",
+                va, ttbr0, ttbr1, ttbcr, pgdb);
+    // Lista as ENTRADAS PRESENTES da L1: e' o mapa da tabela, e diz na hora se o kernel
+    // (VA >= 0x10000000, indice >= 257) esta' mapeado no pgdir que esta' ativo.
+    {
+        u32 presentes = 0, mostrados = 0;
+        for (u32 i = 0; i < 4096u; ++i) {
+            u32 e = 0;
+            if (uc_mem_read(uc, pgdb + i * 4u, &e, 4) != UC_ERR_OK) break;
+            if ((e & 3u) == 0u) continue;
+            ++presentes;
+            if (mostrados < 10u) {
+                std::printf("[WALK] L1[%u] (VA 0x%08x+) = 0x%08x tipo=%u\n",
+                            i, i << 20, e, e & 3u);
+                ++mostrados;
+            }
+        }
+        std::printf("[WALK] entradas presentes na L1: %u de 4096\n", presentes);
+    }
+    u32 l1addr = pgdb + ((va >> 20) & 0xfffu) * 4u;
+    u32 l1 = 0;
+    if (uc_mem_read(uc, l1addr, &l1, 4) != UC_ERR_OK) { std::printf("[WALK] l1 ilegivel\n"); return; }
+    std::printf("[WALK] L1@0x%08x = 0x%08x (tipo=%u)\n", l1addr, l1, l1 & 3u);
+    if ((l1 & 3u) != 1u) return;
+    u32 l2 = l1 & 0xfffffc00u;
+    u32 pte = 0;
+    u32 pteaddr = l2 + ((va >> 12) & 0xffu) * 4u;
+    if (uc_mem_read(uc, pteaddr, &pte, 4) != UC_ERR_OK) { std::printf("[WALK] L2 ilegivel\n"); return; }
+    std::printf("[WALK] L2@0x%08x PTE@0x%08x = 0x%08x (tipo=%u)\n", l2, pteaddr, pte, pte & 3u);
+    // CICLO: algum descritor da L2 apontando de volta para a L1 ou para ela mesma?
+    u32 selfhits = 0, l1hits = 0;
+    for (u32 i = 0; i < 256u; ++i) {
+        u32 e = 0;
+        if (uc_mem_read(uc, l2 + i * 4u, &e, 4) != UC_ERR_OK) break;
+        if ((e & 3u) == 1u) {
+            if ((e & 0xfffffc00u) == l2) { if (selfhits < 3u) std::printf("[WALK] ** CICLO: L2[%u]=0x%08x aponta para SI mesma\n", i, e); ++selfhits; }
+            if ((e & 0xfffffc00u) == pgdb) { if (l1hits < 3u) std::printf("[WALK] ** CICLO: L2[%u]=0x%08x aponta para a L1\n", i, e); ++l1hits; }
+        }
+    }
+    std::printf("[WALK] resumo: auto-referencias=%u referencias-a-L1=%u\n", selfhits, l1hits);
+}
+
+static void on_signal_dump(int sig, siginfo_t* si, void* uctx) {
+    (void)sig; (void)si;
+    // O PC do GUEST diz onde o guest esta'. O PC do HOST diz onde o EMULADOR esta' -- e e' esse
+    // que importa quando o contador de instrucoes para: gira dentro de uma chamada do motor.
+    void* host_pc = nullptr;
+    if (uctx) {
+        ucontext_t* c = (ucontext_t*)uctx;
+        host_pc = (void*)(uintptr_t)c->uc_mcontext.gregs[REG_RIP];
+    }
+    {
+        char b[160];
+        int n = std::snprintf(b, sizeof(b), "[HOST] pc=%p\n", host_pc);
+        if (n > 0) std::fwrite(b, 1, (size_t)n, stdout);
+    }
+    {
+        void* bt[20];
+        int n = backtrace(bt, 20);
+        backtrace_symbols_fd(bt, n, 1);
+    }
+    std::fflush(stdout);
     u32 pc = 0, cpsr = 0;
     if (g_uc_global) {
         uc_reg_read(g_uc_global, UC_ARM_REG_PC, &pc);
@@ -74,6 +150,10 @@ static void on_signal_dump(int sig) {
         std::fwrite(buf, 1, 9, stdout);
     }
     std::fwrite("\n", 1, 1, stdout);
+    if (g_uc_global) {
+        dump_walk(g_uc_global, pc);
+        dump_walk(g_uc_global, 0x10108158u);   // o PC do travamento medido
+    }
     std::fflush(stdout);
     std::_Exit(2);
 }
@@ -274,8 +354,12 @@ int main(int argc, char** argv) {
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
     g_uc_global = uc;
-    std::signal(SIGTERM, on_signal_dump);
-    std::signal(SIGINT, on_signal_dump);
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_signal_dump;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
     uc_err e = uc_emu_start(uc, entry, 0, 0, g_budget);
     // O PC da parada e' o que diz ONDE o SO desistiu; sem ele o veredito so' aponta o
     // sintoma. Resolve-se contra o kernel.nm do mesmo build.
