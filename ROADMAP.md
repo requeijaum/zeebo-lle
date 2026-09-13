@@ -1110,11 +1110,12 @@ decodificador de FB tem guard que avisa quando o VA da fonte deixa de fazer sent
 Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
 `testdata/kernel-patches/`.
 
-**Política de branch (decisão de 2026-09-13)**: este trabalho fica na branch
-`linux-boot`, separado da `master`. Os problemas em aberto da fase **fecharam**: o
-HID está resolvido (a flakiness do fbcon era um instrumento com VA podre, não um
-defeito do driver). Falta decidir a integração. Só depois se discute
-integrar na `master`. A `master` segue como a linha do boot de firmware/BREW.
+**Política de branch (decisão de 2026-09-13, revisada no mesmo dia)**: o trabalho
+viveu na branch `linux-boot`, separado da `master`, enquanto a fase tinha problema
+em aberto. Os problemas **fecharam** (o HID está resolvido; a flakiness do fbcon era
+um instrumento com VA podre, não um defeito do driver), então a branch foi
+**integrada na `master` por merge** — a linha de firmware/BREW e a linha Linux
+passam a viver juntas. Correções pontuais continuam podendo nascer em branch própria.
 
 ---
 

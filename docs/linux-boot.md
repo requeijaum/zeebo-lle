@@ -118,9 +118,10 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 
 ## Branch e próximos passos
 
-**Este trabalho vive na branch `linux-boot`** (decisão de 2026-09-13), separado da
-`master`. Os problemas em aberto **fecharam** (2026-09-13). Falta decidir a
-integração. A `master` segue como a linha do boot de firmware/BREW.
+**Este trabalho nasceu na branch `linux-boot`** (decisão de 2026-09-13), separado da
+`master`. Os problemas em aberto **fecharam** no mesmo dia e a branch foi
+**integrada na `master`** — a linha de firmware/BREW e a linha Linux agora vivem
+juntas no mesmo histórico.
 
 ### Armadilha: VA de símbolo de kernel em instrumento
 
