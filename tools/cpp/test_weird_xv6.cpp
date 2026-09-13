@@ -43,9 +43,22 @@ static bool g_trace = false;
 static u32  g_pc_ring[16] = {0};
 static u32  g_pc_pos = 0;
 
+// Progresso periodico (ZEEBO_XV6_PROGRESS=1): imprime PC + contagem de tempo em tempo.
+// Existe porque um run que NAO termina nao imprime veredito nenhum -- sem isto, "nao
+// terminou" nao diz onde ele esta. Sobrevive ao kill (linha a linha com fflush).
+static bool g_progress = false;
+static u64  g_progress_every = 2000000ull;
+
 static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)uc; (void)size; (void)ud;
     ++g_insn;
+    if (g_progress && g_progress_every && (g_insn % g_progress_every) == 0ull) {
+        u32 cpsr = 0;
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+        std::printf("[prog] insn=%llu pc=0x%08x cpsr=0x%08x\n",
+                    (unsigned long long)g_insn, (u32)addr, cpsr);
+        std::fflush(stdout);
+    }
     if (g_trace) {
         g_pc_ring[g_pc_pos & 15u] = (u32)addr;
         ++g_pc_pos;
@@ -113,6 +126,10 @@ int main(int argc, char** argv) {
     }
     if (const char* b = std::getenv("ZEEBO_BUDGET")) g_budget = std::strtoull(b, nullptr, 0);
     g_trace = (std::getenv("ZEEBO_XV6_TRACE") != nullptr);
+    if (const char* p = std::getenv("ZEEBO_XV6_PROGRESS")) {
+        g_progress = true;
+        if (*p) g_progress_every = std::strtoull(p, nullptr, 0);
+    }
     std::printf("[xv6] imagem: %s (%zu bytes); teto %llu instrucoes\n",
                 path.c_str(), img.size(), (unsigned long long)g_budget);
 
@@ -159,9 +176,15 @@ int main(int argc, char** argv) {
     // mapeada SO'-LEITURA (a AP da secao do guest) faz o Unicorn repetir a MESMA instrucao
     // para sempre: o PC fica preso, nao ha abort e o sintoma vira "consumiu o orcamento".
     // Medido: `str r2,[r3]` com r3=0xffff0000 repetindo 20M instrucoes.
-    uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH_PROT, (void*)on_abort, nullptr, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE_PROT, (void*)on_abort, nullptr, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_READ_PROT,  (void*)on_abort, nullptr, 1, 0);
+    // LIGADOS por padrao: sem eles uma falha de protecao faz o Unicorn repetir a instrucao
+    // para sempre (medido). ZEEBO_XV6_NOPROT=1 desliga, e serve de A/B: medidos os dois
+    // lados, o custo deles e' ZERO (10 M instrucoes em 45 s com e sem) -- a lentidao que
+    // apareceu depois nao e' deles.
+    if (std::getenv("ZEEBO_XV6_NOPROT") == nullptr) {
+        uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH_PROT, (void*)on_abort, nullptr, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE_PROT, (void*)on_abort, nullptr, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_READ_PROT,  (void*)on_abort, nullptr, 1, 0);
+    }
     uc_hook_add(uc, &h, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
 
