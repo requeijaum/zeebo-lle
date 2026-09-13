@@ -37,9 +37,19 @@ static u64 g_budget = 200000000ull;
 // --- teto de aborts, como no harness de Linux: fault em laco e' bug, nao boot
 static u32 g_abort_limit_hit = 0;
 
+// Anel dos ultimos PCs: quando o SO "trava", o que responde a pergunta e' ONDE ele repete.
+// Sem isso o veredito so' diz que consumiu o orcamento. Liga com ZEEBO_XV6_TRACE=1.
+static bool g_trace = false;
+static u32  g_pc_ring[16] = {0};
+static u32  g_pc_pos = 0;
+
 static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
-    (void)uc; (void)addr; (void)size; (void)ud;
+    (void)uc; (void)size; (void)ud;
     ++g_insn;
+    if (g_trace) {
+        g_pc_ring[g_pc_pos & 15u] = (u32)addr;
+        ++g_pc_pos;
+    }
 }
 
 // Aborts -> entrada de excecao do hardware (vive no header). O xv6 e' identity-mapped
@@ -102,6 +112,7 @@ int main(int argc, char** argv) {
         return 77;
     }
     if (const char* b = std::getenv("ZEEBO_BUDGET")) g_budget = std::strtoull(b, nullptr, 0);
+    g_trace = (std::getenv("ZEEBO_XV6_TRACE") != nullptr);
     std::printf("[xv6] imagem: %s (%zu bytes); teto %llu instrucoes\n",
                 path.c_str(), img.size(), (unsigned long long)g_budget);
 
@@ -118,7 +129,12 @@ int main(int argc, char** argv) {
 
     // ------- mapa: o que um SO bare-metal no Zeebo pode tocar -------
     uc_mem_map(uc, zeebo_msm::APPS_RAM_PHYS, zeebo_msm::APPS_RAM_SIZE, UC_PROT_ALL);
-    uc_mem_map(uc, 0x00000000u, 0x00100000u, UC_PROT_ALL);          // 1MB baixo: vetores
+    uc_mem_map(uc, 0x00000000u, 0x00100000u, UC_PROT_ALL);          // 1MB baixo: vetores baixos
+    // Pagina de VETORES ALTOS. O port escreve a tabela em VEC_TBL=0xFFFF0000 (trap.c), e
+    // sem esta pagina o store fica girando: o SO para DENTRO de trap_init sem fault visivel
+    // nem hook de unmapped. O harness de Linux mapeia exatamente isto -- e' a mesma
+    // necessidade, nao uma peculiaridade do xv6.
+    uc_mem_map(uc, 0xffff0000u, 0x00010000u, UC_PROT_ALL);
     uc_mem_map(uc, zeebo_msm::PERIPH_BASE, zeebo_msm::PERIPH_SIZE, UC_PROT_ALL);  // VIC + GPT/DGT
     uc_mem_map(uc, 0xa9200000u, 0x00800000u, UC_PROT_ALL);          // GPIO e vizinhos
     for (u32 ub : zeebo_msm::UART_BASES) uc_mem_map(uc, ub, zeebo_msm::UART_SIZE, UC_PROT_ALL);
@@ -139,6 +155,13 @@ int main(int argc, char** argv) {
     uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH_UNMAPPED, (void*)on_abort, nullptr, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE_UNMAPPED, (void*)on_abort, nullptr, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_MEM_READ_UNMAPPED,  (void*)on_abort, nullptr, 1, 0);
+    // FALHA DE PROTECAO tambem precisa de tratador. Sem estes, uma escrita numa pagina
+    // mapeada SO'-LEITURA (a AP da secao do guest) faz o Unicorn repetir a MESMA instrucao
+    // para sempre: o PC fica preso, nao ha abort e o sintoma vira "consumiu o orcamento".
+    // Medido: `str r2,[r3]` com r3=0xffff0000 repetindo 20M instrucoes.
+    uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH_PROT, (void*)on_abort, nullptr, 1, 0);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE_PROT, (void*)on_abort, nullptr, 1, 0);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_READ_PROT,  (void*)on_abort, nullptr, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
 
@@ -156,10 +179,22 @@ int main(int argc, char** argv) {
     // sintoma. Resolve-se contra o kernel.nm do mesmo build.
     u32 pc_stop = 0;
     uc_reg_read(uc, UC_ARM_REG_PC, &pc_stop);
+    u32 r0s=0,r1s=0,r2s=0,r3s=0,r4s=0,cpsr_s=0;
+    uc_reg_read(uc, UC_ARM_REG_R0, &r0s); uc_reg_read(uc, UC_ARM_REG_R1, &r1s);
+    uc_reg_read(uc, UC_ARM_REG_R2, &r2s); uc_reg_read(uc, UC_ARM_REG_R3, &r3s);
+    uc_reg_read(uc, UC_ARM_REG_R4, &r4s); uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr_s);
+    std::printf("[xv6] r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x r4=0x%08x cpsr=0x%08x\n",
+                r0s, r1s, r2s, r3s, r4s, cpsr_s);
     std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes; pc=0x%08x\n",
                 uc_strerror(e), (int)e, (unsigned long long)g_insn, pc_stop);
     std::printf("[xv6] aborts=%u; vetores=%u\n",
                 zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base);
+    if (g_trace) {
+        std::printf("[xv6] ultimos PCs (mais antigo -> mais novo):");
+        for (u32 i = 0; i < 16u; ++i)
+            std::printf(" %08x", g_pc_ring[(g_pc_pos - 16u + i) & 15u]);
+        std::printf("\n");
+    }
 
     // ------- veredito: o oraculo vem do BINARIO, nao do desejo -------
     std::printf("\n---- console do guest (UART1) ----\n%s\n---- fim ----\n",
