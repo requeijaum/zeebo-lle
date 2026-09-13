@@ -34,7 +34,10 @@ os kernels.
 | `ZEEBO_KEY_TEST` | auto-teste determinístico da tabela de teclas (18 casos, roda antes da emulação) |
 | `ZEEBO_USB_LOG` | log de registradores USB + contadores rolantes por função do EHCI/hub |
 | `ZEEBO_USB_ASYNC` | observador da lista assíncrona do EHCI (QH/qTD, setup packets) |
-| `ZEEBO_NOUSB` | tira o host controller USB da cmdline |
+| `ZEEBO_USB` | liga o host controller EHCI (**default OFF**; não existe `ZEEBO_NOUSB`) |
+| `ZEEBO_HID_TYPE` | digita um texto pelo teclado USB emulado, sem SDL → torna o HID testável headless |
+| `ZEEBO_HID_AT` | instrução em que a digitação de `ZEEBO_HID_TYPE` dispara (default 380000000) |
+| `ZEEBO_USB_ENGINE_LOG` | log do motor de qTD (assíncrono e periódico) e da entrega de relatórios HID |
 | `ZEEBO_PC_CHECK` | lê o texto do kernel na memória do guest p/ validar PC↔símbolo |
 | `ZEEBO_VEC_TEST` | prova que o Unicorn não vetoriza exceções do guest |
 | `ZEEBO_IRQ_LOG`, `ZEEBO_TIMER_LOG`, `ZEEBO_UART_LOG`, `ZEEBO_MDP_LOG` | logs de periférico |

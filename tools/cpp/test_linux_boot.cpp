@@ -3125,17 +3125,17 @@ int main(int argc, char** argv) {
         t.push_back(4); t.push_back(0x54410002u);
         t.push_back(64u * 1024u * 1024u); t.push_back(APPS_RAM_PHYS);
         // ATAG_CMDLINE (0x54410009)
-        // zeebo_usb=1 liga o bring-up do host controller EHCI no kernel (o caminho
-        // de transferencia USB ainda nao esta' modelado, entao por padrao fica off).
+        // zeebo_usb=1 liga o bring-up do host controller EHCI no kernel. O caminho de
+        // transferencia JA' esta' modelado (assincrono + periodico, com HID entregando
+        // tecla na shell); o parametro so' existe para nao gastar budget nos alvos que
+        // nao precisam de USB.
         std::string cmdline = "console=ttyMSM2,115200n8 earlyprintk=msm_serial,0xa9c00000 mem=64M lpj=2629632 init=/init";
-        // O host controller EHCI entra por padrao (ZEEBO_NOUSB=1 desliga): com o modelo
-        // de registradores servindo as leituras, o reset completa, o HCD inicia e o boot
-        // segue ate' a shell normalmente.
-        // [2026-09-13] USB/HID esta' PARADO (ver ROADMAP Fase 16): o controlador sobe e
-        // o dispositivo enumera ate' o config descriptor, mas o descritor completo nunca
-        // completa e o HCD re-tenta em laco, poluindo o console e gastando budget. Ate'
-        // fechar aquilo o EHCI fica FORA por padrao; ZEEBO_USB=1 religa para trabalhar
-        // no problema. (Antes era o contrario: ligado por padrao com ZEEBO_NOUSB=1.)
+        // [2026-09-13] EHCI fica FORA por padrao; ZEEBO_USB=1 liga. NAO existe
+        // ZEEBO_NOUSB -- o default foi invertido quando a enumeracao travava em laco,
+        // poluia o console e queimava budget, e o nome antigo ficou so' na lembranca.
+        // Com o HID entregando tecla na shell ligar deixou de ser risco, mas segue OFF
+        // porque nao e' preciso para os outros alvos: quem precisa (test-linux-hid) e'
+        // que pede.
         g_usb_on = (std::getenv("ZEEBO_USB") != nullptr);
         if (std::getenv("ZEEBO_HID_TYPE")) {
             const char* at = std::getenv("ZEEBO_HID_AT");

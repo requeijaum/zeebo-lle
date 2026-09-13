@@ -1082,14 +1082,23 @@ chega na shell do guest. Prova no framebuffer, **sem nenhum byte pela UART**:
 3. **FRINDEX (0x14c) nunca foi implementado.** O `scan_periodic()` do guest monta a
    janela de varredura a partir dele (`ehci-sched.c:2305`); com o registrador
    congelado em zero o driver reexaminava apenas o frame 0, e o qH do EP1 — que fica
-   pendurado em alguns frames do frame list — **nunca mais era revisitado**. O 1º
-   relatório era entregue (a varredura inicial do enqueue percorre o anel inteiro) e
-   os outros 11 ficavam na fila para sempre. Agora o FRINDEX anda um frame por tick
-   do motor.
+   pendurado em alguns frames do frame list (medido: 1, 65, 129, 193...) — **nunca
+   mais era revisitado**. O mecanismo está no próprio laço: a checagem
+   `if (now_uframe == clock)` vem **antes** do incremento, então com `clock` parado
+   em 0 o scan cobre o frame 0 e sai pelo `break` do `now_uframe == now`.
+   **Quem entregava o 1º relatório era o motor do harness**, que varre o frame list
+   inteiro a cada tick enquanto há relatório na fila — não o guest. O guest apenas
+   *ackava* o `USBSTS` (escreve 0x1), sem conseguir completar a URB: sua janela de
+   scan nunca chegava no frame do qH, então o `usbhid` nunca re-submetia e não havia
+   mais nenhum qTD Active para o harness entregar. Agora o FRINDEX anda um frame por
+   tick do motor.
 
-Também corrigido: o motor espelha a conclusão no **overlay do qH** (o HCD lê ali, não
-no qTD solto) e o **periódico roda antes do assíncrono** (o mesmo bloco de qTD era
-alcançável pelas duas varreduras e o assíncrono o completava como control transfer).
+Também mudou: o motor espelha a conclusão no **overlay do qH** (o HCD lê ali, não no
+qTD solto) e o **periódico roda antes do assíncrono**. **Nenhuma das duas foi isolada**
+— as duas entraram antes do conserto do FRINDEX, que mascarava o resto, então o efeito
+de cada uma nunca foi medido separadamente. O que dá para afirmar com o log: o
+assíncrono **alcançava** o qTD do EP1 (log `qTD@0x138a4180 pid=1` vindo do motor
+assíncrono), então a sobreposição existe; se a ordem é necessária, não se sabe.
 
 **O que ainda NÃO tem prova**: o caminho `SDL → relatório HID`
 (`hid_key_from_sdl`) está escrito mas não foi exercitado com uma tecla real — o que

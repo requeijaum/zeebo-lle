@@ -1832,6 +1832,10 @@ exercitar os modelos de SoC ponta a ponta. Harness `tools/cpp/test_linux_boot.cp
    `qtd_list` de software não é alcançável por ali.
 
 **Pendente (critério da frente)**: enumerar o **teclado HID**. O hub para em
+
+> **[resolvido depois, nesta mesma data — ver a entrada "2026-09-13 (2)"]**: o
+> teclado enumera E entrega tecla na shell. Esta seção fica como registro do estado
+> de então, não como pendência aberta. O diagnóstico abaixo também errou o alvo.
 `device descriptor read/64, error -110` porque falta o motor de transferência —
 executar os qTD da lista assíncrona (status/bytes de volta, `USBSTS.USBINT`) — e a
 entrega da IRQ 47 (`INT_USB_HS`; o VIC só entrega IRQs 0-31, com os dois pontos a mudar
@@ -1923,18 +1927,28 @@ com 12 relatorios na fila -- a varredura concluia "sem trabalho" e nao entregava
 O `scan_periodic()` do guest monta a janela de varredura a partir de
 `ehci_read_frame_index()` (`ehci-sched.c:2305`) e anda de `next_uframe` ate'
 `clock_frame`. Com o registrador congelado em zero (nunca foi escrito nem
-sintetizado) o driver reexaminava **apenas o frame 0**; o qH do EP1 fica pendurado em
-alguns frames do frame list, entao nunca mais era revisitado. O primeiro relatorio
-passava porque a varredura inicial do enqueue percorre o anel inteiro. Depois da
-entrega #1 o guest escrevia `USBSTS <- 0x1` (ack do USBINT) e **nao armava mais
-nenhum qTD** -- dava para ver isso sem adivinhar: nenhuma varredura encontrava qTD
-Active. Agora o FRINDEX anda um frame por tick do motor.
+sintetizado) o driver reexaminava **apenas o frame 0**: a checagem
+`if (now_uframe == clock)` vem **antes** do incremento do `now_uframe`, entao o laco
+cobre o frame 0 e sai pelo `break` do `now_uframe == now`. O qH do EP1 pende de
+outros frames (medido: 1, 65, 129, 193...) e nunca mais era visitado.
 
-### 4. Duas correcoes de protocolo no motor
-- A conclusao e' espelhada no **overlay do qH** (o HCD le' ali, nao no qTD solto);
-  sem isso o `ehci_urb_dequeue` nunca via' a transferencia terminar.
-- O **periodico roda antes do assincrono**: o mesmo bloco de qTD era alcancavel pelas
-  duas varreduras e o assincrono o completava como control transfer.
+**Correcao de uma atribuicao errada**: eu tinha escrito que o 1o relatorio passava
+"porque a varredura inicial do enqueue percorre o anel inteiro". Nao e' isso. Quem
+entregava o 1o relatorio era o **motor do harness**, que varre o frame list inteiro a
+cada tick enquanto ha relatorio na fila -- o guest nao participa da entrega. O que o
+guest faz e' *notar* a conclusao e re-armar; preso no frame 0, ele ackava o `USBSTS`
+(escreve 0x1) sem completar a URB, entao o `usbhid` nunca re-submetia e nao sobrava
+qTD Active para o harness entregar. Agora o FRINDEX anda um frame por tick do motor.
+
+### 4. Duas mudancas de protocolo no motor (NAO isoladas)
+- A conclusao e' espelhada no **overlay do qH** (o HCD le' ali, nao no qTD solto).
+- O **periodico roda antes do assincrono**.
+
+**As duas entraram antes do conserto do FRINDEX**, que mascarava tudo: o efeito de cada
+uma nunca foi medido sozinho, entao "sem isso nao funciona" nao esta provado para
+nenhuma das duas. O que o log mostra e' que a sobreposicao existe (o motor assincrono
+logava `qTD@0x138a4180 pid=1`, ou seja, alcancava o qTD do EP1). Antes de tratar
+qualquer uma como regra, **desligue uma de cada vez e rode o `test-linux-hid`**.
 
 ### Metodo (de novo, e vale repetir)
 O relatorio `-110` do config descriptor apontava para "janela do ASE no relink" ou

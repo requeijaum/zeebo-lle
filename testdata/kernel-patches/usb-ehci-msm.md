@@ -98,7 +98,9 @@ e os contadores de execução (env `ZEEBO_USB_LOG=1`) mostram o HCD de fato inic
 `ehci_reset=1 handshake=1 ehci_run=1 ehci_hub_ctrl=5 hub_thread=1 msleep=2`.
 
 **O boot completa até a shell com o host controller rodando** (`uname -a`, `echo`
-respondem normalmente). O host controller entra por padrão; `ZEEBO_NOUSB=1` desliga.
+respondem normalmente). O host controller **não** entra por padrão: `ZEEBO_USB=1`
+liga. O default foi invertido em 2026-09-13 (o retry em laço poluía o console e
+queimava orçamento) e `ZEEBO_NOUSB` deixou de existir.
 
 ## Porta com dispositivo conectado (2026-09-12, depois do HCD)
 
