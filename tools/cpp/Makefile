@@ -139,7 +139,7 @@ test-linux-keys: test_linux_boot
 # ecoe o comando e responda. Sem o kernel o harness sai 77 = SKIP.
 test-linux-hid: test_linux_boot
 	@echo '--- HID: digitacao pelo teclado USB chega na shell do framebuffer ---'
-	@out=`ZEEBO_USB=1 ZEEBO_HID_TYPE="uname\n" ZEEBO_HID_AT=340000000 ZEEBO_FB_TEXT=1 \
+	@out=`ZEEBO_USB=1 ZEEBO_HID_TYPE="uname\n" ZEEBO_HID_WAIT='~ #' ZEEBO_FB_TEXT=1 \
 		ZEEBO_BUDGET=760000000 ZEEBO_KERNEL=$(LINUX_KERNEL) \
 		./test_linux_boot </dev/null 2>&1`; \
 		st=$$?; \

@@ -1130,6 +1130,25 @@ static int key_test() {
 // Modificador bit0 = LeftCtrl, bit1 = LeftShift.
 static bool g_usb_on = false;         // espelha ZEEBO_USB (EHCI ligado)
 static u64  g_hid_type_at = 0;        // instrucao em que ZEEBO_HID_TYPE dispara
+// Marcador no console que libera a digitacao. Amarrar a digitacao a um NUMERO de
+// instrucoes (ZEEBO_HID_AT) apodrece a cada rebuild do kernel: o ponto em que a shell
+// fica pronta anda junto. O marcador e' texto que o NOSSO init imprime (estavel entre
+// builds), entao o gate nao depende de constante afinada a mao.
+static const char* g_hid_wait = nullptr;
+static bool g_hid_wait_done = false;
+static u64 g_hid_wait_seen_at = 0;
+// Margem depois de o marcador aparecer. NAO e' a mesma armadilha do ZEEBO_HID_AT: aqui
+// o erro so' tem uma direcao perigosa (cedo demais perde tecla), e tarde demais e'
+// inofensivo -- a shell continua lendo. Medido: com o prompt na tela em 264M a shell
+// recebeu "ame" (perdeu os 2 primeiros caracteres); digitando em 340M chegaram todos.
+// 120M de margem cobre essa janela com folga.
+static u64 g_hid_wait_margin = 120000000ull;
+// Ultimo texto decodificado do framebuffer (preenchido por fb_decode_text). O prompt
+// da shell aparece AQUI, nunca no console da UART: esperar pelo prompt e' o sinal certo
+// de "shell pronta para ler", enquanto o marcador do init sai cedo demais (o primeiro
+// run com ele entregou os 8 ultimos relatorios e perdeu os 2 primeiros caracteres:
+// a shell recebeu "ame" em vez de "uname").
+static std::vector<std::string> g_fb_lines;
 struct HidReport { u8 b[8]; };
 static std::deque<HidReport> g_hid_reports;
 
@@ -1190,11 +1209,17 @@ static void sdl_pump() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { g_sdl_quit = true; continue; }
         if (e.type != SDL_KEYDOWN) continue;
-        key_to_rx(e.key);                 // caminho UART (console serial / vtbridge)
-        if (g_usb_on) {                   // caminho USB HID (event0 -> fbcon/VT)
+        // UM caminho por tecla, nao os dois. Os dois chegam no MESMO VT (o vtbridge
+        // liga serial -> tty0), entao alimentar os dois fazia cada tecla chegar duas
+        // vezes e a shell ecoar "uu" para "u". Com o teclado USB enumerado o HID e' o
+        // caminho de verdade (e' o que a Fase 16 queria provar); a UART fica como
+        // fallback para quando o USB esta' desligado, que era o comportamento antigo.
+        if (g_usb_on) {
             u8 mods = 0;
             const u8 usage = hid_usage_from_sdl(e.key.keysym, &mods);
             hid_queue_key(usage, mods);
+        } else {
+            key_to_rx(e.key);
         }
     }
 }
@@ -1766,6 +1791,35 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     void fb_decode_text(uc_engine*);
     static const bool fb_text_on = (std::getenv("ZEEBO_FB_TEXT") != nullptr);
     if (fb_text_on && (g_icount & 0x3FFFFFu) == 0u) fb_decode_text(uc);
+    // ZEEBO_HID_WAIT=<texto>: digita so' quando o texto aparecer no console OU no texto
+    // ja' decodificado do framebuffer. A checagem roda no mesmo passo do decoder
+    // (0x3FFFFF), nunca por instrucao.
+    // O sinal BOM para "shell pronta" e' o PROMPT, que so' existe no FB -- o marcador
+    // que o init imprime no console sai cedo demais: com ele o primeiro run entregou os
+    // 8 ultimos relatorios e perdeu os 2 primeiros caracteres, e a shell recebeu "ame"
+    // em vez de "uname".
+    if (g_hid_wait && !g_hid_wait_done && (g_icount & 0x3FFFFFu) == 0u) {
+        if (!g_hid_wait_seen_at) {
+            bool seen = g_console.find(g_hid_wait) != std::string::npos;
+            for (size_t i = 0; !seen && i < g_fb_lines.size(); ++i)
+                if (g_fb_lines[i].find(g_hid_wait) != std::string::npos) seen = true;
+            if (seen) {
+                g_hid_wait_seen_at = g_icount;
+                std::printf("[usb-hid] \"%s\" visto em %llu insn; digito em +%llu\n",
+                            g_hid_wait, (unsigned long long)g_icount,
+                            (unsigned long long)g_hid_wait_margin);
+                std::fflush(stdout);
+            }
+        } else if (g_icount >= g_hid_wait_seen_at + g_hid_wait_margin) {
+            g_hid_wait_done = true;
+            if (const char* s = std::getenv("ZEEBO_HID_TYPE")) {
+                hid_type_ascii(s);
+                std::printf("[usb-hid] digitando em %llu insn: %zu relatorios na fila\n",
+                            (unsigned long long)g_icount, g_hid_reports.size());
+                std::fflush(stdout);
+            }
+        }
+    }
 #endif
     if (addr < 0x01000000u) {
         g_upc_ring[g_upc_pos++ % 48u] = static_cast<u32>(addr);
@@ -2892,6 +2946,9 @@ void fb_decode_text(uc_engine* uc) {
     const int na = decode(true, txt_a);
     const int nb = decode(false, txt_b);
     const std::vector<std::string>& txt = (nb > na) ? txt_b : txt_a;
+    // Guarda o que foi decodificado: e' o sinal de "shell pronta" para o gatilho de
+    // digitacao (o prompt vive no VT, nao no console capturado pela UART).
+    g_fb_lines = txt;
     std::printf("[fb-text] metade=%d ink=%zu/%zu %dx%d celulas; casou bit7=%d bit0=%d -> usando %s\n",
                 half, ink[0], ink[1], cols, rows, na, nb, (nb > na) ? "bit0-esquerda" : "bit7-esquerda");
     int last = -1;
@@ -3140,6 +3197,9 @@ int main(int argc, char** argv) {
         if (std::getenv("ZEEBO_HID_TYPE")) {
             const char* at = std::getenv("ZEEBO_HID_AT");
             g_hid_type_at = at ? std::strtoull(at, nullptr, 0) : 380000000ull;
+            // Com marcador explicito a digitacao espera por ele e ignora o numero.
+            if (const char* w = std::getenv("ZEEBO_HID_WAIT")) g_hid_type_at = 0, g_hid_wait = w;
+            if (const char* m = std::getenv("ZEEBO_HID_MARGIN")) g_hid_wait_margin = std::strtoull(m, nullptr, 0);
         }
         if (g_usb_on) cmdline += " zeebo_usb=1";
         // Epoch de RTC: o 3.4.113 do console sobe sem CONFIG_RTC_CLASS e a placa nao

@@ -37,6 +37,8 @@ os kernels.
 | `ZEEBO_USB` | liga o host controller EHCI (**default OFF**; não existe `ZEEBO_NOUSB`) |
 | `ZEEBO_HID_TYPE` | digita um texto pelo teclado USB emulado, sem SDL → torna o HID testável headless |
 | `ZEEBO_HID_AT` | instrução em que a digitação de `ZEEBO_HID_TYPE` dispara (default 380000000) |
+| `ZEEBO_HID_WAIT` | só digita depois que este texto aparecer no console **ou no framebuffer decodificado**; use o prompt `~ #`. Tem precedência sobre `ZEEBO_HID_AT` |
+| `ZEEBO_HID_MARGIN` | instruções de espera depois de o marcador aparecer (default 120000000) |
 | `ZEEBO_USB_ENGINE_LOG` | log do motor de qTD (assíncrono e periódico) e da entrega de relatórios HID |
 | `ZEEBO_PC_CHECK` | lê o texto do kernel na memória do guest p/ validar PC↔símbolo |
 | `ZEEBO_VEC_TEST` | prova que o Unicorn não vetoriza exceções do guest |
@@ -99,6 +101,23 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 - **Teclado USB emulado: tecla do host chega na shell do guest** (2026-09-13). Prova
   no framebuffer e **sem nada pela UART**: `~ # uname` → `Linux`. O `usbhid` faz bind,
   nasce `input0`/`event0` e os relatórios HID chegam pelo endpoint de interrupção.
+  - **Roteamento de tecla (um caminho só)**: com o USB ligado a tecla vai **pelo HID**;
+    com o USB desligado, pela UART (comportamento antigo). Alimentar os dois é bug: os
+    dois chegam no mesmo VT (o `vtbridge` liga serial → tty0), então cada tecla entra
+    duas vezes e a shell ecoa `uu` para `u`.
+  - **Não amarre gate a contagem de instruções**: a digitação é liberada por
+    `ZEEBO_HID_WAIT`, não por um número afinado à mão (que apodreceria no próximo rebuild
+    do kernel).
+  - **O marcador tem de ser o prompt, não o eco do init**: o `Prompting shell...` do
+    init sai **antes** de a shell estar lendo — usado como marcador, o gate entregou os
+    8 últimos relatórios e perdeu os 2 primeiros caracteres: a shell recebeu `ame` em
+    vez de `uname`, falha que só a comparação exata de texto pega. O prompt `~ #` vive
+    **só no VT**: o `grep` de `~ #` no console da UART dá zero. Por isso o gatilho olha o
+    texto decodificado do framebuffer, que é o que o `ZEEBO_FB_TEXT` já produz.
+  - **Ver o prompt ainda não basta**: com o prompt na tela em 264M a shell não estava
+    lendo e continuou perdendo os 2 primeiros caracteres; digitando em 340M chegaram
+    todos. Daí a margem (`ZEEBO_HID_MARGIN`, default 120M) — erro só tem uma direção
+    ruim (cedo demais), e tarde demais é inofensivo porque a shell segue lendo.
   - `cat /proc/bus/input/devices` → `N: Name="Zeebo-L LLE Keyboa"`,
     `H: Handlers=sysrq kbd event0`, `B: EV=120013`.
   - Três peças faltavam no modelo: a **lista periódica** (`PERIODICLISTBASE` + `PSE`),
