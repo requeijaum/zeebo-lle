@@ -572,11 +572,25 @@ test_weird_xv6: test_weird_xv6.cpp zeebo_msm_soc.h
 # zeebo_weird_os.
 test-weird-xv6: test_weird_xv6
 	@echo '--- xv6-zeebo: SO bare-metal no modelo real do MSM7201A ---'
-	@out=`ZEEBO_XV6_KERNEL=$(XV6_KERNEL) ZEEBO_BUDGET=8000000 ./test_weird_xv6 2>&1`; \
+	@out=`ZEEBO_XV6_KERNEL=$(XV6_KERNEL) ZEEBO_BUDGET=20000000 ./test_weird_xv6 2>&1`; \
 	 st=$$?; \
-	 printf '%s\n' "$$out" | tail -14; \
+	 printf '%s\n' "$$out" | tail -18; \
 	 if [ $$st -eq 77 ]; then echo 'SKIP: imagem do xv6 ausente'; exit 77; fi; \
-	 [ $$st -eq 0 ] || exit 1
+	 [ $$st -eq 0 ] || exit 1; \
+	 pc=$$(printf '%s\n' "$$out" | sed -n 's/.*parou:.*pc=0x\([0-9a-f]*\).*/\1/p' | tail -1); \
+	 irq=$$(printf '%s\n' "$$out" | sed -n 's/.*IRQs entregues=\([0-9]*\).*/\1/p' | tail -1); \
+	 echo "[gate xv6] pc final=0x$$pc IRQs=$$irq"; \
+	 if [ -z "$$pc" ] || [ -z "$$irq" ]; then echo 'FALHOU: sem veredito (pc/IRQ)'; exit 1; fi; \
+	 pc8=$$(printf '%08s' "$$pc" | tr ' ' 0); \
+	 user=0; case "$$pc8" in 0*) user=1;; esac; \
+	 if [ $$user -eq 0 ]; then \
+	   echo "FALHOU: pc final 0x$$pc8 nao esta no ESPACO DE USUARIO -- o guest nunca saiu do kernel"; exit 1; \
+	 fi; \
+	 if [ $$irq -lt 10 ]; then \
+	   echo "FALHOU: apenas $$irq IRQ(s) -- o timer nao esta' entregando no usuario"; exit 1; \
+	 fi; \
+	 echo "OK: boot completo, espaco de usuario alcancado (pc=0x$$pc) e timer entregando ($$irq IRQs)"
+
 
 test-o3-baremetal: test_o3_baremetal test-o3-baremetal-selftest
 	./test_o3_baremetal || [ $$? -eq 77 ]

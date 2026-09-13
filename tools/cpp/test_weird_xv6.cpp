@@ -416,8 +416,12 @@ int main(int argc, char** argv) {
     // UC_TLB_CPU usa o softmmu classico, com caminhada de tabela por acesso. O travamento
     // medido e' na GERACAO do bloco da primeira busca em modo usuario -- se o modo de TLB
     // muda o sintoma, o problema esta' na caminhada, nao no tradutor.
-    if (const char* tm = std::getenv("ZEEBO_TLB")) {
-        uc_ctl_tlb_mode(uc, std::strcmp(tm, "cpu") == 0 ? UC_TLB_CPU : UC_TLB_VIRTUAL);
+    // UC_TLB_VIRTUAL e' OBRIGATORIO aqui (e e' o default do Unicorn, mas fica explicito para
+    // nao depender de versao). Medido com o MESMO binario e fatias: `cpu` entrega 1 IRQ e nao
+    // sai da entrada em modo usuario; `virtual` entrega 93 IRQs e roda o programa de usuario.
+    uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL);
+    if (const char* tm = std::getenv("ZEEBO_TLB")) {   // alavanca de A/B
+        if (std::strcmp(tm, "cpu") == 0) uc_ctl_tlb_mode(uc, UC_TLB_CPU);
     }
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
