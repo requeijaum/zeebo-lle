@@ -16,7 +16,10 @@
 // caminho por env. Sem imagem, sai 77 = SKIP e o alvo do Makefile trata.
 #include <chrono>
 #include <csignal>
+#include <cstring>
+#include <ctime>
 #include <execinfo.h>
+#include <sys/time.h>
 #include <ucontext.h>
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +62,7 @@ static u64  g_progress_every = 2000000ull;
 // nem progresso para consultar (e o gdb nao anexa sem ptrace_scope). Com isto, um SIGTERM
 // imprime PC/contagem/anel no instante exato -- que e' o que diz ONDE ele esta'.
 static uc_engine* g_uc_global = nullptr;
+static int g_hb_ms = 0;   // ZEEBO_XV6_HB=<ms> liga o batimento
 // Caminha a tabela do guest e PROCURA CICLO. O host backtrace mostrou o emulador girando
 // em get_phys_addr_arm/tb_htable_lookup (pagina de CODIGO): walk que nao termina e' o
 // sintoma de descritor ciclico/espurio. Aqui eu leio os descritores e denuncio o ciclo.
@@ -115,6 +119,48 @@ static void dump_walk(uc_engine* uc, u32 va) {
     std::printf("[WALK] resumo: auto-referencias=%u referencias-a-L1=%u\n", selfhits, l1hits);
 }
 
+// Batimento independente do progresso do guest: se o contador esta' congelado, o hb mostra;
+// se o hb mostra avancar, quem mente e' o instrumento de progresso. Um contador parado com o
+// host queimando CPU significa laco DENTRO do motor, e nao trabalho lento.
+static void on_heartbeat(int sig) {
+    (void)sig;
+    u32 pc = 0;
+    if (g_uc_global) uc_reg_read(g_uc_global, UC_ARM_REG_PC, &pc);
+    char b[128];
+    int n = std::snprintf(b, sizeof(b), "[hb] insn=%llu pc=0x%08x\n",
+                          (unsigned long long)g_icount, pc);
+    if (n > 0) std::fwrite(b, 1, (size_t)n, stdout);
+    std::fflush(stdout);
+}
+
+// Caminha com um pgdb EXPLICITO e mostra o PA mapeado + os primeiros bytes. Serve para
+// comparar a visao do processo e a do kernel no MESMO VA (o port põe vetores e codigo de
+// usuario em VA 0; se as duas visoes diferem, o vetor do SVC cai em codigo de usuario).
+static void dump_va(uc_engine* uc, u32 pgdb, u32 va, const char* tag) {
+    u32 l1 = 0, pte = 0, pa = 0, w = 0;
+    if (uc_mem_read(uc, pgdb + ((va >> 20) & 0xfffu) * 4u, &l1, 4) != UC_ERR_OK) {
+        std::printf("[VA %s] va=0x%08x l1 ilegivel\n", tag, va); return;
+    }
+    if ((l1 & 3u) != 1u) { std::printf("[VA %s] va=0x%08x l1=0x%08x (nao e' tabela)\n", tag, va, l1); return; }
+    u32 l2 = l1 & 0xfffffc00u;
+    if (uc_mem_read(uc, l2 + ((va >> 12) & 0xffu) * 4u, &pte, 4) != UC_ERR_OK) {
+        std::printf("[VA %s] va=0x%08x l2 ilegivel\n", tag, va); return;
+    }
+    if ((pte & 3u) == 0u) { std::printf("[VA %s] va=0x%08x l2@0x%08x PTE=0x%08x => AUSENTE\n", tag, va, l2, pte); return; }
+    // ATENCAO ao contexto: em L1, tipo 2 = SECAO (1 MB); em L2, tipo 2 = PAGINA PEQUENA
+    // (4 KB). Aqui o descritor veio de uma L2, entao vale a formula de pagina -- foi um erro
+    // meu tratar como secao e ler 0x14f00000 em vez de 0x14ff1000.
+    pa = (pte & 0xfffff000u) | (va & 0xfffu);
+    std::printf("[VA %s] va=0x%08x pgdb=0x%08x PTE=0x%08x pa=0x%08x palavras:",
+                tag, va, pgdb, pte, pa);
+    for (u32 k = 0; k < 4u; ++k) {
+        u32 w2 = 0;
+        if (uc_mem_read(uc, pa + k * 4u, &w2, 4) == UC_ERR_OK) std::printf(" %08x", w2);
+    }
+    std::printf("\n");
+    (void)w;
+}
+
 static void on_signal_dump(int sig, siginfo_t* si, void* uctx) {
     (void)sig; (void)si;
     // O PC do GUEST diz onde o guest esta'. O PC do HOST diz onde o EMULADOR esta' -- e e' esse
@@ -151,8 +197,17 @@ static void on_signal_dump(int sig, siginfo_t* si, void* uctx) {
     }
     std::fwrite("\n", 1, 1, stdout);
     if (g_uc_global) {
-        dump_walk(g_uc_global, pc);
-        dump_walk(g_uc_global, 0x10108158u);   // o PC do travamento medido
+        uc_arm_cp_reg q0 = {15, 0, 0, 2, 0, 0, 0, 0};
+        uc_arm_cp_reg q1 = {15, 0, 0, 2, 0, 0, 1, 0};
+        uc_reg_read(g_uc_global, UC_ARM_REG_CP_REG, &q0);
+        uc_reg_read(g_uc_global, UC_ARM_REG_CP_REG, &q1);
+        u32 procdb = (u32)q0.val & ~0x3fffu;    // L1 exige base 16 KB-alinhada
+        u32 kerndb = (u32)q1.val & ~0x3fffu;
+        std::printf("[PGDB] processo(TTBR0)=0x%08x kernel(TTBR1)=0x%08x\n", procdb, kerndb);
+        dump_va(g_uc_global, procdb, pc, "processo");
+        dump_va(g_uc_global, procdb, 0u, "processo@0");
+        dump_va(g_uc_global, kerndb, 0u, "kernel@0");
+        dump_va(g_uc_global, kerndb, 0xffff0000u, "kernel@alto");
     }
     std::fflush(stdout);
     std::_Exit(2);
@@ -282,7 +337,9 @@ int main(int argc, char** argv) {
     // abortar com "unrecognized processor variant".
     uc_ctl_set_cpu_model(uc, UC_CPU_ARM_1136);
     // Vetores BAIXOS: o xv6 roda com V=0 (identity map), ao contrario do Linux aqui.
-    zeebo_msm::g_exc_vector_base = 0x00000000u;
+    // xv6-zeebo usa vetores ALTOS (VEC_TBL = 0xFFFF0000, SCTLR.V = 1). Com base 0 o vetor do
+    // SVC caia no VA 0 -- que no pgdir do processo e' o `initcode` -- e o motor travava.
+    zeebo_msm::g_exc_vector_base = 0xFFFF0000u;
 
     // ------- mapa: o que um SO bare-metal no Zeebo pode tocar -------
     uc_mem_map(uc, zeebo_msm::APPS_RAM_PHYS, zeebo_msm::APPS_RAM_SIZE, UC_PROT_ALL);
@@ -354,12 +411,21 @@ int main(int argc, char** argv) {
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
     g_uc_global = uc;
+    if (const char* hb = std::getenv("ZEEBO_XV6_HB")) g_hb_ms = std::atoi(hb);
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = on_signal_dump;
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT, &sa, nullptr);
+    if (g_hb_ms > 0) {
+        std::signal(SIGALRM, on_heartbeat);
+        struct itimerval it;
+        it.it_interval.tv_sec = g_hb_ms / 1000;
+        it.it_interval.tv_usec = (g_hb_ms % 1000) * 1000;
+        it.it_value = it.it_interval;
+        setitimer(ITIMER_REAL, &it, nullptr);
+    }
     uc_err e = uc_emu_start(uc, entry, 0, 0, g_budget);
     // O PC da parada e' o que diz ONDE o SO desistiu; sem ele o veredito so' aponta o
     // sintoma. Resolve-se contra o kernel.nm do mesmo build.
