@@ -366,10 +366,13 @@ static void on_fetch(uc_engine* uc, u64 phys, u32 size, void* ud) {
     std::fflush(stdout);
 }
 
+static int g_flush_hits = 0;
+
 static void on_flush_tlb(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)addr; (void)size; (void)ud;
     uc_ctl_flush_tlb(uc);
     ++zeebo_msm::g_tlb_flushes;
+    ++g_flush_hits;
 }
 
 static void on_intr(uc_engine* uc, u32 intno, void* ud) {
@@ -612,6 +615,9 @@ int main(int argc, char** argv) {
                 r0s, r1s, r2s, r3s, r4s, cpsr_s);
     std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes; pc=0x%08x\n",
                 uc_strerror(e), (int)e, (unsigned long long)g_icount, pc_stop);
+    std::printf("[xv6] SVCs: total=%u (do usuario=%u); invalidadas de TLB=%u; acertos do hook "
+                "flush_tlb=%u\n", zeebo_msm::g_svc_total, zeebo_msm::g_svc_user,
+                zeebo_msm::g_tlb_flushes, g_flush_hits);
     std::printf("[xv6] aborts=%u; vetores=%u; IRQs entregues=%u\n",
                 zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base,
                 zeebo_msm::g_irq_delivered);
