@@ -14,6 +14,8 @@
 //
 // O binario do SO NAO e' versionado neste repo (imagem de SO nao entra no git): passe o
 // caminho por env. Sem imagem, sai 77 = SKIP e o alvo do Makefile trata.
+#include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +53,31 @@ static u32  g_pc_pos = 0;
 static bool g_progress = false;
 static u64  g_progress_every = 2000000ull;
 
+// Dump de estado por sinal: quando o emulador trava SEM executar instrucao nao ha' hook
+// nem progresso para consultar (e o gdb nao anexa sem ptrace_scope). Com isto, um SIGTERM
+// imprime PC/contagem/anel no instante exato -- que e' o que diz ONDE ele esta'.
+static uc_engine* g_uc_global = nullptr;
+static void on_signal_dump(int sig) {
+    (void)sig;
+    u32 pc = 0, cpsr = 0;
+    if (g_uc_global) {
+        uc_reg_read(g_uc_global, UC_ARM_REG_PC, &pc);
+        uc_reg_read(g_uc_global, UC_ARM_REG_CPSR, &cpsr);
+    }
+    char buf[256];
+    int n = std::snprintf(buf, sizeof(buf),
+                          "\n[SINAL] insn=%llu pc=0x%08x cpsr=0x%08x ult=",
+                          (unsigned long long)g_icount, pc, cpsr);
+    if (n > 0) { std::fwrite(buf, 1, (size_t)n, stdout); }
+    for (u32 k = 0; k < 8u; ++k) {
+        std::snprintf(buf, sizeof(buf), "%08x ", g_pc_ring[(g_pc_pos - 8u + k) & 15u]);
+        std::fwrite(buf, 1, 9, stdout);
+    }
+    std::fwrite("\n", 1, 1, stdout);
+    std::fflush(stdout);
+    std::_Exit(2);
+}
+
 static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)uc; (void)size; (void)ud;
     ++g_icount;
@@ -77,14 +104,25 @@ static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     if (g_progress && g_progress_every && (g_icount % g_progress_every) == 0ull) {
         u32 cpsr = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-        std::printf("[prog] insn=%llu pc=0x%08x cpsr=0x%08x\n",
-                    (unsigned long long)g_icount, (u32)addr, cpsr);
+        // O tempo de PAREDE na linha transforma uma corrida na CURVA de degradacao: da'
+        // para ver onde a taxa cai e se a queda e' penhasco ou rampa.
+        static const auto t0 = std::chrono::steady_clock::now();
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t0).count();
+        std::printf("[prog] insn=%llu t=%lldms pc=0x%08x cpsr=0x%08x ult=",
+                    (unsigned long long)g_icount, ms, (u32)addr, cpsr);
+        for (u32 k = 0; k < 8u; ++k)
+            std::printf("%08x ", g_pc_ring[(g_pc_pos - 8u + k) & 15u]);
+        std::printf("\n");
+        std::fflush(stdout);   // SEM ISTO o progresso fica no buffer do libc e a ultima
+                               // amostra visivel mente: parece travamento onde so' ha'
+                               // buffer. (Mesma classe da armadilha de instrumento.)
         std::fflush(stdout);
     }
-    if (g_trace) {
-        g_pc_ring[g_pc_pos & 15u] = (u32)addr;
-        ++g_pc_pos;
-    }
+    // Anel SEMPRE mantido (1 store): e' o que responde "onde" quando o run trava sem
+    // executar instrucao. Entra na linha de progresso.
+    g_pc_ring[g_pc_pos & 15u] = (u32)addr;
+    ++g_pc_pos;
 }
 
 // Aborts -> entrada de excecao do hardware (vive no header). O xv6 e' identity-mapped
@@ -235,6 +273,9 @@ int main(int argc, char** argv) {
     const u32 entry = zeebo_msm::APPS_RAM_PHYS;     // o port linka o _start aqui
     std::printf("[xv6] carregado em 0x%08x; rodando...\n", entry);
     uc_mem_write(uc, entry, img.data(), img.size());
+    g_uc_global = uc;
+    std::signal(SIGTERM, on_signal_dump);
+    std::signal(SIGINT, on_signal_dump);
     uc_err e = uc_emu_start(uc, entry, 0, 0, g_budget);
     // O PC da parada e' o que diz ONDE o SO desistiu; sem ele o veredito so' aponta o
     // sintoma. Resolve-se contra o kernel.nm do mesmo build.
