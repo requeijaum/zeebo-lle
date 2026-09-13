@@ -549,6 +549,25 @@ test-linux-mmu-contract-selftest: test_linux_mmu_contract
 test_o3_baremetal: test_o3_baremetal.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_o3_baremetal.cpp -lunicorn
 
+# Harness dos "weird OSes": roda um SO bare-metal no modelo REAL do SoC (UART, VIC, walker
+# VA->PA e entrada de excecao compartilhados em zeebo_msm_soc.h), nao no runner Python que
+# reimplementa o MMIO. A imagem do SO NAO e' versionada -- caminho por env, e sem imagem o
+# alvo sai 77 = SKIP (nunca SKIP=PASS).
+# Caminho ABSOLUTO de proposito: a imagem vive no repo VIZINHO (zeebo_weird_os), nao
+# dentro deste. Override: make test-weird-xv6 XV6_KERNEL=/mnt/200GB/zeebo_weird_os/...
+XV6_KERNEL ?= $(HOME)/projects/zeebo_weird_os/build/xv6-zeebo/kernel.bin
+
+test_weird_xv6: test_weird_xv6.cpp zeebo_msm_soc.h
+	$(CXX) $(CXXFLAGS) -o $@ test_weird_xv6.cpp -lunicorn
+
+test-weird-xv6: test_weird_xv6
+	@echo '--- xv6-zeebo: SO bare-metal no modelo real do MSM7201A ---'
+	@out=`ZEEBO_XV6_KERNEL=$(XV6_KERNEL) ZEEBO_BUDGET=60000000 ./test_weird_xv6 2>&1`; \
+	 st=$$?; \
+	 printf '%s\n' "$$out" | tail -14; \
+	 if [ $$st -eq 77 ]; then echo 'SKIP: imagem do xv6 ausente'; exit 77; fi; \
+	 [ $$st -eq 0 ] || exit 1
+
 test-o3-baremetal: test_o3_baremetal test-o3-baremetal-selftest
 	./test_o3_baremetal || [ $$? -eq 77 ]
 
@@ -1082,13 +1101,13 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx test_l4_deferred_space_switch \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_efs2_module_guard test_efs2_module_guard_mutant test_efs2_guard_real test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner test_zeetris_playable test_linux_boot test_o3_baremetal test_linux_mmu_contract test_zeetris_runner_contract *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_efs2_module_guard test_efs2_module_guard_mutant test_efs2_guard_real test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner test_zeetris_playable test_linux_boot test_o3_baremetal test_weird_xv6 test_linux_mmu_contract test_zeetris_runner_contract *.o
 	rm -rf testkit/build
 	rm -f test_qdsp5_doorbell_probe
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: test-linux-vic test-linux-keys test-linux-hid check-linux-boot all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
+.PHONY: test-linux-vic test-linux-keys test-linux-hid check-linux-boot test-weird-xv6 all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 

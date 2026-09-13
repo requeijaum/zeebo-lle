@@ -22,8 +22,10 @@
 
 namespace zeebo_msm {
 
+using u8  = std::uint8_t;
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
+using i64 = std::int64_t;
 
 // --- mapa do MSM7201A (mesmas constantes do emulador principal) ---
 constexpr u32 APPS_RAM_PHYS = 0x10000000u;
