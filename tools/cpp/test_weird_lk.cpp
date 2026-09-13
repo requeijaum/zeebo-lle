@@ -35,6 +35,13 @@
 
 #include "zeebo_msm_soc.h"
 
+// O header define u32/u64 dentro do proprio namespace; o harness precisa deles no escopo global
+// (mesmo padrao do test_weird_xv6.cpp).
+using u8 = std::uint8_t;
+using i64 = std::int64_t;
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+
 namespace {
 
 constexpr u64 kLoad = 0x00000000ull;              // imagem e vetores em 0x0 (layout da SURF)
@@ -204,8 +211,11 @@ int main() {
     std::printf("[lk] console por UART: UART1=0x%08x %u bytes | UART2 %u | UART3 %u\n",
                 kUart1, st.console_bytes_por_uart[0], st.console_bytes_por_uart[1],
                 st.console_bytes_por_uart[2]);
-    std::printf("\n---- console do guest (UART do Zeebo) ----\n%s\n---- fim ----\n",
-                st.console.c_str());
+    // Bytes CRUS, nao %s: o dprintf do lk separa linhas com \0, e um printf("%s") pararia no
+    // primeiro deles (foi o que truncou o banner na primeira versao deste harness).
+    std::printf("\n---- console do guest (UART do Zeebo) ----\n");
+    std::fwrite(st.console.data(), 1, st.console.size(), stdout);
+    std::printf("\n---- fim ----\n");
 
     // ORACULO: o banner tem de estar la', e na UART1 (o console do Zeebo).
     const bool tem_banner = st.console.find("welcome to lk") != std::string::npos;
