@@ -423,6 +423,13 @@ struct PendingAbort { u32 addr; u32 fsr; u32 kind; };  // kind: 0=pabt, 1=dabt
 inline std::vector<PendingAbort> g_pending_aborts;
 inline u32 g_abort_count = 0;
 
+// SVC: total e quantos vieram do ESPACO DE USUARIO (pc < 0x10000000). Se o guest roda em modo
+// usuario por milhoes de instrucoes e nenhum SVC de usuario acontece, o que roda la' nao e' o
+// programa (nenhum syscall) -- diagnostico que separa "codigo errado" de "sem syscalls".
+inline unsigned g_svc_total = 0;
+inline unsigned g_tlb_flushes = 0;   // MCR de CP15 (c2/c8) que invalidaram o TLB do Unicorn
+inline unsigned g_svc_user = 0;
+
 inline bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
                            i64 value, void* user) {
     (void)size; (void)value; (void)user;

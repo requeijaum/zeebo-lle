@@ -204,6 +204,26 @@ static void on_signal_dump(int sig, siginfo_t* si, void* uctx) {
         u32 procdb = (u32)q0.val & ~0x3fffu;    // L1 exige base 16 KB-alinhada
         u32 kerndb = (u32)q1.val & ~0x3fffu;
         std::printf("[PGDB] processo(TTBR0)=0x%08x kernel(TTBR1)=0x%08x\n", procdb, kerndb);
+        // SCTLR: bit 0 = M (MMU ligada). Se estiver em 0, a execucao e' FISICA -- e um PC como
+        // 0xc274 (ausente nas tabelas!) roda mesmo sem fault, caindo nos 1 MB baixos que o
+        // harness mapeia. E' a hipotese a bater antes de qualquer outra.
+        {
+            uc_arm_cp_reg d = {15, 0, 0, 3, 0, 0, 0, 0};   // DACR: permissoes por dominio
+            if (uc_reg_read(g_uc_global, UC_ARM_REG_CP_REG, &d) == UC_ERR_OK) {
+                u32 dv = (u32)d.val;
+                std::printf("[DACR] = 0x%08x  dominios: D0=%u D1=%u ... (0=sem acesso, "
+                            "1=cliente, 3=gerente)\n", dv, dv & 3u, (dv >> 2) & 3u);
+            }
+        }
+        {
+            uc_arm_cp_reg s = {15, 0, 0, 1, 0, 0, 0, 0};
+            if (uc_reg_read(g_uc_global, UC_ARM_REG_CP_REG, &s) == UC_ERR_OK) {
+                u32 v = (u32)s.val;
+                std::printf("[SCTLR] = 0x%08x  MMU(M bit0)=%u  V(vetores altos, bit13)=%u  "
+                            "D(dcache)=%u  I(icache)=%u\n", v, v & 1u, (v >> 13) & 1u,
+                            (v >> 2) & 1u, (v >> 12) & 1u);
+            }
+        }
         dump_va(g_uc_global, procdb, pc, "processo");
         dump_va(g_uc_global, procdb, 0u, "processo@0");
         dump_va(g_uc_global, kerndb, 0u, "kernel@0");
@@ -212,6 +232,13 @@ static void on_signal_dump(int sig, siginfo_t* si, void* uctx) {
     std::fflush(stdout);
     std::_Exit(2);
 }
+
+// Primeiras instrucoes em MODO USUARIO: o initcode faz ldr/ldr/mov/svc, entao um SVC teria de
+// aparecer em 4 instrucoes. Se o que aparece aqui nao e' essa sequencia, o trap-return nao
+// aterrissou onde o port acha que aterrissou -- e' a pergunta que sobrou.
+static int g_first_user_logged = 0;
+static int g_fetch_logged = 0;
+static int g_first_user_n = 0;
 
 static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)uc; (void)size; (void)ud;
@@ -254,6 +281,22 @@ static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
                                // buffer. (Mesma classe da armadilha de instrumento.)
         std::fflush(stdout);
     }
+    if (!g_first_user_logged && addr < 0x10000000ull) {
+        g_first_user_logged = 1;   // marca a entrada em modo usuario
+        g_first_user_n = 0;
+    }
+    if (g_first_user_logged && (g_first_user_n < 12)) {
+        u32 cpsr0 = 0, ttbr0 = 0;
+        uc_arm_cp_reg c0 = {15, 0, 0, 2, 0, 0, 0, 0};
+        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr0);
+        uc_reg_read(uc, UC_ARM_REG_CP_REG, &c0);
+        ttbr0 = (u32)c0.val;
+        std::printf("[1o-usuario] #%d pc=0x%08llx cpsr=0x%08x ttbr0=0x%08x\n",
+                    g_first_user_n, (unsigned long long)addr, cpsr0, ttbr0);
+        std::fflush(stdout);
+        ++g_first_user_n;
+    }
+
     // Anel SEMPRE mantido (1 store): e' o que responde "onde" quando o run trava sem
     // executar instrucao. Entra na linha de progresso.
     g_pc_ring[g_pc_pos & 15u] = (u32)addr;
@@ -279,6 +322,56 @@ static bool on_abort(uc_engine* uc, uc_mem_type type, u64 addr, int size,
 // SVC: o Unicorn entrega UC_HOOK_INTR com o PC JA' apontando para a instrucao seguinte
 // (`skill: zeebo-lle-emulator`). A entrada de excecao do ARM1136 tem de ser feita aqui:
 // CPSR -> SPSR_svc, modo SVC, LR = PC (o retorno e' a instrucao apos o SVC), PC = vetor+8.
+// Le um simbolo do arquivo .nm do kernel (formato "<addr> T <nome>"). O flush_tlb do guest
+// precisa ser achado assim porque esta versao do Unicorn NAO tem hook de instrucao para ARM
+// (nao existe UC_ARM_INS_MCR), entao nao da' para interceptar o MCR de CP15 em si.
+static u32 nm_symbol(const std::string& nm_path, const std::string& want) {
+    FILE* f = std::fopen(nm_path.c_str(), "r");
+    if (!f) return 0;
+    char line[512];
+    u32 found = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+        unsigned long a = 0;
+        char tipo = 0, nome[256];
+        nome[0] = 0;
+        if (std::sscanf(line, "%lx %c %255s", &a, &tipo, nome) == 3) {
+            if (want == nome) { found = (u32)a; break; }
+        }
+    }
+    std::fclose(f);
+    return found;
+}
+
+// CP15 / TLB: o `flush_tlb()` do guest escreve o registrador de invalidacao de TLB (c8,c7,0)
+// -- e o Unicorn NAO honra isso sozinho. Sem esta traducao, a traducao de um VA fica CACHEADA
+// quando o pgdir muda por `switchuvm`, e o CPU continua usando o mapa antigo. So' morde o xv6
+// porque o codigo de usuario vive em VA 0, cujo mapeamento ja' estava cacheado com a SECAO do
+// kernel (VA 0 -> PA 0): medido, as primeiras instrucoes "de usuario" eram um avanco linear por
+// 0x00,0x04,0x08,0x0c... em 1 MB de zeros -- nunca o `svc` que esta' no initcode.
+// Aqui: qualquer MCR de CP15 em c2 (TTBR: troca de tabela) ou c8 (manutencao de TLB) invalida o
+// TLB do Unicorn, preservando a semantica do guest.
+// Busca de instrucao: o Unicorn entrega aqui o endereco FISICO da busca. Comparar com o PA que
+// a tabela do processo diz para aquele VA e' o que separa "a CPU usa a tabela do processo" de
+// "a CPU esta' usando traducao velha". E' a medicao que decide o caso.
+static void on_fetch(uc_engine* uc, u64 phys, u32 size, void* ud) {
+    (void)uc; (void)size; (void)ud;
+    // Buscas em MODO USUARIO: o Unicorn entrega o endereco FISICO. O PA que a tabela do processo
+    // diz para VA 0 e' 0x14ff1000 (onde o initcode foi copiado). Se as buscas de usuario vierem
+    // de OUTRO lugar, a CPU nao esta' usando a tabela do processo -- e o de onde elas vem diz
+    // qual traducao esta' em uso.
+    if (g_fetch_logged >= 12) return;
+    ++g_fetch_logged;
+    std::printf("[fetch] #%d usuario: FISICO=0x%08llx (a tabela do processo diz 0x14ff1000 para VA 0)\n",
+                g_fetch_logged, (unsigned long long)phys);
+    std::fflush(stdout);
+}
+
+static void on_flush_tlb(uc_engine* uc, u64 addr, u32 size, void* ud) {
+    (void)addr; (void)size; (void)ud;
+    uc_ctl_flush_tlb(uc);
+    ++zeebo_msm::g_tlb_flushes;
+}
+
 static void on_intr(uc_engine* uc, u32 intno, void* ud) {
     (void)ud;
     if (intno != 2) {                                // 2 = SVC no Unicorn/ARM
@@ -287,6 +380,18 @@ static void on_intr(uc_engine* uc, u32 intno, void* ud) {
     u32 cpsr = 0, pc = 0;
     uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
     uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    // MARCO: o programa de usuario roda mas nada aparece. Se NENHUM SVC vier do espaco de
+    // usuario, o que roda la' nao e' o programa (nenhum syscall acontece) -- e o alvo passa a
+    // ser por que o codigo de usuario nao executa o `svc` do initcode.
+    ++zeebo_msm::g_svc_total;
+    if (pc < 0x10000000u) {
+        ++zeebo_msm::g_svc_user;
+        if (zeebo_msm::g_svc_user <= 5u) {
+            std::printf("[svc] do USUARIO: pc=0x%08x cpsr=0x%08x (total usuario=%u)\n",
+                        pc, cpsr, zeebo_msm::g_svc_user);
+            std::fflush(stdout);
+        }
+    }
     const u32 svc_cpsr = (cpsr & ~0x3fu) | 0x13u | 0x80u;   // modo SVC, IRQ mascarada
     uc_reg_write(uc, UC_ARM_REG_CPSR, &svc_cpsr);
     uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
@@ -399,6 +504,27 @@ int main(int argc, char** argv) {
         uc_hook_add(uc, &h, UC_HOOK_MEM_READ_PROT,  (void*)on_abort, nullptr, 1, 0);
     }
     uc_hook_add(uc, &h, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
+    uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH, (void*)on_fetch, nullptr, 1, 0);
+    // Invalidacao de TLB: o Unicorn nao honra o MCR c8 do guest. Hook de CODIGO na faixa do
+    // `flush_tlb` do guest (endereco tirado do .nm ao lado da imagem) traduz a operacao.
+    {
+        // O .nm fica ao lado do .bin com o mesmo radical: kernel.bin -> kernel.nm
+        std::string nm = path;
+        const std::size_t dot = nm.rfind('.');
+        const std::size_t slash = nm.find_last_of('/');
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+            nm = nm.substr(0, dot) + ".nm";
+        else
+            nm += ".nm";
+        const u32 ft = nm_symbol(nm, "flush_tlb");
+        if (ft != 0u) {
+            uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_flush_tlb, nullptr, ft, ft + 128u);
+            std::printf("[xv6] flush_tlb do guest em 0x%08x -- TLB do Unicorn ligado a ele\n", ft);
+        } else {
+            std::printf("[xv6] AVISO: nao achei flush_tlb no .nm (%s) -- TLB do Unicorn NAO "
+                        "sera' invalidado quando o guest pedir\n", nm.c_str());
+        }
+    }
     uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
 
     // ------- entrada de teclado (mesma convencao do harness de Linux) -------
@@ -416,12 +542,20 @@ int main(int argc, char** argv) {
     // UC_TLB_CPU usa o softmmu classico, com caminhada de tabela por acesso. O travamento
     // medido e' na GERACAO do bloco da primeira busca em modo usuario -- se o modo de TLB
     // muda o sintoma, o problema esta' na caminhada, nao no tradutor.
-    // UC_TLB_VIRTUAL e' OBRIGATORIO aqui (e e' o default do Unicorn, mas fica explicito para
-    // nao depender de versao). Medido com o MESMO binario e fatias: `cpu` entrega 1 IRQ e nao
-    // sai da entrada em modo usuario; `virtual` entrega 93 IRQs e roda o programa de usuario.
-    uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL);
+    // UC_TLB_CPU (o softmmu, com caminhada de tabela POR ACESSO) e' o CORRETO aqui.
+    // CORRECAO de uma conclusao minha anterior ("virtual e' obrigatorio"): era o INVERSO.
+    // Medido com o mesmo binario:
+    //   VIRTUAL: o initcode NAO executa -- as primeiras "instrucoes de usuario" sao um avanco
+    //            linear por 0x00,0x04,0x08,0x0c..., sem o `svc` que esta' em 0x0c, e nenhum SVC
+    //            de usuario acontece em 250 M instrucoes. O TLB virtual serve traducao VELHA
+    //            depois da troca de pgdir no `switchuvm`.
+    //   CPU:     o initcode executa (0x00,0x04,0x08,0x0c=svc), o SVC e' tomado, o PC vai para o
+    //            VETOR ALTO 0xFFFF0008 e o trap handler do guest roda. Custa ~10-100x mais.
+    // "virtual parecia melhor" porque entregava 93 IRQs contra 1 -- e eu li isso como progresso
+    // quando era o contrario: o modo CPU e' LENTO, nao travado.
+    uc_ctl_tlb_mode(uc, UC_TLB_CPU);
     if (const char* tm = std::getenv("ZEEBO_TLB")) {   // alavanca de A/B
-        if (std::strcmp(tm, "cpu") == 0) uc_ctl_tlb_mode(uc, UC_TLB_CPU);
+        if (std::strcmp(tm, "virtual") == 0) uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL);
     }
     struct sigaction sa;
     std::memset(&sa, 0, sizeof(sa));
