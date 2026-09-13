@@ -691,6 +691,14 @@ int main(int argc, char** argv) {
         ++fatias;
         if (e != UC_ERR_OK) break;
         if (g_stall_pc != 0) {
+            if (std::getenv("ZEEBO_STALL_TRAP") != nullptr) {
+                // Parar AQUI para o gdb (iniciado por ele, ptrace nao bloqueia): e' a unica forma
+                // de ver em que ponto do motor a estagnacao acontece.
+                std::printf("[xv6] SIGTRAP na estagnacao 0x%08llx (para o gdb)\n",
+                            (unsigned long long)g_stall_pc);
+                std::fflush(stdout);
+                ::raise(SIGTRAP);
+            }
             const u64 ini = g_stall_pc & ~0xfffull;
             uc_ctl_remove_cache(uc, ini, ini + 0x1000ull);
             ++g_rep_fixes;
