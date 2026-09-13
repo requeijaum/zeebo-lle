@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <sys/select.h>
+#include <unistd.h>
 
 #include <unicorn/unicorn.h>
 
@@ -281,6 +283,125 @@ inline void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     if (g_irq_log)
         std::printf("[vic] R off=0x%03x -> 0x%08x\n", off, val);
     uc_mem_write(uc, static_cast<u32>(addr), &val, 4);
+}
+
+// --- Modelo da UART do MSM7x00 (base: drivers/tty/serial/msm_serial.h) ------
+// 0x00 MR1(w)  0x04 MR2(w)  0x08 SR(r)/CSR(w)  0x0c TF(w)/RF(r)
+// 0x10 CR(w)/MISR(r)       0x14 IMR(w)/ISR(r)
+// UART_SR_TX_EMPTY=(1<<3)  UART_SR_TX_READY=(1<<2)  UART_ISR_TX_READY=(1<<7)
+// UART_IMR_TXLEV=(1<<0)  UART_IMR_RXSTALE=(1<<3)  UART_IMR_RXLEV=(1<<4)
+// wait_for_xmitr(): se SR nao tem TX_EMPTY, ele gira lendo ISR. handle_tx() so'
+// escreve enquanto SR tiver TX_READY. Os DOIS bits precisam estar certos.
+//
+// A UART e' o oraculo de todo payload bare-metal: "string certa na UART" e' o
+// criterio de sucesso dos degraus P0/P1. `g_console` guarda o TX do guest (com os
+// caracteres imprimiveis) e `on_uart_write` tambem ecoa em stdout.
+inline std::string g_console;      // tudo que o guest escreveu na UART1
+inline u32  g_uart_imr[3] = {0, 0, 0};
+inline bool g_uart_log = false;
+
+inline int uart_idx(u32 base) {
+    return (base == UART1_BASE) ? 0 : ((base == UART2_BASE) ? 1 : 2);
+}
+
+inline u32 uart_irq_of(int idx) { return (idx == 0) ? 10u : ((idx == 1) ? UART2_IRQ : 12u); }
+
+// --- Entrada de teclado -> RX da UART --------------------------------------
+// O guest le o caractere em 0x0c (RF) e ve RX_READY (SR bit 0). O driver so'
+// consome no ISR, entao a chegada de dado tambem levanta a IRQ da UART.
+inline std::string g_rx_buf;          // bytes a entregar (stdin ou script)
+inline bool g_stdin_tty   = false;    // stdin e' tty: ler sob demanda com select
+inline bool g_rx_staged   = false;    // caractere atual visivel em RF
+inline char g_rx_char     = 0;
+inline bool g_uart_tx_irq = false;
+inline bool g_uart_rx_irq = false;
+
+inline void uart_update_irq() {
+    const u32 bit = 1u << UART2_IRQ;
+    if (g_uart_tx_irq || g_uart_rx_irq) g_vic_pending[0] |= bit;
+    else                                g_vic_pending[0] &= ~bit;
+}
+
+inline void rx_fill_from_host() {
+    if (!g_stdin_tty || !g_rx_buf.empty() || g_rx_staged) return;
+    fd_set rf;
+    FD_ZERO(&rf);
+    FD_SET(0, &rf);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    if (select(1, &rf, nullptr, nullptr, &tv) <= 0) return;
+    char c = 0;
+    if (read(0, &c, 1) == 1) g_rx_buf.push_back(c);
+}
+
+inline void rx_try_stage() {
+    if (g_rx_staged || g_rx_buf.empty()) return;
+    // so' levanta IRQ de RX se o driver habilitou RXLEV/RXSTALE
+    if ((g_uart_imr[1] & ((1u << 4) | (1u << 3))) == 0u) return;
+    g_rx_char = g_rx_buf.front();
+    g_rx_buf.erase(0, 1);
+    g_rx_staged = true;
+    g_uart_rx_irq = true;
+    uart_update_irq();
+    if (g_uart_log)
+        std::printf("[rx] entregando 0x%02x\n", (unsigned char)g_rx_char);
+}
+
+inline void on_uart_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                          int size, int64_t value, void* ud) {
+    (void)uc; (void)type; (void)size; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 base = uart_base_for(a);
+    if (!base) return;
+    const u32 off = a - base;
+    if (g_uart_log)
+        std::printf("[uart%d] W off=0x%02x val=0x%08x\n", uart_idx(base), off, (u32)value);
+    if (off == UART_OFF_TF) {                  // TX FIFO: e' o caractere de saida
+        const char c = static_cast<char>(value & 0xff);
+        if (c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f)) g_console.push_back(c);
+        std::putchar(c);
+        std::fflush(stdout);
+    } else if (off == UART_OFF_IMR) {          // mascara de interrupcao
+        const int i = uart_idx(base);
+        g_uart_imr[i] = (u32)value;
+        // TXLEV habilitado = o driver tem dado para enviar e espera a IRQ de TX
+        // (handle_tx escreve a FIFO so' quando o ISR roda).
+        if (i == 1) {
+            g_uart_tx_irq = ((u32)value & UART_IMR_TXLEV) != 0u;
+            uart_update_irq();
+        }
+    }
+}
+
+inline bool on_uart_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
+                         int size, int64_t value, void* ud) {
+    (void)type; (void)size; (void)value; (void)ud;
+    const u32 a = static_cast<u32>(addr);
+    const u32 base = uart_base_for(a);
+    if (!base) return true;
+    const u32 off = a - base;
+    const int idx = uart_idx(base);
+    u32 val = 0;
+    if (off == UART_OFF_SR) {
+        val = UART_SR_TX_EMPTY | UART_SR_TX_READY;
+        if (g_rx_staged) val |= 0x1u;          // UART_SR_RX_READY (1<<0)
+    } else if (off == UART_OFF_TF) {           // leitura de 0x0c = RF (FIFO de RX)
+        if (g_rx_staged) {
+            val = (u32)(unsigned char)g_rx_char;
+            g_rx_staged = false;
+            g_uart_rx_irq = false;
+            uart_update_irq();
+        }
+    } else if (off == UART_OFF_IMR) {          // leitura de 0x14 = ISR
+        val = UART_ISR_TX_READY;
+    } else if (off == UART_OFF_CR) {           // leitura de 0x10 = MISR (mascarado)
+        val = g_uart_imr[idx] & (UART_IMR_TXLEV | (1u << 3) | (1u << 4));
+    }
+    if (g_uart_log)
+        std::printf("[uart%d] R off=0x%02x -> 0x%08x\n", idx, off, val);
+    uc_mem_write(uc, a, &val, 4);              // o guest le este valor
+    return true;
 }
 
 }  // namespace zeebo_msm
