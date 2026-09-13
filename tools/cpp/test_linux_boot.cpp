@@ -104,6 +104,7 @@ using zeebo_msm::timer_refresh_irq;
 using zeebo_msm::on_csr_write;
 using zeebo_msm::on_csr_read;
 using zeebo_msm::g_exc_vector_base;
+using zeebo_msm::deliver_irq;
 using zeebo_msm::PendingAbort;
 using zeebo_msm::g_pending_aborts;
 using zeebo_msm::g_abort_count;
@@ -1323,32 +1324,10 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     if ((g_icount & 0x3Fu) == 0u) timer_refresh_irq();
     // Entrega de IRQ ao guest: o Unicorn nao faz a entrada de excecao de IRQ,
     // entao o handler do kernel (handle_IRQ -> ISR da UART) nunca roda.
-    if (((g_vic_pending[0] & g_vic_en[0]) != 0u ||
-         (g_vic_pending[1] & g_vic_en[1]) != 0u) && !g_irq_in_service) {
-        u32 cpsr = 0, pc_va = 0;
-        uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-        // O parametro 'addr' do hook e' o endereco FISICO; o LR do IRQ tem de ser
-        // o PC arquitetural (VA), senao o kernel volta para um VA inexistente.
-        uc_reg_read(uc, UC_ARM_REG_PC, &pc_va);
-        if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
-            g_irq_in_service = true;
-            ++g_irq_delivered;
-            const u32 nr = vic_pick_irq();       // cobre as duas palavras (0-63)
-            if (g_irq_log || g_irq_delivered <= 8u) {
-                std::printf("[irq] entregando IRQ %u em pc=0x%08x (hook=0x%08x) cpsr=0x%08x\n",
-                            nr, pc_va, static_cast<u32>(addr), cpsr);
-                std::fflush(stdout);
-            }
-            const u32 lr_ret = pc_va + 4u;
-            u32 irq_cpsr = (cpsr & ~0x3fu) | 0x12u | 0x80u;   // modo IRQ, I=1
-            uc_reg_write(uc, UC_ARM_REG_CPSR, &irq_cpsr);
-            uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
-            uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
-            u32 vec = 0xffff0000u + 0x18u;
-            uc_reg_write(uc, UC_ARM_REG_PC, &vec);
-            return;
-        }
-    }
+    // A entrada de excecao de IRQ vive no header compartilhado (peao usada pelos dois
+    // harnesses). Aqui e' so' o ponto de chamada.
+    if (deliver_irq(uc))
+        return;
     // Entrada do host (teclado/pipe) -> RX da UART do guest.
     if ((g_icount & 0x3FFFu) == 0u) rx_fill_from_host();
     rx_try_stage();

@@ -539,4 +539,44 @@ inline void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     uc_mem_write(uc, CSR_PA + off, &val, 4);
 }
 
+// --- Entrega de IRQ ao guest -----------------------------------------------
+// O Unicorn NAO faz a entrada de excecao de IRQ: sem isto o handler do SO nunca roda --
+// nem o clockevent do Linux, nem o tick do xv6. E' o mesmo trabalho que o hardware faz:
+// SPSR <- CPSR, modo IRQ, LR <- PC+4, PC <- vetor+0x18.
+//
+// Serve a QUALQUER SO: le' o pendente do VIC (os DOIS bancos), e so' entrega se o guest
+// nao mascarou IRQ (CPSR bit 7) e nao ha' uma em atendimento (o kernel da' o ACK de
+// verdade em CLEAR0, que zera g_irq_in_service).
+inline bool deliver_irq(uc_engine* uc) {
+    if (((g_vic_pending[0] & g_vic_en[0]) == 0u) && ((g_vic_pending[1] & g_vic_en[1]) == 0u))
+        return false;
+    if (g_irq_in_service) return false;
+
+    u32 cpsr = 0;
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    if ((cpsr & 0x80u) != 0u) return false;        // IRQs mascaradas no guest
+
+    u32 pc_va = 0;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc_va);        // o LR do IRQ tem de ser o PC
+                                                   // arquitetural (VA), nao o PA do hook
+    g_irq_in_service = true;
+    ++g_irq_delivered;
+    const u32 nr = vic_pick_irq();                 // cobre as duas palavras (0-63)
+    if (g_irq_log || g_irq_delivered <= 8u) {
+        std::printf("[irq] entregando IRQ %u em pc=0x%08x cpsr=0x%08x\n", nr, pc_va, cpsr);
+        std::fflush(stdout);
+    }
+
+    const u32 lr_ret = pc_va + 4u;
+    u32 irq_cpsr = (cpsr & ~0x3fu) | 0x12u | 0x80u;   // modo IRQ, I=1
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &irq_cpsr);
+    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
+    uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
+    const u32 vec = g_exc_vector_base + 0x18u;        // vetores BAIXOS no xv6 (V=0),
+                                                      // ALTOS no Linux -- por isso o
+                                                      // vetor e' configuravel
+    uc_reg_write(uc, UC_ARM_REG_PC, &vec);
+    return true;
+}
+
 }  // namespace zeebo_msm

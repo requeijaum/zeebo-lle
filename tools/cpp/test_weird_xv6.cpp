@@ -57,6 +57,23 @@ static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     // Tick do timer: e' o que faz o GPT virar interrupcao no VIC (linha 7). Periodicidade de
     // 64 instrucoes e' a mesma do harness de boot de Linux.
     if ((g_icount & 0x3Fu) == 0u) zeebo_msm::timer_refresh_irq();
+    // DIAGNOSTICO (ZEEBO_TIMER_LOG): mostra a cadeia inteira do tick -- contagem do GPT,
+    // match, enable, pendente, enable do VIC e o I-bit do guest.
+    if (zeebo_msm::g_timer_log) {   // sem filtro: quero ver a serie inteira, inclusive a queda
+        static u32 diag = 0;
+        if ((g_icount & 0x3FFFu) == 0u && diag++ < 40u) {
+            u32 cpsr = 0;
+            uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+            std::printf("[tick] cnt=%u match=%u en=%u pend0=0x%08x vicen0=0x%08x cpsr=0x%08x\n",
+                        zeebo_msm::gpt_count_now(), zeebo_msm::g_gpt_match,
+                        zeebo_msm::g_gpt_enable, zeebo_msm::g_vic_pending[0],
+                        zeebo_msm::g_vic_en[0], cpsr);
+            std::fflush(stdout);
+        }
+    }
+    // Entrega de IRQ ao guest: o Unicorn NAO faz a entrada de excecao de IRQ. Sem isto o
+    // pendente do VIC (o GPT na linha 7) fica la' para sempre e o SO nunca e' preemptado.
+    zeebo_msm::deliver_irq(uc);
     if (g_progress && g_progress_every && (g_icount % g_progress_every) == 0ull) {
         u32 cpsr = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
@@ -166,6 +183,8 @@ int main(int argc, char** argv) {
     uc_mem_map(uc, zeebo_msm::CSR_BASE, zeebo_msm::CSR_SIZE, UC_PROT_ALL);
     // Clockevent ligado: e' o que permite ao SO ser PREEMPTADO. Sem tick o scheduler gira.
     zeebo_msm::g_timer_on = (std::getenv("ZEEBO_NOTIMER") == nullptr);
+    zeebo_msm::g_timer_log = (std::getenv("ZEEBO_TIMER_LOG") != nullptr);
+    zeebo_msm::g_irq_log   = (std::getenv("ZEEBO_IRQ_LOG") != nullptr);
 
     // ------- hooks de periferico (o modelo vem do header compartilhado) -------
     uc_hook h = 0;
@@ -229,8 +248,9 @@ int main(int argc, char** argv) {
                 r0s, r1s, r2s, r3s, r4s, cpsr_s);
     std::printf("\n[xv6] parou: %s (%d) apos %llu instrucoes; pc=0x%08x\n",
                 uc_strerror(e), (int)e, (unsigned long long)g_icount, pc_stop);
-    std::printf("[xv6] aborts=%u; vetores=%u\n",
-                zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base);
+    std::printf("[xv6] aborts=%u; vetores=%u; IRQs entregues=%u\n",
+                zeebo_msm::g_abort_count, zeebo_msm::g_exc_vector_base,
+                zeebo_msm::g_irq_delivered);
     if (g_trace) {
         std::printf("[xv6] ultimos PCs (mais antigo -> mais novo):");
         for (u32 i = 0; i < 16u; ++i)
