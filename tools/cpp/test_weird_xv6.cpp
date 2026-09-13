@@ -64,6 +64,8 @@ static u64  g_progress_every = 2000000ull;
 // imprime PC/contagem/anel no instante exato -- que e' o que diz ONDE ele esta'.
 static uc_engine* g_uc_global = nullptr;
 static u32 g_kpt_mem_addr = 0;   // endereco do kpt_mem do guest (vem do .nm, para o dump)
+static bool g_no_deliver = false;  // ZEEBO_NODELIVER=1: A/B -- nao entrega IRQ (ver on_code)
+static bool g_no_hook = false;     // ZEEBO_NOHOOK=1: A/B -- sem hook de codigo por instrucao
 static int g_hb_ms = 0;   // ZEEBO_XV6_HB=<ms> liga o batimento
 // Caminha a tabela do guest e PROCURA CICLO. O host backtrace mostrou o emulador girando
 // em get_phys_addr_arm/tb_htable_lookup (pagina de CODIGO): walk que nao termina e' o
@@ -306,7 +308,13 @@ static void on_code(uc_engine* uc, u64 addr, u32 size, void* ud) {
     }
     // Entrega de IRQ ao guest: o Unicorn NAO faz a entrada de excecao de IRQ. Sem isto o
     // pendente do VIC (o GPT na linha 7) fica la' para sempre e o SO nunca e' preemptado.
-    zeebo_msm::deliver_irq(uc);
+    // A/B: o deliver_irq roda em TODA instrucao e ESCREVE registradores de CPU (CPSR/PC) quando
+    // ha' IRQ pendente. Se a estagnacao vier dai' (escrita de registrador dentro do hook faz o
+    // motor reiniciar o bloco sem commitar), desligar isto destrava -- e e' o teste que separa
+    // "motor errado" de "meu harness errado".
+    if (!g_no_deliver) {
+        zeebo_msm::deliver_irq(uc);
+    }
     if (g_progress && g_progress_every && (g_icount % g_progress_every) == 0ull) {
         u32 cpsr = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
@@ -593,7 +601,13 @@ int main(int argc, char** argv) {
                         "sera' invalidado quando o guest pedir\n", nm.c_str());
         }
     }
-    uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
+    if (!g_no_hook) {
+        uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)on_code, nullptr, 1, 0);
+    } else {
+        // Sem o hook de codigo nao ha' contador, entao o laco de fatias troca para fatiar por
+        // TEMPO (ver abaixo). E' o A/B que separa "instrumentacao causa a estagnacao" de "motor".
+        std::printf("[xv6] A/B: SEM hook de codigo (sem contador, fatias por tempo)\n");
+    }
 
     // ------- entrada de teclado (mesma convencao do harness de Linux) -------
     if (!isatty(0)) {
@@ -606,6 +620,8 @@ int main(int argc, char** argv) {
     uc_mem_write(uc, entry, img.data(), img.size());
     g_uc_global = uc;
     if (const char* hb = std::getenv("ZEEBO_XV6_HB")) g_hb_ms = std::atoi(hb);
+    g_no_deliver = (std::getenv("ZEEBO_NODELIVER") != nullptr);
+    g_no_hook = (std::getenv("ZEEBO_NOHOOK") != nullptr);
     // Alavanca de diagnostico: o default do Unicorn e' UC_TLB_VIRTUAL (TLB virtual proprio);
     // UC_TLB_CPU usa o softmmu classico, com caminhada de tabela por acesso. O travamento
     // medido e' na GERACAO do bloco da primeira busca em modo usuario -- se o modo de TLB
@@ -662,6 +678,14 @@ int main(int argc, char** argv) {
         // `until` = 0xFFFFFFFF (e nao 0): com begin=0 e until=0 o intervalo fica degenerado e o
         // Unicorn retorna sem executar NADA (medido: fatia em pc=0 -> 0 instrucoes). Uma faixa
         // real que cobre o espaco inteiro deixa a fatia executar a partir do PC atual.
+        if (g_no_hook) {
+            // Sem hook de codigo nao ha' contador: fatia por TEMPO (200 ms) e `count=0` (sem teto).
+            e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 200000ull, 0);
+            ++feito; ++fatias;
+            if (e != UC_ERR_OK) break;
+            if (fatias > 300) break;
+            continue;
+        }
         e = uc_emu_start(uc, (u64)pc_now, 0xFFFFFFFFull, 0, n);
         feito += (g_icount - antes);
         ++fatias;
