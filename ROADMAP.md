@@ -1128,7 +1128,7 @@ passam a viver juntas. Correções pontuais continuam podendo nascer em branch p
 
 ---
 
-### Fase 17: Outros sistemas operacionais no LLE — [PLANEJADA; depende da Fase 16]
+### Fase 17: Outros sistemas operacionais no LLE — [EM CURSO; pré-requisito cumprido em 2026-09-13]
 
 Decisão de 2026-09-13: **assim que o Linux estiver OK, bootar outros sistemas
 operacionais no emulador**. O objetivo não é colecionar bootscreens — é usar cada SO
@@ -1171,8 +1171,52 @@ só o harness, os patches e a receita de build, como já é feito em
 `testdata/kernel-patches/`. Alvos sem licença livre são executados a partir de imagem
 do próprio usuário, nunca redistribuídos.
 
-**Pré-requisito**: Fase 16 fechada (teclado HID enumerando), porque o teclado é o que
-torna qualquer um desses SOs *interativo* — sem ele o teste vira observação passiva.
+**Pré-requisito (cumprido em 2026-09-13)**: a Fase 16 fechou com o teclado HID chegando
+na shell do guest, que é o que torna qualquer um desses SOs *interativo* — sem ele o
+teste vira observação passiva.
+
+**Estado medido dos alvos de núcleo pequeno (2026-09-13)**: o levantamento de build e
+teste foi feito **executando** (rebuild do zero em container, runner rodado, saída
+conferida), não lendo notas. Matriz completa em
+`zeebo_weird_os/notes/BUILD-TEST-MATRIX.md`. Resumo:
+
+- **xv6-zeebo — o mais fácil**: build reprodutível com o toolchain que já está no host do
+  ryzen (`build/toolchains/arm-2011.03`), e hoje **liga a MMU e chega a `kmain`** com
+  identity map em `0x10000000`. Falta, em ordem: console pós-MMU (o `device/uart.c`
+  ainda é PL011), timer GPT/IRQ 7 no VIC, traps, e o userland — que **não linka** hoje
+  (`fs.img` dummy), e sem userland não existe shell.
+- **OKL4/Iguana — o mais perto de um kernel rodando**: no harness C++ com bootinfo
+  populado chega ao **idle do scheduler** (`pc=0xf0002ea4`, 107 k instruções) — número
+  **de nota anterior, não reproduzido** nesta rodada; o `zeebo_bootinfo_harness` daqui é
+  *compile-only*. No runner Python o estado reproduzido é outro: 26.865 instruções,
+  `final_pc=0xf0000114`, e aí escrita não mapeada em `addr=0x14` (mapa flat do Unicorn não
+  acompanha as page tables do kernel). O bloqueio é *ambiente* (contrato de
+  loader/bootinfo, ABI L4e), não arqueologia de código. **Build exige dois itens que não
+  vêm no git**: `build/toolchains/arm-2011.03` (Sourcery 4.5.2, nativo — o script avisa
+  que não roda no container Debian) e o clone `build/okl4-zeebo/okl4_rochus`.
+- **Cinder** (HiStar; tem `memlayout_htcdream.h` para o Dream) exige toolchain própria
+  `arm-jos-linux-gnueabi` (gcc 4.2.4 + newlib compilados do zero) e QEMU patchado: infra
+  cara antes de ver qualquer coisa.
+- **Little Kernel** não tem clone em host nenhum (verificado nos dois); **Android trout**
+  segue de longo prazo (rild/modem + GPU).
+
+**Uma branch por SO (decisão de 2026-09-13)**: `weird-os/xv6`, `weird-os/okl4-iguana`,
+`weird-os/cinder`, `weird-os/lk`, `weird-os/android-trout`, todas a partir da `master`.
+Elas existem por um motivo específico: hoje esses SOs rodam nos **runners Python** de
+`zeebo_weird_os`, que **reimplementam** o MMIO — payload verde ali prova o *runner*, não o
+emulador. Cada branch traz o SO para dentro do `zeebo-lle` com gate próprio
+(`make test-weird-<os>`, **a criar** — nenhum existe ainda), oráculo derivado do binário e
+controle negativo, no padrão do `test_o3_baremetal.cpp`.
+
+**O alvo nº 1 da fase não é nenhum desses**: é o **Linux 2.6.29**, o kernel do Zeebo real,
+que permite comparar o boot linha a linha com um log de hardware. Reconferido em
+2026-09-13: **L1 PASS, L2 PASS (380 M instruções), L3 mudo** — segue aberto e **não**
+depende das branches. Da lista da fase, **NetBSD/evbarm** e **WinCE** também não têm
+artefato nenhum (nada baixado); a matriz registra isso explicitamente.
+
+**A lacuna que os dois alvos mais próximos compartilham**: tradução **VA→PA seguindo o
+TTB do CP15** nos hooks de memória/código, e o **bootinfo**. É o que a Fase 17 precisa
+resolver antes de qualquer um deles sair dos runners Python.
 
 ---
 
