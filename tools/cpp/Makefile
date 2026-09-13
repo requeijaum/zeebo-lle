@@ -545,6 +545,31 @@ test-linux-mmu-contract-selftest: test_linux_mmu_contract
 test_o3_baremetal: test_o3_baremetal.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_o3_baremetal.cpp -lunicorn
 
+# lk (surf-msm7k) no modelo real do MSM7x00. Fatia 1: banner na UART do Zeebo.
+# Imagem por ZEEBO_LK_KERNEL (imagem de SO nao entra no versionamento) -> sem imagem = 77 (SKIP).
+# CONTROLE NEGATIVO embutido: com ZEEBO_LK_NOPROC=1 (sem o stub do proc_comm) o lk nao pode
+# chegar ao banner; se esse caso passar, o gate esta' mentindo e o gate FALHA.
+# Fora dos agregados ate' decisao explicita de tier (mesma regra do xv6).
+LK_KERNEL ?= $(HOME)/projects/lk-src/lk/build-surf-test/lk.bin
+
+test_weird_lk: test_weird_lk.cpp zeebo_msm_soc.h
+	$(CXX) $(CXXFLAGS) -o $@ test_weird_lk.cpp -lunicorn
+
+test-weird-lk: test_weird_lk
+	@echo '--- lk (surf-msm7k) no modelo real do MSM7x00 ---'
+	@out=`ZEEBO_LK_KERNEL=$(LK_KERNEL) ./test_weird_lk 2>&1`; \
+	 st=$$?; \
+	 printf '%s\n' "$$out" | tail -24; \
+	 if [ $$st -eq 77 ]; then echo 'SKIP: imagem do lk ausente'; exit 77; fi; \
+	 [ $$st -eq 0 ] || exit 1; \
+	 echo '--- controle negativo (sem stub do proc_comm) ---'; \
+	 ZEEBO_LK_NOPROC=1 ZEEBO_LK_KERNEL=$(LK_KERNEL) ./test_weird_lk >/dev/null 2>&1; \
+	 if [ $$? -eq 0 ]; then \
+	   echo 'FALHOU: o controle negativo PASSOU -- sem o stub o lk nao pode chegar ao banner'; exit 1; \
+	 fi; \
+	 echo 'OK: banner na UART do Zeebo, e o controle negativo reprova como deve'
+
+
 test-o3-baremetal: test_o3_baremetal test-o3-baremetal-selftest
 	./test_o3_baremetal || [ $$? -eq 77 ]
 
