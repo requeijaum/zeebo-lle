@@ -124,6 +124,12 @@ constexpr u32 VIC_OFF_CLEAR0   = 0x00b0u;
 constexpr u32 VIC_OFF_VEC_RD   = 0x00d0u;
 constexpr u32 VIC_OFF_VEC_PEND = 0x00d4u;
 constexpr u32 VIC_NO_PEND      = 0xffffffffu;
+
+// Numeros de IRQ (arch/arm/mach-msm/include/mach/irqs-7x00.h). Ficam aqui, junto do
+// VIC, porque o seletor de 64 linhas e o seu auto-teste precisam deles.
+constexpr u32 INT_GP_TIMER    = 7u;
+constexpr u32 INT_MDP         = 19u;
+constexpr u32 INT_USB_HS      = 47u;   // palavra 1, bit 15
 constexpr u32 UART2_IRQ        = 11u;      // irq que o driver registra p/ ttyMSM2
 
 static u32  g_vic_en[2]      = {0, 0};
@@ -192,7 +198,8 @@ static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
             break;
         case VIC_OFF_CLEAR0 + 4:
             g_vic_pending[1] &= ~v;
-            break;
+            g_irq_in_service = false;          // idem palavra 0: sem isto a IRQ 47
+            break;                             // (USB HS) trava apos a 1a entrega
         default: break;
     }
     if (g_irq_log)
@@ -203,6 +210,21 @@ static void on_vic_write(uc_engine* uc, uc_mem_type type, uint64_t addr,
 static u32  g_vic_cursor = 0;      // round-robin: sem isso a IRQ de menor
                                    // numero (timer=7) starva as outras (MDP=19)
 
+// Seleciona a proxima IRQ ativa cobrindo as DUAS palavras (0-63). O VIC do MSM tem 64
+// linhas; USB HS = 47 (palavra 1, bit 15). Antes daqui so' a palavra 0 era varrida e
+// qualquer IRQ >= 32 ficava pendente para sempre.
+static u32 vic_pick_irq() {
+    const u32 act0 = g_vic_pending[0] & g_vic_en[0];
+    const u32 act1 = g_vic_pending[1] & g_vic_en[1];
+    if (!act0 && !act1) return VIC_NO_PEND;
+    for (u32 i = 0; i < 64u; ++i) {
+        const u32 b = (g_vic_cursor + i) & 63u;
+        const u32 act = (b < 32u) ? act0 : act1;
+        if (act & (1u << (b & 31u))) { g_vic_cursor = (b + 1u) & 63u; return b; }
+    }
+    return VIC_NO_PEND;
+}
+
 static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
                         int size, int64_t value, void* ud) {
     (void)type; (void)size; (void)value; (void)ud;
@@ -210,11 +232,7 @@ static void on_vic_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
     const u32 act = g_vic_pending[0] & g_vic_en[0];
     u32 val = 0;
     if (off == VIC_OFF_VEC_RD || off == VIC_OFF_VEC_PEND) {
-        val = VIC_NO_PEND;
-        for (u32 i = 0; i < 32u && act; ++i) {
-            const u32 b = (g_vic_cursor + i) & 31u;
-            if (act & (1u << b)) { val = b; g_vic_cursor = (b + 1u) & 31u; break; }
-        }
+        val = vic_pick_irq();
     }
     else if (off == VIC_OFF_STATUS0)     val = act;
     else if (off == VIC_OFF_STATUS0 + 4) val = g_vic_pending[1] & g_vic_en[1];
@@ -1006,6 +1024,50 @@ static void key_to_rx(const SDL_KeyboardEvent& k) {
     if (ks.sym >= SDLK_F1 && ks.sym <= SDLK_F12) return;       // F* ainda nao mapeadas
 }
 
+// Auto-teste do seletor do VIC (env ZEEBO_VIC_TEST=1). Controle NEGATIVO do bug de
+// IRQ >= 32: a versao antiga varria so' g_vic_pending[0], entao a IRQ 47 (USB HS,
+// palavra 1 bit 15) nunca era escolhida e ficava pendente para sempre. Este teste
+// REPROVA aquele codigo e aprova o vic_pick_irq() de 64 linhas.
+static int vic_test() {
+    std::printf("=== Auto-teste do seletor de IRQ do VIC (0-63) ===\n");
+    const u32 save_en0 = g_vic_en[0],      save_en1 = g_vic_en[1];
+    const u32 save_pd0 = g_vic_pending[0], save_pd1 = g_vic_pending[1];
+    const u32 save_cur = g_vic_cursor;
+    int fails = 0;
+    auto check = [&](const char* nome, u32 got, u32 want) {
+        if (got == want) std::printf("  OK   %-34s -> %u\n", nome, got);
+        else { std::printf("  FAIL %-34s -> %u (esperado %u)\n", nome, got, want); ++fails; }
+    };
+    auto setup = [&](u32 en0, u32 pd0, u32 en1, u32 pd1) {
+        g_vic_en[0] = en0; g_vic_pending[0] = pd0;
+        g_vic_en[1] = en1; g_vic_pending[1] = pd1;
+        g_vic_cursor = 0;
+    };
+    // 1) nada pendente
+    setup(0, 0, 0, 0);
+    check("nenhuma IRQ ativa", vic_pick_irq(), VIC_NO_PEND);
+    // 2) palavra 0 (regressao: timer=7)
+    setup(1u << INT_GP_TIMER, 1u << INT_GP_TIMER, 0, 0);
+    check("timer (IRQ 7, palavra 0)", vic_pick_irq(), INT_GP_TIMER);
+    // 3) o caso que o codigo antigo errava: IRQ 47 sozinha
+    setup(0, 0, 1u << (INT_USB_HS - 32u), 1u << (INT_USB_HS - 32u));
+    check("USB HS (IRQ 47, palavra 1)", vic_pick_irq(), INT_USB_HS);
+    // 4) pendente mas NAO habilitada => ninguem
+    setup(0, 0, 0, 1u << (INT_USB_HS - 32u));
+    check("IRQ 47 pendente sem enable", vic_pick_irq(), VIC_NO_PEND);
+    // 5) round-robin entre as palavras: 7 e 47 juntas nao podem starvar a 47
+    setup(1u << INT_GP_TIMER, 1u << INT_GP_TIMER,
+          1u << (INT_USB_HS - 32u), 1u << (INT_USB_HS - 32u));
+    const u32 a = vic_pick_irq(), b = vic_pick_irq();
+    check("round-robin 7/47: primeira", a, INT_GP_TIMER);
+    check("round-robin 7/47: segunda",  b, INT_USB_HS);
+    g_vic_en[0] = save_en0; g_vic_en[1] = save_en1;
+    g_vic_pending[0] = save_pd0; g_vic_pending[1] = save_pd1;
+    g_vic_cursor = save_cur;
+    std::printf("=== VIC: %d falha(s) ===\n", fails);
+    return fails;
+}
+
 // Auto-teste deterministico da tabela de teclas (env ZEEBO_KEY_TEST=1): alimenta
 // eventos sinteticos e confere os bytes que iriam para a RX da UART. Roda antes da
 // emulacao, entao a verificacao e' rapida e nao depende de janela.
@@ -1276,7 +1338,6 @@ constexpr u32 TIMER_ENABLE    = 0x08u;
 constexpr u32 TIMER_CLEAR     = 0x0cu;
 constexpr u32 GPT_HZ          = 32768u;
 constexpr u32 DGT_HZ          = 19200000u;
-constexpr u32 INT_GP_TIMER    = 7u;
 
 // 1 segundo de tempo do guest = INSN_PER_SEC instrucoes emuladas.
 constexpr u64 INSN_PER_SEC = 1000000ull;
@@ -1352,7 +1413,6 @@ void on_csr_read(uc_engine* uc, uc_mem_type type, uint64_t addr,
 constexpr u32 MDP_INTR_ENABLE = 0x020u;
 constexpr u32 MDP_INTR_STATUS = 0x024u;
 constexpr u32 MDP_INTR_CLEAR  = 0x028u;
-constexpr u32 INT_MDP         = 19u;
 
 static u32  g_mdp_status = 0;
 static bool g_mdp_log    = false;
@@ -1510,7 +1570,8 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     if ((g_icount & 0x3Fu) == 0u) timer_refresh_irq();
     // Entrega de IRQ ao guest: o Unicorn nao faz a entrada de excecao de IRQ,
     // entao o handler do kernel (handle_IRQ -> ISR da UART) nunca roda.
-    if ((g_vic_pending[0] & g_vic_en[0]) != 0u && !g_irq_in_service) {
+    if (((g_vic_pending[0] & g_vic_en[0]) != 0u ||
+         (g_vic_pending[1] & g_vic_en[1]) != 0u) && !g_irq_in_service) {
         u32 cpsr = 0, pc_va = 0;
         uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
         // O parametro 'addr' do hook e' o endereco FISICO; o LR do IRQ tem de ser
@@ -1519,15 +1580,7 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
         if ((cpsr & 0x80u) == 0u) {              // IRQs desmascaradas no guest
             g_irq_in_service = true;
             ++g_irq_delivered;
-            u32 nr = 0;
-            {
-                const u32 act = g_vic_pending[0] & g_vic_en[0];
-                nr = 32u;                                   // 32 = nenhuma
-                for (u32 i = 0; i < 32u && act; ++i) {
-                    const u32 b = (g_vic_cursor + i) & 31u;
-                    if (act & (1u << b)) { nr = b; g_vic_cursor = (b + 1u) & 31u; break; }
-                }
-            }
+            const u32 nr = vic_pick_irq();       // cobre as duas palavras (0-63)
             if (g_irq_log || g_irq_delivered <= 8u) {
                 std::printf("[irq] entregando IRQ %u em pc=0x%08x (hook=0x%08x) cpsr=0x%08x\n",
                             nr, pc_va, static_cast<u32>(addr), cpsr);
@@ -1583,8 +1636,13 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     }
     // A definicao de usb_async_poll esta' mais abaixo, junto do modelo do USB.
     void usb_async_poll(uc_engine*);
+    void usb_engine_run(uc_engine*);
     static const bool usb_async_on = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
     if (usb_async_on && (g_icount & 0x3FFFFu) == 0u) usb_async_poll(uc);
+    // MOTOR de qTD: executa a lista assincrona (a cada 4k instrucoes -- precisa ser
+    // bem mais frequente que o observador, senao o HCD estoura o timeout do URB
+    // antes de a transferencia acontecer).
+    if ((g_icount & 0x3FFu) == 0u) usb_engine_run(uc);
     void fb_decode_text(uc_engine*);
     static const bool fb_text_on = (std::getenv("ZEEBO_FB_TEXT") != nullptr);
     if (fb_text_on && (g_icount & 0x3FFFFFu) == 0u) fb_decode_text(uc);
@@ -1884,7 +1942,12 @@ static void on_code_probe(uc_engine* uc, u64 addr, u32 size, void* user) {
     }
     // Cadeia do fbcon: quem realmente desenha no framebuffer?
     {
-        static const u32 kDraw[] = {0xc012b17cu, 0xc01217f0u, 0xc0128544u, 0xc0126438u, 0xc0123bccu, 0xc0129e04u};
+        // VAs do System.map do kernel ATUAL (#21). Mesma armadilha do PP: mudam a cada
+        // rebuild e, desatualizados, os contadores ficam em zero e parecem "o codigo
+        // nao roda" (era o caso de cfb_imageblit=0 com fbcon_putcs=60). Reconferir com:
+        //   grep -E ' (cfb_imageblit|fbcon_putcs|bit_putcs|fbcon_init|fbcon_switch|cfb_fillrect)$' System.map
+        // Ordem: cfb_imageblit, fbcon_putcs, bit_putcs, fbcon_init, fbcon_switch, cfb_fillrect.
+        static const u32 kDraw[] = {0xc012b8fcu, 0xc0121f70u, 0xc0128cc4u, 0xc0126bb8u, 0xc012434cu, 0xc012a584u};
         static const char* kName[] = {"cfb_imageblit", "fbcon_putcs", "bit_putcs",
                                       "fbcon_init", "fbcon_switch", "cfb_fillrect"};
         for (u32 k = 0; k < 6u; ++k) {
@@ -2051,6 +2114,302 @@ static void on_usb_read(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64
 }
 
 // ---------------------------------------------------------------------------
+// TECLADO HID EMULADO (boot protocol) na porta 1 do root hub.
+// Descritores conforme USB 2.0 cap. 9 e HID 1.11. Sao os bytes que o dispositivo
+// devolve nos control transfers da enumeracao; o motor de qTD abaixo os serve.
+namespace hidkbd {
+
+// Device descriptor (USB 2.0 tabela 9-8).
+static const unsigned char kDevice[18] = {
+    18, 0x01,               // bLength, bDescriptorType=DEVICE
+    0x00, 0x02,             // bcdUSB = 2.00
+    0x00, 0x00, 0x00,       // class/subclass/protocol: definidos na interface
+    64,                     // bMaxPacketSize0
+    0x27, 0x18,             // idVendor  = 0x1827 (livre; nao clonamos fabricante)
+    0x01, 0x2b,             // idProduct = 0x2b01
+    0x00, 0x01,             // bcdDevice = 1.00
+    0x01, 0x02, 0x00,       // iManufacturer, iProduct, iSerialNumber
+    0x01                    // bNumConfigurations
+};
+
+// HID report descriptor: teclado boot protocol (HID 1.11, apendice B.1).
+static const unsigned char kReport[63] = {
+    0x05, 0x01,             // Usage Page (Generic Desktop)
+    0x09, 0x06,             // Usage (Keyboard)
+    0xA1, 0x01,             // Collection (Application)
+    0x05, 0x07,             //   Usage Page (Keyboard/Keypad)
+    0x19, 0xE0,             //   Usage Minimum (LeftControl)
+    0x29, 0xE7,             //   Usage Maximum (Right GUI)
+    0x15, 0x00, 0x25, 0x01, //   Logical Min 0, Max 1
+    0x75, 0x01, 0x95, 0x08, //   Report Size 1, Count 8
+    0x81, 0x02,             //   Input (Data,Var,Abs)  -> byte de modificadores
+    0x95, 0x01, 0x75, 0x08, //   Report Count 1, Size 8
+    0x81, 0x03,             //   Input (Cnst,Var,Abs)  -> byte reservado
+    0x95, 0x05, 0x75, 0x01, //   Report Count 5, Size 1
+    0x05, 0x08,             //   Usage Page (LEDs)
+    0x19, 0x01, 0x29, 0x05, //   Usage Min 1, Max 5
+    0x91, 0x02,             //   Output (Data,Var,Abs) -> LEDs
+    0x95, 0x01, 0x75, 0x03, //   Report Count 1, Size 3
+    0x91, 0x03,             //   Output (Cnst)         -> padding
+    0x95, 0x06, 0x75, 0x08, //   Report Count 6, Size 8
+    0x15, 0x00, 0x25, 0x65, //   Logical Min 0, Max 101
+    0x05, 0x07,             //   Usage Page (Keyboard)
+    0x19, 0x00, 0x29, 0x65, //   Usage Min 0, Max 101
+    0x81, 0x00,             //   Input (Data,Ary)      -> 6 teclas
+    0xC0                    // End Collection
+};
+
+// Config + Interface + HID + Endpoint (34 bytes no total).
+static const unsigned char kConfig[34] = {
+    9, 0x02, 34, 0x00, 0x01, 0x01, 0x00, 0xA0, 50,   // CONFIG: 1 iface, bus-powered, 100mA
+    9, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, // IFACE: HID, boot, keyboard
+    9, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 63, 0x00,   // HID: report descriptor, 63 bytes
+    7, 0x05, 0x81, 0x03, 0x08, 0x00, 10                // EP 1 IN, interrupt, 8 bytes, 10ms
+};
+
+// String descriptors (UTF-16LE).
+static const unsigned char kLang[4]  = {4, 0x03, 0x09, 0x04};   // 0x0409 en-US
+static const unsigned char kManu[16] = {16, 0x03, 'Z',0,'e',0,'e',0,'b',0,'o',0,'-',0,'L',0};
+static const unsigned char kProd[22] = {22, 0x03, 'L',0,'L',0,'E',0,' ',0,'K',0,'e',0,'y',0,'b',0,'o',0,'a',0};
+
+static u8  g_address   = 0;      // endereco atribuido por SET_ADDRESS
+static bool g_configured = false;
+
+// Resolve GET_DESCRIPTOR. Devolve o ponteiro e o tamanho, ou nullptr.
+static const unsigned char* descriptor(u16 wValue, u16 /*wIndex*/, u32* len) {
+    const u8 type = (u8)(wValue >> 8), idx = (u8)(wValue & 0xff);
+    switch (type) {
+    case 0x01: *len = sizeof(kDevice); return kDevice;        // DEVICE
+    case 0x02: *len = sizeof(kConfig); return kConfig;        // CONFIGURATION
+    case 0x22: *len = sizeof(kReport); return kReport;        // HID REPORT
+    case 0x21: *len = 9; return kConfig + 18;                 // HID descriptor
+    case 0x03:                                                // STRING
+        if (idx == 0) { *len = sizeof(kLang); return kLang; }
+        if (idx == 1) { *len = sizeof(kManu); return kManu; }
+        if (idx == 2) { *len = sizeof(kProd); return kProd; }
+        return nullptr;
+    default: return nullptr;
+    }
+}
+
+} // namespace hidkbd
+
+// ---------------------------------------------------------------------------
+// MOTOR DE qTD (o "hardware" executando a lista assincrona).
+// O HCD monta qH/qTD na RAM do guest e espera o controlador executa-los. Enquanto
+// so' observavamos, todo URB estourava em -110 (ETIMEDOUT). Aqui executamos de fato:
+// caminha a lista, para cada qTD com Active=1 faz a transferencia contra o teclado
+// HID emulado, escreve os dados no buffer do guest, limpa o Active, atualiza os
+// bytes restantes e levanta USBSTS.USBINT -> IRQ 47.
+//
+// Layout (EHCI 1.0 cap. 3.5 / 3.6):
+//   qH:  0x00 link | 0x04 info1 | 0x08 info2 | 0x0c current qTD | 0x10.. overlay
+//   qTD: 0x00 next | 0x04 alt   | 0x08 token | 0x0c..0x1c buffer[5]
+//   token: bit7 Active, bit6 Halted, bits 8-9 PID (0=OUT 1=IN 2=SETUP),
+//          bits 16-30 Total Bytes, bit 15 IOC, bits 10-11 CERR
+static bool g_usb_engine_log = false;
+static u32  g_usb_xfers = 0;         // qTDs executados
+static u32  g_usb_irq_raised = 0;    // vezes que levantamos a IRQ 47
+
+// Ultimo setup packet visto (o control transfer chega em 3 estagios: SETUP, DATA,
+// STATUS -- cada um e' um qTD separado, entao o SETUP precisa ser lembrado).
+static unsigned char g_usb_setup[8] = {0};
+static bool          g_usb_setup_valid = false;
+
+// Escreve 'len' bytes em ate' 5 paginas do qTD (buffer[0] tem offset; as demais sao
+// alinhadas a 4K). Devolve quantos bytes couberam.
+static u32 usb_qtd_write(uc_engine* uc, const u32 bufs[5], const unsigned char* src, u32 len) {
+    u32 done = 0;
+    for (int i = 0; i < 5 && done < len; ++i) {
+        if (!bufs[i]) break;
+        const u32 base = (i == 0) ? bufs[0] : (bufs[i] & ~0xfffu);
+        const u32 room = (i == 0) ? (0x1000u - (bufs[0] & 0xfffu)) : 0x1000u;
+        const u32 n    = std::min(room, len - done);
+        if (uc_mem_write(uc, base, src + done, n) != UC_ERR_OK) break;
+        done += n;
+    }
+    return done;
+}
+
+// Executa um control transfer contra o teclado HID. Devolve os bytes transferidos.
+static u32 usb_control(uc_engine* uc, u32 pid, const u32 bufs[5], u32 want) {
+    if (pid == 2u) {                                  // SETUP: guarda o pacote
+        unsigned char s[8] = {0};
+        const uc_err e = bufs[0] ? uc_mem_read(uc, bufs[0], s, 8) : UC_ERR_MAP;
+        if (bufs[0] && e == UC_ERR_OK) {
+            std::memcpy(g_usb_setup, s, 8);
+            g_usb_setup_valid = true;
+            if (g_usb_engine_log)
+                std::printf("[usb-hid] SETUP %02x %02x %02x%02x %02x%02x len=%u\n",
+                            s[0], s[1], s[3], s[2], s[5], s[4], (unsigned)(s[6] | (s[7] << 8)));
+        }
+        return want;                                  // SETUP sempre "cabe" (8 bytes)
+    }
+    if (!g_usb_setup_valid) return 0;
+    const u8  bmReq = g_usb_setup[0], bReq = g_usb_setup[1];
+    const u16 wValue = (u16)(g_usb_setup[2] | (g_usb_setup[3] << 8));
+    const u16 wIndex = (u16)(g_usb_setup[4] | (g_usb_setup[5] << 8));
+
+    if (pid == 1u) {                                  // IN: dispositivo -> host
+        if (bReq == 0x06) {                           // GET_DESCRIPTOR
+            u32 len = 0;
+            const unsigned char* d = hidkbd::descriptor(wValue, wIndex, &len);
+            if (!d) return 0;
+            const u32 n = std::min(want, len);
+            const u32 w = usb_qtd_write(uc, bufs, d, n);
+            if (g_usb_engine_log)
+                std::printf("[usb-hid] GET_DESCRIPTOR tipo=0x%02x -> %u bytes\n",
+                            (unsigned)(wValue >> 8), w);
+            return w;
+        }
+        if (bReq == 0x08) {                           // GET_CONFIGURATION
+            const unsigned char c = hidkbd::g_configured ? 1 : 0;
+            return usb_qtd_write(uc, bufs, &c, std::min(want, 1u));
+        }
+        if (bReq == 0x00) {                           // GET_STATUS
+            const unsigned char st[2] = {0, 0};
+            return usb_qtd_write(uc, bufs, st, std::min(want, 2u));
+        }
+        return 0;
+    }
+    // OUT / status stage
+    if (bReq == 0x05) {                               // SET_ADDRESS
+        hidkbd::g_address = (u8)(wValue & 0x7f);
+        if (g_usb_engine_log) std::printf("[usb-hid] SET_ADDRESS %u\n", hidkbd::g_address);
+    } else if (bReq == 0x09) {                        // SET_CONFIGURATION
+        hidkbd::g_configured = (wValue != 0);
+        if (g_usb_engine_log) std::printf("[usb-hid] SET_CONFIGURATION %u\n", wValue);
+    } else if (bmReq == 0x21 && g_usb_engine_log) {   // classe HID (SET_IDLE/PROTOCOL/REPORT)
+        std::printf("[usb-hid] classe req=0x%02x val=0x%04x (aceito)\n", bReq, wValue);
+    }
+    return want;                                      // status stage: zero-length OK
+}
+
+// Executa um qTD. Devolve true se completou (Active limpo).
+// 'qtd_addr' aponta para o inicio da struct de qTD (token em +0x08, buffers em +0x0c).
+// ATENCAO: o overlay do qH NAO comeca em qh+0x10 com esse layout -- ver usb_run_overlay.
+static bool usb_run_qtd(uc_engine* uc, u32 qtd_addr, bool is_control, bool is_intr) {
+    u32 q[8];
+    if (uc_mem_read(uc, qtd_addr, q, sizeof(q)) != UC_ERR_OK) return false;
+    u32 tok = q[2];
+    if (!((tok >> 7) & 1u)) return false;             // nao esta' Active
+    const u32 pid   = (tok >> 8) & 3u;
+    const u32 total = (tok >> 16) & 0x7fffu;
+    const u32 bufs[5] = {q[3], q[4], q[5], q[6], q[7]};
+
+    u32 moved = 0;
+    if (is_control) {
+        moved = usb_control(uc, pid, bufs, total);
+    } else if (is_intr && pid == 1u) {
+        // Endpoint de interrupcao (EP1 IN): sem tecla pendente o teclado responde
+        // NAK -- o qTD fica Active e o hardware tenta de novo no proximo frame.
+        // Modelamos exatamente isso: nao completar o qTD e' o comportamento correto.
+        return false;
+    } else {
+        moved = 0;
+    }
+
+    // Completa: Active=0, Total Bytes = quanto sobrou (o HCD usa isso p/ actual_length).
+    const u32 left = (moved >= total) ? 0u : (total - moved);
+    tok &= ~0x80u;                                    // Active = 0
+    tok &= ~0x40u;                                    // Halted = 0 (sem erro)
+    tok  = (tok & ~(0x7fffu << 16)) | ((left & 0x7fffu) << 16);
+    uc_mem_write(uc, qtd_addr + 0x08u, &tok, 4);
+    ++g_usb_xfers;
+    if (g_usb_engine_log)
+        std::printf("[usb-eng] qTD@0x%08x pid=%u pedidos=%u movidos=%u -> tok=0x%08x\n",
+                    qtd_addr, pid, total, moved, tok);
+    return true;
+}
+
+// Varre a lista assincrona e executa o que estiver Active. Chamada periodicamente
+// pelo hook de instrucoes.
+void usb_engine_run(uc_engine* uc) {
+    const u32 usbcmd = g_usb_regs[(0x140u & 0x1ffu) >> 2];
+    if (!(usbcmd & 0x20u)) return;                    // Async Schedule Enable (ASE)
+    const u32 list = g_usb_regs[(0x158u & 0x1ffu) >> 2] & ~0x1fu;
+    if (!list) return;
+
+    bool any = false;
+    u32 qh = list;
+    for (int n = 0; n < 32 && qh; ++n) {              // a lista e' circular: limite duro
+        u32 w[12];
+        if (uc_mem_read(uc, qh, w, sizeof(w)) != UC_ERR_OK) break;
+        // info1 bits 8-11 = endpoint; bit 15 = "Head of Reclamation"; EP 0 = control.
+        const u32 ep = (w[1] >> 8) & 0xfu;
+        const bool is_control = (ep == 0);
+        const bool is_intr    = (ep == 1);
+        // O overlay e' uma COPIA do qTD corrente. Ao completar o overlay o hardware
+        // real escreve o status de volta no qTD apontado por hw_current -- e e' esse
+        // qTD que o ehci_irq/qh_completions varre (lista de software). Completar so'
+        // o overlay deixava o qTD do HCD Active para sempre: a IRQ 47 chegava, o
+        // handler nao achava trabalho terminado e o URB estourava (-110).
+        const u32 cur_qtd = w[3] & ~0x1fu;
+        // Overlay do qH: hw_qtd_next em +0x10, hw_token em +0x18, hw_buf[] em +0x1c.
+        // Um qTD avulso tem token em +0x08 e buffers em +0x0c, ou seja o overlay se
+        // comporta como um qTD que comecasse em qh+0x10. Passar qh+0x10 direto lia o
+        // token 8 bytes adiante e os buffers vinham zerados (buf0=0) -- era por isso
+        // que o SETUP nunca era decodificado e o HCD via EPROTO (-71).
+        if (usb_run_qtd(uc, qh + 0x10u, is_control, is_intr)) {
+            any = true;
+            if (cur_qtd) {                            // espelha o status no qTD real
+                u32 ovtok = 0;
+                if (uc_mem_read(uc, qh + 0x18u, &ovtok, 4) == UC_ERR_OK)
+                    uc_mem_write(uc, cur_qtd + 0x08u, &ovtok, 4);
+            }
+        }
+        // Quando o HCD enfileira um URB novo num qH ja' linkado, ele sobrescreve o
+        // qTD "dummy" no lugar: o novo qTD e' alcancavel por hw_current (+0x0c) e nao
+        // pelo overlay.next_qtd, que continua Terminate. Varrer so' o overlay fazia o
+        // motor perder o GET_DESCRIPTOR de config inteiro (descritor/all -> -110).
+        {
+            u32 cur = w[3] & ~0x1fu;
+            for (int k = 0; k < 32 && cur && !(cur & 1u); ++k) {
+                if (usb_run_qtd(uc, cur, is_control, is_intr)) any = true;
+                u32 nx2 = 0;
+                if (uc_mem_read(uc, cur, &nx2, 4) != UC_ERR_OK) break;
+                if (nx2 & 1u) break;
+                cur = nx2 & ~0x1fu;
+            }
+        }
+        u32 qtd = w[4] & ~0x1fu;                      // overlay.next_qtd
+        for (int k = 0; k < 32 && qtd && !(qtd & 1u); ++k) {
+            if (usb_run_qtd(uc, qtd, is_control, is_intr)) any = true;
+            u32 nx = 0;
+            if (uc_mem_read(uc, qtd, &nx, 4) != UC_ERR_OK) break;
+            if (nx & 1u) break;                       // Terminate
+            qtd = nx & ~0x1fu;
+        }
+        const u32 nx = w[0];
+        if (nx & 1u) break;
+        qh = nx & ~0x1fu;
+        if (qh == list) break;                        // deu a volta
+    }
+
+    if (any) {
+        // USBSTS.USBINT (bit 0) e, se habilitado em USBINTR, a IRQ 47 para o guest.
+        u32 sts = g_usb_regs[(0x144u & 0x1ffu) >> 2] | 0x1u;
+        g_usb_regs[(0x144u & 0x1ffu) >> 2] = sts;
+        const u32 intr = g_usb_regs[(0x148u & 0x1ffu) >> 2];
+        if (g_usb_engine_log) {
+            static u32 last_intr = 0xffffffffu;
+            if (intr != last_intr) {
+                last_intr = intr;
+                std::printf("[usb-irq] USBINTR=0x%08x (bit0=%u) irqs=%u\n",
+                            intr, (unsigned)(intr & 1u), g_usb_irq_raised);
+            }
+        }
+        if (intr & 0x1u) {
+            g_vic_pending[1] |= (1u << (INT_USB_HS - 32u));
+            ++g_usb_irq_raised;
+            if (g_usb_engine_log && g_usb_irq_raised <= 3u)
+                std::printf("[usb-irq] raise 47: vic_en[1]=0x%08x pend[1]=0x%08x\n",
+                            g_vic_en[1], g_vic_pending[1]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Lista assincrona do EHCI: o HCD deixa qH/qTD (48/32 bytes) na RAM do guest e o
 // hardware os executa. Sem isso o kernel fica em polling logo apos "new USB bus
 // registered". Aqui so' OBSERVAMOS: caminha a lista, imprime a transferencia ativa
@@ -2144,9 +2503,30 @@ void usb_async_poll(uc_engine* uc) {
 // 8x16 do kernel (simbolo fontdata_8x16, VA 0xc02352b8 -> PA 0x102352b8). Serve para
 // conferir se o que o shell escreve no console de VT chega ao FB, e para depurar os
 // dois paineis lado a lado sem depender de olhar a imagem.
+// Conferido contra o System.map do #21 (c02352b8 r fontdata_8x16). Se um rebuild
+// mover o simbolo, o decodificador passa a ler lixo e "some" o texto -- o guard
+// abaixo (fb_check_font) grita em vez de deixar o instrumento mentir.
 static const u32 FONT_PA = 0x102352b8u;
 
+// Guard barato contra VA podre: a font 8x16 do kernel comeca com o glifo 0 (todo
+// zero) seguido de bytes nao-triviais; se a janela inteira vier zerada ou 0xff, o
+// endereco esta' errado. Roda uma vez, so' quando o decodificador e' usado.
+static bool fb_font_looks_sane(uc_engine* uc) {
+    u8 probe[256] = {0};
+    if (uc_mem_read(uc, FONT_PA, probe, sizeof(probe)) != UC_ERR_OK) return false;
+    unsigned zero = 0, ff = 0;
+    for (unsigned char b : probe) { if (b == 0x00) ++zero; if (b == 0xff) ++ff; }
+    return zero < sizeof(probe) && ff < sizeof(probe);
+}
+
 void fb_decode_text(uc_engine* uc) {
+    static bool font_checked = false;
+    if (!font_checked) {
+        font_checked = true;
+        if (!fb_font_looks_sane(uc))
+            std::printf("[fb-text] AVISO: fontdata_8x16 em 0x%08x nao parece uma font "
+                        "(VA mudou no rebuild? conferir no System.map)\n", FONT_PA);
+    }
     const u32 half_bytes = (u32)FB_XRES * FB_YRES * 2u;      // 691200
     std::vector<u8> buf(half_bytes * 2u);
     if (uc_mem_read(uc, FB_PA, buf.data(), buf.size()) != UC_ERR_OK) return;
@@ -2210,6 +2590,7 @@ void fb_decode_text(uc_engine* uc) {
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "selftest") return run_selftest();
+    if (std::getenv("ZEEBO_VIC_TEST")) return vic_test() == 0 ? 0 : 1;
     if (std::getenv("ZEEBO_VEC_TEST")) vec_test();
 
     std::printf("=== Test boot de kernel Linux no MSM7201A (Zeebo) ===\n");
@@ -2263,6 +2644,7 @@ int main(int argc, char** argv) {
     // mapeamento o acesso vira UC_ERR_MAP e mata o boot (visto no MDP tambem).
     uc_mem_map(uc, 0xa0800000u, 0x1000u, UC_PROT_ALL);
     g_usb_log = (std::getenv("ZEEBO_USB_LOG") != nullptr);
+    g_usb_engine_log = (std::getenv("ZEEBO_USB_ENGINE_LOG") != nullptr);
     g_usb_async_log = (std::getenv("ZEEBO_USB_ASYNC") != nullptr);
     if (std::getenv("ZEEBO_KEY_TEST")) key_test();     // tabela de teclas (rapido, sem janela)
     uc_hook hu_w = 0, hu_r = 0;
@@ -2428,7 +2810,12 @@ int main(int argc, char** argv) {
         // O host controller EHCI entra por padrao (ZEEBO_NOUSB=1 desliga): com o modelo
         // de registradores servindo as leituras, o reset completa, o HCD inicia e o boot
         // segue ate' a shell normalmente.
-        if (!std::getenv("ZEEBO_NOUSB")) cmdline += " zeebo_usb=1";
+        // [2026-09-13] USB/HID esta' PARADO (ver ROADMAP Fase 16): o controlador sobe e
+        // o dispositivo enumera ate' o config descriptor, mas o descritor completo nunca
+        // completa e o HCD re-tenta em laco, poluindo o console e gastando budget. Ate'
+        // fechar aquilo o EHCI fica FORA por padrao; ZEEBO_USB=1 religa para trabalhar
+        // no problema. (Antes era o contrario: ligado por padrao com ZEEBO_NOUSB=1.)
+        if (std::getenv("ZEEBO_USB")) cmdline += " zeebo_usb=1";
         size_t clen = cmdline.size() + 1;
         size_t cwords = (clen + 3) / 4;
         t.push_back(static_cast<u32>(2 + cwords)); t.push_back(0x54410009u);
@@ -2483,9 +2870,16 @@ int main(int argc, char** argv) {
                 (unsigned long long)g_fb_writes, (unsigned long long)g_fb_writes_nz);
     std::printf("[draw] cfb_imageblit=%u fbcon_putcs=%u bit_putcs=%u fbcon_init=%u fbcon_switch=%u cfb_fillrect=%u\n",
                 g_draw_cnt[0], g_draw_cnt[1], g_draw_cnt[2], g_draw_cnt[3], g_draw_cnt[4], g_draw_cnt[5]);
-    {   // pseudo_palette do msm_fb (static unsigned PP[16], VA c03f45d4)
+    {   // pseudo_palette do msm_fb (static unsigned PP[16] em msm_fb.c).
+        // ATENCAO: o VA sai do System.map e MUDA a cada rebuild do kernel. Estava
+        // fixo em 0xc03f45d4 (kernel antigo) e virou 0xc05b36b4 no #21 -- o valor
+        // velho lia memoria qualquer e imprimia "PP = e7fddef0 x16" (um ponteiro),
+        // o que parecia paleta corrompida e nao era. Conferir com:
+        //   grep ' PP$' /work/k6/linux-3.4.113/System.map
+        // PHYS_OFFSET 0x10000000 = PAGE_OFFSET 0xc0000000, dai o VA-0xb0000000.
+        constexpr u32 kPPVirt = 0xc05b36b4u;
         u32 pp[16] = {0};
-        if (uc_mem_read(uc, 0x103f45d4u, pp, sizeof(pp)) == UC_ERR_OK) {
+        if (uc_mem_read(uc, kPPVirt - 0xb0000000u, pp, sizeof(pp)) == UC_ERR_OK) {
             std::printf("[fb] pseudo_palette PP =");
             for (int i = 0; i < 16; ++i) std::printf(" %08x", pp[i]);
             std::printf("\n");

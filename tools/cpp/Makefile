@@ -121,6 +121,18 @@ test_nand_relocator_bounds: test_nand_relocator_bounds.cpp
 test_vic_irq: test_vic_irq.cpp zeebo_vic_irq.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_VIC_WITH_UNICORN -o $@ test_vic_irq.cpp -lunicorn
 
+# Seletor de IRQ do harness de Linux: cobre as DUAS palavras do VIC (0-63). O bug
+# real era varrer so' a palavra 0, o que tornava a IRQ 47 (USB HS) inespera'vel.
+# Roda sem kernel (puro host), por isso cabe no check-fast.
+test-linux-vic: test_linux_boot
+	@echo '--- VIC 64 linhas: seletor round-robin cobre IRQ >= 32 ---'
+	ZEEBO_VIC_TEST=1 ./test_linux_boot
+
+# Tabela de teclas do harness (SDL -> bytes na RX da UART). Tambem host-only.
+# exit 77 = SKIP (sem zImage no ambiente); nao e' sucesso nem falha.
+test-linux-keys: test_linux_boot
+	ZEEBO_KEY_TEST=1 ./test_linux_boot || [ $$? -eq 77 ]
+
 test-vic-irq: test_vic_irq
 	./test_vic_irq
 	@# Negative mutation: mask-ignoring delivery MUST fail (RED reproduced).
@@ -927,7 +939,7 @@ FIRMWARE_TARGETS := test test-zwheel-preview test-rex test-zwheel test-efs2-fs t
 check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
        test-cli \
        test_l4_mmu test_l4_mmu_uc test_shared_memory test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_l4_thread_ctx test_l4_mmu_revoke test_l4_space_map test_l4_space_switch test_l4_deferred_space_switch test_l4_base_ext_activate test_l4_thread_sid_ctx test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_mod_entry test_brew_timer test_zeetris_runner_contract zeebo_bootinfo_harness test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_jit_code_hook test_efs2_module_guard test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_save_state \
-       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
+       test_probe_registry test-txn test-intr-pc-resume test-mapcontrol-frame-resume test-threadspace-frame-resume test-exregs-frame-resume test-svc-thumb-resume test-exregs-ig-naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test-module-gate test-vic-irq test-linux-vic test-linux-keys test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0
 	./test_applet_dispatch
 	./test_applet_exec_perm
 	./test_zeetris_runner_contract
@@ -972,6 +984,8 @@ check-fast: test-clean-hygiene test-efs2apps test-gpu test-qdsp5 test-input \
 	./test_smd_bridge_bounds
 	@echo '--- bug 5/6: VIC IRQ delivery, GPT timer, ProcComm (positivo + controle negativo) ---'
 	$(MAKE) test-vic-irq
+	$(MAKE) test-linux-vic
+	$(MAKE) test-linux-keys
 	$(MAKE) test-gpt-timer
 	$(MAKE) test-peripheral-bus
 	$(MAKE) test-proccomm
@@ -1035,7 +1049,7 @@ clean:
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
+.PHONY: test-linux-vic test-linux-keys all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
