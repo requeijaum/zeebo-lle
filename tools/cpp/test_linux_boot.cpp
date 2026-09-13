@@ -81,6 +81,11 @@ using zeebo_msm::TVENC_SIZE;
 using zeebo_msm::guest_read_u32;
 using zeebo_msm::guest_read_bytes;
 using zeebo_msm::arm_ls_fault_addr;
+using zeebo_msm::g_exc_vector_base;
+using zeebo_msm::PendingAbort;
+using zeebo_msm::g_pending_aborts;
+using zeebo_msm::g_abort_count;
+using zeebo_msm::on_fault_entry;
 using zeebo_msm::g_console;
 using zeebo_msm::g_uart_imr;
 using zeebo_msm::g_uart_log;
@@ -479,47 +484,10 @@ static void dump_boot_mmu_diag(uc_engine* uc) {
     std::fflush(stdout);
 }
 
-// --- Entrada de excecao ABORT (o Unicorn NAO vetoriza aborts no guest) ------
-// O hardware ARM1136, ao levar um abort, salva o CPSR em SPSR_abt, poe
-// LR_abt = PC+4 (prefetch) / PC+8 (data), muda para modo ABT e salta para o
-// vetor (0xffff000c / 0xffff0010). O Unicorn nao faz isso: o fault morre no
-// host e o handler do Linux nunca roda. Completamos o modelo da CPU aqui --
-// quem decide o destino do acesso continua sendo o do_page_fault do kernel.
-struct PendingAbort { u32 addr; u32 fsr; u32 kind; };  // kind: 0=pabt, 1=dabt
-static std::vector<PendingAbort> g_pending_aborts;
-static u32 g_abort_count = 0;
-
-static bool on_fault_entry(uc_engine* uc, uc_mem_type type, u64 addr, int size,
-                           i64 value, void* user) {
-    (void)size; (void)value; (void)user;
-    const bool is_fetch = (type == UC_MEM_FETCH_UNMAPPED);
-    u32 cpsr = 0, pc = 0;
-    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
-    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    // FSR de translation fault em pagina; bit 10 (0x400) = escrita
-    u32 fsr = 0x7u | (is_fetch ? 0u : (type == UC_MEM_WRITE_UNMAPPED ? 0x400u : 0u));
-    g_pending_aborts.push_back({(u32)addr, fsr, is_fetch ? 0u : 1u});
-    if (g_pending_aborts.size() > 8) g_pending_aborts.erase(g_pending_aborts.begin());
-    if (++g_abort_count <= 25) {
-        std::printf("[abort] #%u %s addr=0x%08x pc=0x%08x cpsr=0x%08x fsr=0x%x\n",
-                    g_abort_count, is_fetch ? "PABT" : "DABT", (u32)addr, pc, cpsr, fsr);
-        std::fflush(stdout);
-    }
-    if (g_abort_count > 20000u) {
-        std::printf("[abort] limite de faults (20000) atingido; parando\n");
-        uc_emu_stop(uc);
-        return true;
-    }
-    // Entrada de excecao do hardware: CPSR -> SPSR_abt, modo ABT, I=F=1, PC=vetor
-    u32 lr_ret = pc + (is_fetch ? 4u : 8u);
-    u32 abt_cpsr = (cpsr & ~0x3fu) | 0x17u | 0x80u | 0x40u;
-    uc_reg_write(uc, UC_ARM_REG_CPSR, &abt_cpsr);
-    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
-    uc_reg_write(uc, UC_ARM_REG_LR, &lr_ret);
-    u32 vec = 0xffff0000u + (is_fetch ? 0x0cu : 0x10u);
-    uc_reg_write(uc, UC_ARM_REG_PC, &vec);
-    return true;   // o acesso foi "tratado": retomamos no vetor
-}
+// A ENTRADA DE EXCECAO (SPSR_abt, modo ABT, PC=vetor) agora vive em
+// zeebo_msm_soc.h, junto com o vetor configuravel (`g_exc_vector_base`): o Linux usa
+// vetores altos, um SO com V=0 usa 0x00000000. Este arquivo mantem o dispatcher de
+// fault/interrupcao e as sondas dele (que sao Linux-especificas).
 
 // Unicorn NAO entrega excecoes do guest ao vetor do guest (provado no vec-test):
 // UDF -> UC_ERR_INSN_INVALID, SVC -> UC_ERR_EXCEPTION, abort -> INTR sem saltar
