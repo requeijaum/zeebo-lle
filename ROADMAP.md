@@ -1050,19 +1050,48 @@ GPT/DGT, VIC, MDP, UART e EHCI de uma vez.
   e o hub enumera um dispositivo high-speed
   (`usb 1-1: new high-speed USB device number 2`).
 
-**Pendente (critério da fase)**: enumerar o **teclado HID**. O hub para em
-`device descriptor read/64, error -110` porque falta o motor de transferência:
-executar os qTD da lista assíncrona (status/bytes de volta), levantar
-`USBSTS.USBINT` e entregar a IRQ 47 (`INT_USB_HS` — o VIC hoje só entrega IRQs 0-31,
-e os dois pontos a mudar estão mapeados no doc de patches), mais os descritores do
-HID (device/config/report) e o endpoint de interrupção para as teclas.
+**Atualização de 2026-09-13.** Três causas foram medidas e corrigidas, e uma
+quarta se revelou falsa:
+
+- **VIC de 64 linhas** — o seletor varria só a palavra 0, então *nenhuma* IRQ >= 32
+  era entregável (a 47 inclusive). Corrigido, com auto-teste `ZEEBO_VIC_TEST=1` e
+  controle negativo que reprova o seletor antigo. A IRQ 47 hoje **chega ao guest**.
+- **`dma_mask` do `msm_device_hsusb`** — o platform_device só define
+  `coherent_dma_mask`; com `dma_mask` NULL o `usb_create_hcd` marca `uses_dma=0` e o
+  HCD monta os qTD **sem mapear buffer** (`hw_buf[0]=0`). Não havia pacote SETUP
+  para o controlador ler. Corrigido no probe.
+- **Motor de qTD** — implementado (`usb_engine_run`): executa a lista assíncrona,
+  serve os control transfers de um teclado HID boot-protocol, completa o token e
+  levanta `USBSTS.USBINT`. Com isso completam **device descriptor**, **SET_ADDRESS**,
+  os **strings** (o guest imprime `idVendor=1827`, `Manufacturer: Zeebo-L`) e o
+  **cabeçalho (9 B) do config descriptor**.
+- **A "flakiness do fbcon" NÃO EXISTE** — era instrumento mentindo: o probe da
+  `pseudo_palette` lia um VA de kernel antigo (`0xc03f45d4` em vez de `0xc05b36b4`)
+  e imprimia um ponteiro repetido 16x. A paleta sempre esteve correta. O mesmo
+  valia para a tabela `kDraw[]` (daí `cfb_imageblit=0` com `fbcon_putcs=60`).
+
+**Pendente (critério da fase)**: o **config descriptor completo** (34 B) ainda
+estoura em `-110` — o SETUP dele nunca chega ao motor, o que aponta para a janela em
+que o HCD desliga `USBCMD.ASE` ao relinkar, ou para o avanço do overlay a partir de
+`hw_current`, que o hardware real faz e o modelo não. Depois disso faltam o endpoint
+de interrupção e o bind do `usbhid`. **O EHCI está fora por padrão** até lá
+(`ZEEBO_USB=1` religa), porque ligado ele re-tenta em laço e polui o console.
+
+**Relógio de parede validado**: `date +%s` vai de 44 a 48 atravessando um `sleep 2`,
+`/proc/uptime` 49.53 — GPT/DGT estão sadios.
+
+**Lição que vale para todo o projeto**: VA de símbolo de kernel em código de
+instrumento **apodrece a cada rebuild**. Os três pontos (`PP`, `kDraw[]`,
+`fontdata_8x16`) agora carregam o `grep` do `System.map` que os reconfere, e o
+decodificador de FB tem guard que avisa quando o VA da fonte deixa de fazer sentido.
 
 Documentação: `docs/linux-boot.md`. Patches de kernel e o mapa do EHCI:
 `testdata/kernel-patches/`.
 
 **Política de branch (decisão de 2026-09-13)**: este trabalho fica na branch
 `linux-boot`, separado da `master`, **até os problemas em aberto da fase estarem
-resolvidos** (hoje: o HID; ver também a flakiness do fbcon). Só depois se discute
+resolvidos** (hoje: só o HID — a flakiness do fbcon era um instrumento com VA
+podre, não um defeito do driver). Só depois se discute
 integrar na `master`. A `master` segue como a linha do boot de firmware/BREW.
 
 ---

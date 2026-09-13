@@ -115,9 +115,29 @@ está ligada — por isso os periféricos são modelados por PA (e não pelo VA)
 ## Branch e próximos passos
 
 **Este trabalho vive na branch `linux-boot`** (decisão de 2026-09-13), separado da
-`master`, **até os problemas em aberto estarem resolvidos** — hoje o teclado HID e a
-flakiness do fbcon. Só depois se discute integrar. A `master` segue como a linha do
-boot de firmware/BREW.
+`master`, **até os problemas em aberto estarem resolvidos** — hoje só o teclado HID.
+Só depois se discute integrar. A `master` segue como a linha do boot de firmware/BREW.
+
+### Armadilha: VA de símbolo de kernel em instrumento
+
+Os instrumentos que leem estruturas do kernel por endereço fixo (`pseudo_palette`,
+a tabela `kDraw[]` de contadores de desenho, `fontdata_8x16`) **apodrecem a cada
+rebuild** — o símbolo muda de lugar e o instrumento passa a ler memória qualquer,
+*sem falhar*. Isso já custou um bug fantasma: a "flakiness do fbcon" (texto preto
+não-determinístico) era o probe da paleta lendo o VA de um kernel anterior e
+imprimindo um ponteiro; a paleta sempre esteve correta. O mesmo valia para
+`cfb_imageblit=0` com `fbcon_putcs=60`.
+
+Regra: todo VA desses vem com o `grep` do `System.map` que o reconfere, ao lado da
+constante. Reconferir depois de **todo** rebuild do kernel:
+
+```sh
+grep -E ' (PP|fontdata_8x16|cfb_imageblit|fbcon_putcs|bit_putcs|fbcon_init|fbcon_switch|cfb_fillrect)$' \
+  /work/k6/linux-3.4.113/System.map
+```
+
+O decodificador de FB tem guard (`fb_font_looks_sane`) que avisa quando o VA da
+fonte deixa de fazer sentido, em vez de desenhar lixo silenciosamente.
 
 Depois que o Linux estiver OK, a continuação planejada é a **Fase 17 do ROADMAP:
 bootar outros sistemas operacionais** neste mesmo harness (Linux 2.6.29 do período,

@@ -1,0 +1,16 @@
+--- a/drivers/usb/host/ehci-msm.c
++++ b/drivers/usb/host/ehci-msm.c
+@@ -113,6 +113,13 @@
+ 
+ 	dev_dbg(&pdev->dev, "ehci_msm proble\n");
+ 
++	/* LLE: o platform_device do hsusb so' define coherent_dma_mask; dma_mask fica
++	 * NULL. usb_create_hcd le' dev->dma_mask para decidir hcd->self.uses_dma, e com
++	 * NULL o HCD monta os qTD sem mapear os buffers (hw_buf[0] = 0) -- o controlador
++	 * nao tem de onde ler o pacote SETUP. Apontar dma_mask para o mask coerente. */
++	if (!pdev->dev.dma_mask)
++		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
++
+ 	hcd = usb_create_hcd(&msm_hc_driver, &pdev->dev, dev_name(&pdev->dev));
+ 	if (!hcd) {
+ 		dev_err(&pdev->dev, "Unable to create HCD\n");

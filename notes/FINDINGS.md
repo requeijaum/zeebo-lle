@@ -1837,3 +1837,67 @@ executar os qTD da lista assíncrona (status/bytes de volta, `USBSTS.USBINT`) �
 entrega da IRQ 47 (`INT_USB_HS`; o VIC só entrega IRQs 0-31, com os dois pontos a mudar
 já mapeados em `testdata/kernel-patches/usb-ehci-msm.md`), mais os descritores do HID
 (device/config/report) e o endpoint de interrupção.
+
+## 2026-09-13 — `linux-boot`: VIC de 64 linhas, `dma_mask` do hsusb, e dois bugs fantasma de instrumento
+
+### 1. O seletor do VIC nao enxergava metade das IRQs (bug real)
+`vic_pick_irq()` e o despacho do loop principal liam so' `g_vic_pending[0]`/
+`g_vic_en[0]`. O MSM7201A tem **64 linhas** em duas palavras, entao qualquer IRQ
+>= 32 era literalmente inespera'vel — inclusive a **47 (`INT_USB_HS`)**. Nenhuma
+quantidade de conserto no modelo de EHCI ia funcionar enquanto isso valesse.
+Corrigido nos dois pontos, preservando o round-robin.
+
+Segundo defeito no mesmo caminho: `VIC_OFF_CLEAR0+4` (ack da palavra 1) nao
+limpava `g_irq_in_service`, entao a **primeira** IRQ alta entregue travava todas
+as seguintes.
+
+Auto-teste `ZEEBO_VIC_TEST=1`, 6 casos, com **controle negativo**: uma
+reimplementacao do seletor word-0-only devolve `NO_PEND` para a IRQ 47 e o teste
+reprova; o seletor novo passa 6/6. Esta' no `check-fast` como `test-linux-vic`.
+
+### 2. `dma_mask` NULL zerava os buffers dos qTD (bug real)
+O motor de qTD nao via pacote SETUP nenhum: `hw_buf[0] = 0x00000000` em todo qTD.
+Causa: o `platform_device` do hsusb (`devices-msm7x00.c`) so' define
+`coherent_dma_mask` e deixa **`dma_mask` NULL**. `usb_create_hcd()` le'
+`dev->dma_mask` para decidir `hcd->self.uses_dma`; com NULL o HCD monta os qTD
+**sem mapear buffer**, e o controlador nao tem de onde ler o SETUP. Nao era bug
+do modelo — era o driver. Patch em `testdata/kernel-patches/ehci-msm-dma-mask.patch`
+(verificado com `patch -R --dry-run` contra a arvore do container).
+
+Com isso completam: device descriptor (64 B -> 18 B), `SET_ADDRESS`, strings
+(`idVendor=1827 idProduct=2b01`, `Manufacturer: Zeebo-L`) e o **cabecalho (9 B)**
+do config descriptor. **Ainda falha** o config descriptor inteiro (34 B) com
+`-110`: o SETUP dele nunca chega ao motor. Suspeitos: a janela em que o HCD
+desliga `USBCMD.ASE` ao relinkar, ou o avanco do overlay a partir de `hw_current`
+(o HC real copia o qTD para o overlay; o modelo nao). **Parado aqui por decisao
+do usuario**; EHCI passou a ficar fora por padrao (`ZEEBO_USB=1` religa).
+
+### 3. Dois bugs FANTASMA: VA de simbolo de kernel congelado
+Esta e' a licao cara do dia. **Instrumento que le' estrutura do kernel por
+endereco fixo apodrece a cada rebuild — e falha em silencio, lendo memoria
+qualquer sem nunca dar erro.**
+
+- **"flakiness do fbcon"**: estava no ROADMAP como defeito nao-deterministico
+  (texto do console saindo preto em alguns runs). **Nao existe.** O probe lia a
+  `pseudo_palette` em `0xc03f45d4`, VA de um kernel anterior; o atual e'
+  `0xc05b36b4`. Imprimia o mesmo ponteiro 16x (`e7fddef0`) e isso *parecia* paleta
+  corrompida. A paleta sempre esteve correta: rampa RGB565 de `0x0000` a `0xffff`.
+- **`cfb_imageblit=0` com `fbcon_putcs=60`**: os 6 VAs da tabela `kDraw[]`
+  estavam todos desatualizados. Com os enderecos do #21: `imageblit=1176`,
+  `putcs=93`, `bit_putcs=93`, coerentes entre si.
+
+Mitigacoes: os tres pontos (`PP`, `kDraw[]`, `fontdata_8x16`) carregam agora, ao
+lado da constante, o `grep` do `System.map` que os reconfere; e
+`fb_decode_text` ganhou `fb_font_looks_sane()`, que avisa quando o VA da fonte
+deixa de parecer uma font em vez de desenhar lixo calado. **Controle negativo do
+guard**: com `FONT_PA` errado de proposito, o aviso dispara e o decodificador
+acusa `ink=0/0`; com o VA certo, silencio.
+
+### 4. Relogio de parede validado no guest
+`date +%s` -> 44, `sleep 2`, `date +%s` -> 48; `/proc/uptime` 49.53. GPT/DGT
+sadios ponta-a-ponta. O que faltava ao `date` era epoch de RTC, nao timer.
+
+### Metodo (para a proxima vez)
+Antes de suspeitar do modelo de hardware, **confira se o instrumento ainda esta'
+olhando para onde acha que olha**. Dois dos quatro itens abertos da fase evaporaram
+com um `grep` no `System.map`, e um deles ja' tinha virado entrada de ROADMAP.
