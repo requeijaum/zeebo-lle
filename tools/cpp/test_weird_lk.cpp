@@ -30,7 +30,9 @@
 #include <set>
 #include <vector>
 #include <cstdlib>
+#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -241,7 +243,23 @@ int main() {
         std::printf("FALHOU: uc_open\n");
         return 1;
     }
-    uc_ctl_tlb_mode(uc, UC_TLB_CPU);   // modo correto (ver CAUSA-RAIZ-CONGELAMENTO-XV6.md)
+    // Modo de TLB: o default aqui era UC_TLB_CPU (herdado da conclusao do xv6). Mas nesse modo o
+    // Unicorn nao entrega falta de memoria aos hooks -- ou seja, "aborts=0" nao e' evidencia de
+    // nada, e o instrumento fica cego justamente quando a MMU liga. Env-gated para o A/B do RCA.
+    // DEFAULT MEDIDO: UC_TLB_VIRTUAL. Em UC_TLB_CPU a imagem que faz o identity map de 4096 secoes
+    // de 1 MB e liga a MMU faz o emulador RASTEJAR (medido: toda fatia estoura os 2 s de timeout,
+    // 71 blocos distintos) enquanto em VIRTUAL ela roda instantaneo e chega a 217 blocos -- mesmo
+    // binario, so' o modo muda. A escolha antiga (CPU) foi herdada da conclusao do XV6, que e' outro
+    // guest; o runner do OKL4 tambem exige VIRTUAL. ZEEBO_TLB=cpu|virtual forca o A/B.
+    uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL);
+    if (const char* tm = std::getenv("ZEEBO_TLB")) {
+        if (std::strcmp(tm, "cpu") == 0) {
+            uc_ctl_tlb_mode(uc, UC_TLB_CPU);
+            std::printf("[lk] modo de TLB: CPU (forcado; rasteja nesta imagem)\n");
+        } else {
+            std::printf("[lk] modo de TLB: VIRTUAL\n");
+        }
+    }
 
     uc_mem_map(uc, 0x00000000u, kLowSize, UC_PROT_ALL);
     uc_mem_write(uc, kLoad, img.data(), img.size());
