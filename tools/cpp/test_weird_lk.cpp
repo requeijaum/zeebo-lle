@@ -51,11 +51,20 @@ constexpr u32 kLowSize = 16u * 1024u * 1024u;     // RAM baixa modelada (SURF: 8
 constexpr u32 kUartBases[3] = {0xa9a00000u, 0xa9b00000u, 0xa9c00000u};
 constexpr u32 kUart1 = 0xa9a00000u;               // console do Zeebo (board-zeebo.c)
 constexpr u32 kProcComm = 0x01f00000u;
+// Display do Zeebo: TV (video composto). O painel "TV" do port aponta o fbcon para ca';
+// quem leva os pixels a' tela e' o MDP/TVENC, ja' no nucleo compartilhado (MDP_BASE/TVENC_BASE).
+constexpr u32 kFbBase = 0x15000000u;
+constexpr u32 kFbW = 720u, kFbH = 480u;
+constexpr u32 kFbSize = kFbW * kFbH * 2u;
 constexpr u32 kVicBase = 0xc0000000u;
 constexpr u32 kGptBase = 0xc0100000u;
 
 // registradores da UART do MSM (iguais ao resto do modelo)
 constexpr u32 kUartSr = 0x08u, kUartTf = 0x0cu;
+
+u32 g_svc = 0;
+u32 g_svc_total = 0;
+u32 g_invalid_n = 0;
 
 std::vector<u8> read_file(const std::string& p) {
     std::vector<u8> out;
@@ -72,6 +81,7 @@ struct Estado {
     std::string console;
     u32 console_bytes_por_uart[3] = {0, 0, 0};
     u32 mmio_reads = 0, mmio_writes = 0;
+    u32 fb_writes = 0;               // escritas do guest no framebuffer (prova de desenho)
     u32 unmapped[8][3] = {{0}};      // tipo, addr, pc
     u32 n_unmapped = 0;
     bool proc_comm_stub = true;
@@ -119,9 +129,52 @@ void on_mem(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value, void
         }
         return;
     }
+    if (a >= kFbBase && a < kFbBase + kFbSize) {
+        if (write) ++st->fb_writes;
+        return;
+    }
     if ((a >= kVicBase && a < kVicBase + 0x1000u) || (a >= kGptBase && a < kGptBase + 0x1000u)) {
         write ? ++st->mmio_writes : ++st->mmio_reads;
         if (!write) { const u32 v = 0; uc_mem_write(uc, a, &v, 4); }
+    }
+}
+
+// INTR: o Unicorn NAO vetoriza (licao do xv6). SVC/abort tem de ser entregues por nos, com o
+// vetor da tabela do guest -- para o lk isso e' vetor BAIXO (start.S: "low exception vectors"),
+// entao g_exc_vector_base = 0 e o SVC entra em 0x08, DABT em 0x10, PABT em 0x0c.
+void on_intr(uc_engine* uc, u32 intno, void* ud) {
+    (void)ud;
+    if (intno != 2) return;                      // 2 = SVC
+    u32 cpsr = 0, pc = 0;
+    ++g_svc_total;
+    if (g_svc_total <= 6u) {
+        std::printf("[lk] SVC #%u em pc=0x%08x (lr=0x%08x)\n", g_svc_total,
+                    (u32)(pc = 0, uc_reg_read(uc, UC_ARM_REG_PC, &pc), pc),
+                    (u32)(uc_reg_read(uc, UC_ARM_REG_LR, &pc), pc));
+        std::fflush(stdout);
+    }
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    const u32 svc_cpsr = (cpsr & ~0x3fu) | 0x13u | 0x80u;
+    uc_reg_write(uc, UC_ARM_REG_CPSR, &svc_cpsr);
+    uc_reg_write(uc, UC_ARM_REG_SPSR, &cpsr);
+    uc_reg_write(uc, UC_ARM_REG_LR, &pc);
+    const u32 vec = zeebo_msm::g_exc_vector_base + 0x08u;
+    uc_reg_write(uc, UC_ARM_REG_PC, &vec);
+    ++g_svc;
+}
+
+// Instrucao invalida: sem isto o Unicorn devolve UC_ERR_EXCEPTION e a gente fica cego sobre o
+// que o guest tentou executar (foi o sintoma da regressao do painel TV).
+void on_insn_invalid(uc_engine* uc, void* ud) {
+    (void)ud;
+    u32 pc = 0;
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    if (g_invalid_n < 8u) {
+        u32 w = 0;
+        uc_mem_read(uc, pc, &w, 4);
+        std::printf("[lk] INSTRUCAO INVALIDA em pc=0x%08x (palavra=0x%08x)\n", pc, w);
+        ++g_invalid_n;
     }
 }
 
@@ -139,6 +192,16 @@ void on_unmapped(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value,
 }
 
 }  // namespace
+
+// Anel de PCs por BLOCO (barato, ao contrario do hook por instrucao): e' o que responde "onde"
+// quando o guest entra em laco sem excecao nem MMIO -- o sintoma exato da regressao do painel TV.
+u32 g_ring[16];
+u32 g_ring_n = 0;
+void on_block(uc_engine* uc, u64 addr, u32 size, void* ud) {
+    (void)uc; (void)size; (void)ud;
+    g_ring[g_ring_n & 15u] = (u32)addr;
+    ++g_ring_n;
+}
 
 int main() {
     const char* envp = std::getenv("ZEEBO_LK_KERNEL");
@@ -171,6 +234,9 @@ int main() {
     uc_mem_write(uc, kLoad, img.data(), img.size());
     for (u32 b : kUartBases) uc_mem_map(uc, b, 0x1000u, UC_PROT_ALL);
     uc_mem_map(uc, kProcComm, 0x1000u, UC_PROT_ALL);
+    uc_mem_map(uc, kFbBase, kFbSize, UC_PROT_ALL);
+    uc_mem_map(uc, zeebo_msm::MDP_BASE, zeebo_msm::MDP_SIZE, UC_PROT_ALL);
+    uc_mem_map(uc, zeebo_msm::TVENC_BASE, zeebo_msm::TVENC_SIZE, UC_PROT_ALL);
     uc_mem_map(uc, kVicBase, 0x1000u, UC_PROT_ALL);
     uc_mem_map(uc, kGptBase, 0x1000u, UC_PROT_ALL);
 
@@ -178,6 +244,16 @@ int main() {
     uc_hook_add(uc, &h1, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, (void*)on_mem, &st, 1, 0);
     uc_hook_add(uc, &h2, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED |
                          UC_HOOK_MEM_FETCH_UNMAPPED, (void*)on_unmapped, &st, 1, 0);
+    // O Unicorn nao vetoriza: sem estes, qualquer abort/undef/SVC mata a emulacao com
+    // UC_ERR_EXCEPTION e sem dizer o que era. O nucleo entrega o abort na tabela do guest.
+    zeebo_msm::g_exc_vector_base = 0u;      // lk usa vetores BAIXOS (start.S)
+    uc_hook_add(uc, &h2, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED |
+                         UC_HOOK_MEM_FETCH_UNMAPPED, (void*)zeebo_msm::on_fault_entry, &st, 1, 0);
+    uc_hook_add(uc, &h2, UC_HOOK_MEM_READ_PROT | UC_HOOK_MEM_WRITE_PROT |
+                         UC_HOOK_MEM_FETCH_PROT, (void*)zeebo_msm::on_fault_entry, &st, 1, 0);
+    uc_hook_add(uc, &h2, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
+    uc_hook_add(uc, &h2, UC_HOOK_INSN_INVALID, (void*)on_insn_invalid, nullptr, 1, 0);
+    uc_hook_add(uc, &h2, UC_HOOK_BLOCK, (void*)on_block, nullptr, 1, 0);
 
     // Estado inicial: pilha no topo da RAM baixa (o _start do lk nao depende disso, mas o C sim)
     u32 sp = kLowSize - 0x1000u, pc_entry = static_cast<u32>(kLoad);
@@ -193,7 +269,10 @@ int main() {
     for (;;) {
         u32 pc_now = 0;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc_now);
-        e = uc_emu_start(uc, static_cast<u64>(pc_now), 0xFFFFFFFFull, 0, kFatia);
+        // TIMEOUT por fatia (2 s): sem isto, um laco de excecao onde a contagem do Unicorn nao
+        // avanca prende a chamada para sempre -- foi o que pendurou este harness, e o mesmo risco
+        // existe no do xv6, que tambem passa 0. Com timeout, a fatia volta e a gente reporta.
+        e = uc_emu_start(uc, static_cast<u64>(pc_now), 0xFFFFFFFFull, 2000000ull, kFatia);
         if (e != UC_ERR_OK) break;
         ++fatias;
         if (fatias >= kMaxFatias) break;
@@ -203,8 +282,10 @@ int main() {
 
     u32 pc_fim = 0;
     uc_reg_read(uc, UC_ARM_REG_PC, &pc_fim);
-    std::printf("[lk] parou: %s (%d) em %d fatias; pc=0x%08x\n", uc_strerror(e), (int)e, fatias, pc_fim);
-    std::printf("[lk] MMIO: %u leituras, %u escritas\n", st.mmio_reads, st.mmio_writes);
+    std::printf("[lk] parou: %s (%d) em %d fatias; pc=0x%08x  (pc antes da fatia: 0x%08x)\n",
+                uc_strerror(e), (int)e, fatias, pc_fim, pc_ant);
+    std::printf("[lk] MMIO: %u leituras, %u escritas; aborts=%u; SVCs=%u; instrucoes invalidas=%u\n",
+                st.mmio_reads, st.mmio_writes, zeebo_msm::g_abort_count, g_svc, g_invalid_n);
     for (u32 i = 0; i < st.n_unmapped; ++i)
         std::printf("[lk] NAO MAPEADO: tipo=%u addr=0x%08x pc=0x%08x\n",
                     st.unmapped[i][0], st.unmapped[i][1], st.unmapped[i][2]);
@@ -216,6 +297,24 @@ int main() {
     std::printf("\n---- console do guest (UART do Zeebo) ----\n");
     std::fwrite(st.console.data(), 1, st.console.size(), stdout);
     std::printf("\n---- fim ----\n");
+
+    // Prova de desenho: quantos pixels nao-zero ha' no framebuffer (texto do console desenhado
+    // pelo fbcon). Nao e' OCR -- e' "o guest escreveu pixels", que e' o que o MDP/TVENC levariam
+    // a' tela.
+    u32 pixels_nao_zero = 0;
+    {
+        std::vector<u8> fb(kFbSize);
+        if (uc_mem_read(uc, kFbBase, fb.data(), fb.size()) == UC_ERR_OK) {
+            for (u32 i = 0; i + 1u < kFbSize; i += 2u)
+                if (fb[i] || fb[i + 1u]) ++pixels_nao_zero;
+        }
+    }
+    std::printf("[lk] ultimos blocos (mais antigo -> mais novo):");
+    for (u32 i = 0; i < 16u && i < g_ring_n; ++i)
+        std::printf(" %08x", g_ring[(g_ring_n - 16u + i) & 15u]);
+    std::printf("\n");
+    std::printf("[lk] framebuffer: %u escritas do guest, %u pixels nao-zero de %u\n",
+                st.fb_writes, pixels_nao_zero, kFbW * kFbH);
 
     // ORACULO: o banner tem de estar la', e na UART1 (o console do Zeebo).
     const bool tem_banner = st.console.find("welcome to lk") != std::string::npos;
