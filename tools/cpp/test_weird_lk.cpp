@@ -26,6 +26,10 @@
 // Uso:  ZEEBO_LK_KERNEL=<lk.bin> ./test_weird_lk     # 0 = passou, 1 = RED, 77 = SKIP
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
+#include <set>
+#include <vector>
+#include <cstdlib>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -197,10 +201,19 @@ void on_unmapped(uc_engine* uc, uc_mem_type type, u64 addr, int size, i64 value,
 // quando o guest entra em laco sem excecao nem MMIO -- o sintoma exato da regressao do painel TV.
 u32 g_ring[16];
 u32 g_ring_n = 0;
+u32 g_head_n = 0, g_head_max = 0;     // ZEEBO_LK_HEAD=N: imprime os N primeiros blocos (entrada do laco)
+std::set<u32> g_seen;                 // progresso INDEPENDENTE do tamanho da fatia (a metrica que faltava)
+std::vector<u32> g_ordem;             // ORDEM DE PRIMEIRA APARICAO: o fim desta lista = onde o codigo novo parou
 void on_block(uc_engine* uc, u64 addr, u32 size, void* ud) {
     (void)uc; (void)size; (void)ud;
     g_ring[g_ring_n & 15u] = (u32)addr;
     ++g_ring_n;
+    if (g_head_n < g_head_max) {
+        std::printf("[lk] bloco #%u = 0x%08x\n", g_head_n, (u32)addr);
+        ++g_head_n;
+        std::fflush(stdout);
+    }
+    if (g_seen.size() < 200000u && g_seen.insert((u32)addr).second) g_ordem.push_back((u32)addr);
 }
 
 int main() {
@@ -254,6 +267,7 @@ int main() {
     uc_hook_add(uc, &h2, UC_HOOK_INTR, (void*)on_intr, nullptr, 1, 0);
     uc_hook_add(uc, &h2, UC_HOOK_INSN_INVALID, (void*)on_insn_invalid, nullptr, 1, 0);
     uc_hook_add(uc, &h2, UC_HOOK_BLOCK, (void*)on_block, nullptr, 1, 0);
+    if (std::getenv("ZEEBO_LK_HEAD")) g_head_max = (u32)std::atoi(std::getenv("ZEEBO_LK_HEAD"));
 
     // Estado inicial: pilha no topo da RAM baixa (o _start do lk nao depende disso, mas o C sim)
     u32 sp = kLowSize - 0x1000u, pc_entry = static_cast<u32>(kLoad);
@@ -261,9 +275,15 @@ int main() {
     // ARMADILHA (custou 3 medidas no laco de fatias do xv6 e 1 na sonda): o PC TEM de ser escrito.
     uc_reg_write(uc, UC_ARM_REG_PC, &pc_entry);
 
+    const auto t0 = std::chrono::steady_clock::now();
     uc_err e = UC_ERR_OK;
     const unsigned long long kFatia = 2000000ull;
-    const int kMaxFatias = 40;
+    // Env-gated (regra da casa: instrumento temporario nao pode alterar o veredito por padrao).
+    // FATIAS: quantas fatias rodar. NOGUARD: desliga o guarda de PC amostrado -- necessario porque
+    // "PC igual no limite da fatia" sofre ALIASING: se o periodo do laco tiver relacao com o tamanho
+    // da fatia, o limite cai sempre na mesma fase e o guest parece preso estando em progresso.
+    const int kMaxFatias = std::getenv("ZEEBO_LK_FATIAS") ? std::atoi(std::getenv("ZEEBO_LK_FATIAS")) : 40;
+    const bool noguard = std::getenv("ZEEBO_LK_NOGUARD") != nullptr;
     int fatias = 0;
     u32 pc_ant = 0, preso = 0;
     for (;;) {
@@ -277,11 +297,15 @@ int main() {
         ++fatias;
         if (fatias >= kMaxFatias) break;
         // Sem progresso de PC = parou. Usar o PC (e nao a contagem) e' o medidor honesto.
-        if (pc_now == pc_ant) { if (++preso >= 3u) break; } else { pc_ant = pc_now; preso = 0; }
+        if (!noguard) {
+            if (pc_now == pc_ant) { if (++preso >= 3u) break; } else { pc_ant = pc_now; preso = 0; }
+        }
     }
 
     u32 pc_fim = 0;
     uc_reg_read(uc, UC_ARM_REG_PC, &pc_fim);
+    const double segs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("[lk] tempo: %.1f s\n", segs);
     std::printf("[lk] parou: %s (%d) em %d fatias; pc=0x%08x  (pc antes da fatia: 0x%08x)\n",
                 uc_strerror(e), (int)e, fatias, pc_fim, pc_ant);
     std::printf("[lk] MMIO: %u leituras, %u escritas; aborts=%u; SVCs=%u; instrucoes invalidas=%u\n",
@@ -309,6 +333,11 @@ int main() {
                 if (fb[i] || fb[i + 1u]) ++pixels_nao_zero;
         }
     }
+    std::printf("[lk] blocos distintos: %u\n", (unsigned)g_seen.size());
+    std::printf("[lk] onde parou de aparecer codigo novo (ultimos 30, ordem de 1a aparicao):");
+    for (size_t i = (g_ordem.size() > 30u ? g_ordem.size() - 30u : 0u); i < g_ordem.size(); ++i)
+        std::printf(" %08x", g_ordem[i]);
+    std::printf("\n");
     std::printf("[lk] ultimos blocos (mais antigo -> mais novo):");
     for (u32 i = 0; i < 16u && i < g_ring_n; ++i)
         std::printf(" %08x", g_ring[(g_ring_n - 16u + i) & 15u]);
