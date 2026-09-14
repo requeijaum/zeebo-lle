@@ -1205,8 +1205,25 @@ conferida), não lendo notas. Matriz completa em
 Elas existem por um motivo específico: hoje esses SOs rodam nos **runners Python** de
 `zeebo_weird_os`, que **reimplementam** o MMIO — payload verde ali prova o *runner*, não o
 emulador. Cada branch traz o SO para dentro do `zeebo-lle` com gate próprio
-(`make test-weird-<os>`, **a criar** — nenhum existe ainda), oráculo derivado do binário e
-controle negativo, no padrão do `test_o3_baremetal.cpp`.
+(`make test-weird-<os>`), oráculo derivado do binário e controle negativo, no padrão do
+`test_o3_baremetal.cpp`.
+
+**Roteiro do programa, ciclo de roundtrip e critério de merge**: em
+`zeebo_weird_os/ROADMAP.md` (o repo que possui os SOs). Resumo do ciclo: cada alvo ganha uma
+branch a partir da `master`, herda o que o alvo anterior construiu **por merge — não por
+cópia**, fecha as barreiras dele com gate próprio, e só então volta para a `master`, que
+**nunca fica vermelha**. Hardware que um alvo novo precisar vira **fatia do núcleo
+compartilhado** (`tools/cpp/zeebo_msm_soc.h`), nunca cópia local.
+
+**Estado em 2026-09-13**: `weird-os/xv6` tem 5 commits sobre a `master` (`c23ccb2`) — fatias
+1–4 do núcleo (walker VA→PA, VIC, UART, entrada de exceção) + o harness
+`tools/cpp/test_weird_xv6.cpp`, que dá **PASS 4/4** de oráculo rodando o xv6 no modelo
+**real** (não no runner Python que reimplementa o MMIO). Ressalva honesta desse PASS:
+`aborts=0` e a execução terminou por **orçamento**, não por fault — o walker, o VIC, o timer
+e a entrada de exceção **ainda não são exercitados**. As outras quatro branches seguem no
+ponto de ramificação. O gate `test-weird-xv6` **não** está em agregado nenhum, de propósito:
+depende de uma imagem fora do repo, e gate que faz SKIP não pode contar como verde num tier
+que se diz verde.
 
 **O alvo nº 1 da fase não é nenhum desses**: é o **Linux 2.6.29**, o kernel do Zeebo real,
 que permite comparar o boot linha a linha com um log de hardware. Reconferido em

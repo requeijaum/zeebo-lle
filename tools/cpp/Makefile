@@ -525,7 +525,11 @@ test-zeetris-playable: test_zeetris_playable test-zeetris-playable-selftest
 # Carga de trabalho ABERTA e verificavel para exercitar os backends de CPU e GPU,
 # em contraste com o BREW/Zeetris onde silencio e ambiguo entre bug e estado
 # legitimo do jogo. L1 imagem valida / L2 CPU executa / L3 console fala.
-test_linux_boot: test_linux_boot.cpp
+# O nucleo do SoC (mapa, UART, VIC, timer, entrada de excecao e o walker VA->PA) vive
+# em zeebo_msm_soc.h, compartilhado com os harnesses dos outros SOs. A dependencia e'
+# obrigatoria: sem ela, editar o header nao recompila nada e o binario antigo faz a
+# suite parecer verde.
+test_linux_boot: test_linux_boot.cpp zeebo_msm_soc.h
 	$(CXX) $(CXXFLAGS) -DZEEBO_SDL -o $@ test_linux_boot.cpp -lunicorn -lSDL2 -lSDL2_ttf
 
 # Carga bare-metal real do TripleOxygen (blinkenlichten.bin, 244B).
@@ -544,6 +548,79 @@ test-linux-mmu-contract-selftest: test_linux_mmu_contract
 
 test_o3_baremetal: test_o3_baremetal.cpp
 	$(CXX) $(CXXFLAGS) -o $@ test_o3_baremetal.cpp -lunicorn
+
+# lk (surf-msm7k) no modelo real do MSM7x00. Fatia 1: banner na UART do Zeebo.
+# Imagem por ZEEBO_LK_KERNEL (imagem de SO nao entra no versionamento) -> sem imagem = 77 (SKIP).
+# CONTROLE NEGATIVO embutido: com ZEEBO_LK_NOPROC=1 (sem o stub do proc_comm) o lk nao pode
+# chegar ao banner; se esse caso passar, o gate esta' mentindo e o gate FALHA.
+# Fora dos agregados ate' decisao explicita de tier (mesma regra do xv6).
+# A imagem e' pequena (25 KB) e fica LOCAL; o BUILD dela e' no ryzen, porque a toolchain da era
+# (NDK r8e, gcc 4.6 EABI) foi movida para la' -- o disco deste host nao comporta 1,3 GB de toolchain:
+#   ssh ryzen "cd /mnt/200GB/lk-src && export PATH=<ndk>/arm-linux-androideabi-4.6/prebuilt/linux-x86_64/bin:$PATH && \
+#     rm -rf build-surf-test && make surf-test TOOLCHAIN_PREFIX=arm-linux-androideabi- \
+#     GLOBAL_CFLAGS=--sysroot=<ndk>/platforms/android-14/arch-arm"
+#   scp ryzen:/mnt/200GB/lk-src/build-surf-test/lk.bin ~/projects/lk-src/lk/build-surf-test/
+LK_KERNEL ?= $(HOME)/projects/lk-src/lk/build-surf-test/lk.bin
+
+test_weird_lk: test_weird_lk.cpp zeebo_msm_soc.h
+	$(CXX) $(CXXFLAGS) -o $@ test_weird_lk.cpp -lunicorn
+
+test-weird-lk: test_weird_lk
+	@echo '--- lk (surf-msm7k) no modelo real do MSM7x00 ---'
+	@out=`ZEEBO_LK_KERNEL=$(LK_KERNEL) ./test_weird_lk 2>&1`; \
+	 st=$$?; \
+	 printf '%s\n' "$$out" | tail -24; \
+	 if [ $$st -eq 77 ]; then echo 'SKIP: imagem do lk ausente'; exit 77; fi; \
+	 [ $$st -eq 0 ] || exit 1; \
+	 echo '--- controle negativo (sem stub do proc_comm) ---'; \
+	 ZEEBO_LK_NOPROC=1 ZEEBO_LK_KERNEL=$(LK_KERNEL) ./test_weird_lk >/dev/null 2>&1; \
+	 if [ $$? -eq 0 ]; then \
+	   echo 'FALHOU: o controle negativo PASSOU -- sem o stub o lk nao pode chegar ao banner'; exit 1; \
+	 fi; \
+	 echo 'OK: banner na UART do Zeebo, e o controle negativo reprova como deve'
+
+# Harness dos "weird OSes": roda um SO bare-metal no modelo REAL do SoC (UART, VIC, walker
+# VA->PA e entrada de excecao compartilhados em zeebo_msm_soc.h), nao no runner Python que
+# reimplementa o MMIO. A imagem do SO NAO e' versionada -- caminho por env, e sem imagem o
+# alvo sai 77 = SKIP (nunca SKIP=PASS).
+# Caminho ABSOLUTO de proposito: a imagem vive no repo VIZINHO (zeebo_weird_os), nao
+# dentro deste. Override: make test-weird-xv6 XV6_KERNEL=/mnt/200GB/zeebo_weird_os/...
+XV6_KERNEL ?= $(HOME)/projects/zeebo_weird_os/build/xv6-zeebo/kernel.bin
+
+test_weird_xv6: test_weird_xv6.cpp zeebo_msm_soc.h
+	$(CXX) $(CXXFLAGS) -o $@ test_weird_xv6.cpp -lunicorn
+
+# Teto 8M, nao 60M. Os 4 marcos do oraculo ja' aparecem por volta de 5M, e o gate verifica o
+# ORACULO, nao o regime permanente: 8M fecha em ~1 s e continua pegando regressao nos marcos.
+# Run profundo e' a mao, com teto maior.
+#
+# CORRECAO (rodada 6, medida): nao existe "fase 60x mais lenta". A taxa e' ESTAVEL em ~25 M
+# instrucoes/s; o que existe e' um TRAVAMENTO em ~10,6 M: o contador para de todo, com 100% de
+# um core, no *fill* de traducao de CODIGO. Causa raiz: o pgdir do processo nasce sem o mapa do
+# kernel (o port nao tem setupkvm), entao o kernel perde a propria traducao no primeiro
+# `switchuvm` e morre na primeira pagina nao cacheada -- dentro do `exec`. Ver ROADMAP do
+# zeebo_weird_os.
+test-weird-xv6: test_weird_xv6
+	@echo '--- xv6-zeebo: SO bare-metal no modelo real do MSM7201A ---'
+	@out=`ZEEBO_XV6_KERNEL=$(XV6_KERNEL) ZEEBO_BUDGET=20000000 ./test_weird_xv6 2>&1`; \
+	 st=$$?; \
+	 printf '%s\n' "$$out" | tail -18; \
+	 if [ $$st -eq 77 ]; then echo 'SKIP: imagem do xv6 ausente'; exit 77; fi; \
+	 [ $$st -eq 0 ] || exit 1; \
+	 pc=$$(printf '%s\n' "$$out" | sed -n 's/.*parou:.*pc=0x\([0-9a-f]*\).*/\1/p' | tail -1); \
+	 irq=$$(printf '%s\n' "$$out" | sed -n 's/.*IRQs entregues=\([0-9]*\).*/\1/p' | tail -1); \
+	 echo "[gate xv6] pc final=0x$$pc IRQs=$$irq"; \
+	 if [ -z "$$pc" ] || [ -z "$$irq" ]; then echo 'FALHOU: sem veredito (pc/IRQ)'; exit 1; fi; \
+	 pc8=$$(printf '%08s' "$$pc" | tr ' ' 0); \
+	 user=0; case "$$pc8" in 0*) user=1;; esac; \
+	 if [ $$user -eq 0 ]; then \
+	   echo "FALHOU: pc final 0x$$pc8 nao esta no ESPACO DE USUARIO -- o guest nunca saiu do kernel"; exit 1; \
+	 fi; \
+	 if [ $$irq -lt 10 ]; then \
+	   echo "FALHOU: apenas $$irq IRQ(s) -- o timer nao esta' entregando no usuario"; exit 1; \
+	 fi; \
+	 echo "OK: boot completo, espaco de usuario alcancado (pc=0x$$pc) e timer entregando ($$irq IRQs)"
+
 
 test-o3-baremetal: test_o3_baremetal test-o3-baremetal-selftest
 	./test_o3_baremetal || [ $$? -eq 77 ]
@@ -1078,13 +1155,13 @@ clean:
 	      test_save_state test_audio_sink test_audio_lifetime test_elf_bounds test_nand_relocator_bounds test_video_mmio test_mddi_scanout test_shared_memory test_brew_mod_entry test_jit_code_hook test_jit_fault_report test_jit_lockstep test_jit_cp15 test_jit_unaligned_ldr test_jit_cp15_reset test_jit_lost_write test_jit_unmapped_asymmetry test_jit_cp15_tlb_lockdown test_jit_ldm_usr_rfe test_vtlb_remap_asymmetry test_uc_cpu_model_order test_rex_literal_pool test_pc_rel_reg_offset test_jt_pc_load_hook test_elf_pa_load test_rodata_probe_control test_split_id_bss_clobber test_slide_detector test_control_server test_l4_mmu test_l4_mmu_uc test_l4_mmu_revoke test_l4_space_map test_l4_thread_ctx test_l4_kip_trap test_l4_mmu_txn test_l4_thread_table test_exregs_activation test_l4_ipc_msgtag test_l4_ipc_dispatch test_brew_mif test_brew_timer test_l4_space_switch test_l4_base_ext_share test_l4_base_ext_activate test_l4_thread_sid_ctx test_l4_deferred_space_switch \
 	      zeebo_zwheel_harness zeebo_efs2apps zeebo_rex_harness \
 	      zeebo_input_harness test_efs2_fs zeebo_partition zeebo_elf zeebo_boot zeebo_bootinfo_harness \
-	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_efs2_module_guard test_efs2_module_guard_mutant test_efs2_guard_real test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner test_zeetris_playable test_linux_boot test_o3_baremetal test_linux_mmu_contract test_zeetris_runner_contract *.o
+	      zeebo_lle_txn_probe test_probe_registry test_cli_paths test_intr_pc_resume test_mapcontrol_frame_resume test_threadspace_frame_resume test_exregs_frame_resume test_svc_thumb_resume test_exregs_ig_naming test_smd_bridge_bounds test_applet_dispatch test_applet_exec_perm test_module_gate test_module_gate_mutant test_vic_irq test_gpt_timer test_proccomm test_proccomm_integration test_proccomm_production_order test_peripheral_bus test_dd1a_diag test_efs2_module_guard test_efs2_module_guard_mutant test_efs2_guard_real test_zeetris_ishell test_zeetris_lifecycle test_zeetris_live_shell test_zeetris_shell_provenance test_zeetris_shell_semantics test_zeetris_full_lifecycle test_zeetris_runner test_zeetris_playable test_linux_boot test_o3_baremetal test_weird_xv6 test_linux_mmu_contract test_zeetris_runner_contract *.o
 	rm -rf testkit/build
 	rm -f test_qdsp5_doorbell_probe
 	$(MAKE) -C qdsp5 -f Makefile.qdsp5 clean
 	$(MAKE) -C gpu -f Makefile.gpu clean
 
-.PHONY: test-linux-vic test-linux-keys test-linux-hid check-linux-boot all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
+.PHONY: test-linux-vic test-linux-keys test-linux-hid check-linux-boot test-weird-xv6 all check check-fast check-firmware check-full test test-cli clean test-qdsp5-doorbell-probe clean-qdsp5-doorbell-probe test-mddi-scanout test-zeetris-lifecycle test-zeetris-runner test-zeetris-playable test-zeetris-playable-selftest test-linux-boot test-linux-boot-selftest test-o3-baremetal test-o3-baremetal-selftest test-linux-mmu-contract test-linux-mmu-contract-selftest gpu test-gpu test-qdsp5 test-zwheel test-rex test-core1 test-zwheel-preview test-efs2-zwheel test-efs2-zwheel-loop test-efs2-game-reksio test-debug-agent test-input test-efs2-fs test-bootinfo-real test-txn test-clean-hygiene test-module-gate test-vic-irq test-gpt-timer test-proccomm test-proccomm-integration test-proccomm-production-order test-peripheral-bus test-dd1a test-scan-deps test-vtbl-layout test-pc14-r0 test-zeetris-live-shell test-zeetris-shell-provenance test-zeetris-full-lifecycle test-zeetris-runner-contract test-efs2-module-guard test-efs2-guard-real
 zeebo_partition: zeebo_partition.cpp zeebo_devices.h
 	$(CXX) $(CXXFLAGS) -o $@ zeebo_partition.cpp -lunicorn
 
